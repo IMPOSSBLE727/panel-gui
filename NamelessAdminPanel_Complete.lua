@@ -25,17 +25,25 @@ local SCROLLBAR_COLOR = Color3.fromRGB(138, 43, 226)
 for _, v in pairs(PlayerGui:GetChildren()) do
     if v.Name == "NAPanel" then v:Destroy() end
 end
-if game.CoreGui:FindFirstChild("NAPanel") then
-    game.CoreGui:FindFirstChild("NAPanel"):Destroy()
-end
+pcall(function()
+    if game.CoreGui:FindFirstChild("NAPanel") then
+        game.CoreGui:FindFirstChild("NAPanel"):Destroy()
+    end
+end)
 
--- Create ScreenGui
+-- Create ScreenGui (try CoreGui first, fall back to PlayerGui)
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "NAPanel"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.DisplayOrder = 999
-ScreenGui.Parent = game.CoreGui
+local guiParent = PlayerGui
+pcall(function()
+    if game.CoreGui then
+        guiParent = game.CoreGui
+    end
+end)
+ScreenGui.Parent = guiParent
 
 -- Main Frame
 local MainFrame = Instance.new("Frame")

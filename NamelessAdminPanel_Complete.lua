@@ -99,8 +99,8 @@ end
 
 -- FLY
 addCmd({"fly", "f"}, {"fly", "Enables flight"}, function(speed)
-    localhum = getHum()
-    localroot = getRoot()
+    local hum = getHum()
+    local root = getRoot()
     if not hum or not root then return end
     speed = tonumber(speed) or 50
     local flying = true

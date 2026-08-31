@@ -263,9 +263,24 @@ local function showDetail(cmd)
     detailTitle.Text = cmd.name
     detailDesc.Text = cmd.desc
     detailUsage.Text = cmd.usage
-    argLabel.Text = "Argumentos: " .. (cmd.args ~= "" and cmd.args or "(ninguno)")
-    argBox.Text = ""
-    previewLabel.Text = "Preview: " .. cmd.name
+
+    if cmd.args ~= "" then
+        argLabel.Visible = true
+        argLabel.Text = "Argumentos: " .. cmd.args
+        argBox.Visible = true
+        argBox.Text = ""
+        previewLabel.Visible = true
+        previewLabel.Text = "Preview: " .. cmd.name .. " "
+        runBtn.Position = UDim2.new(1, -108, 1, -44)
+        backBtn.Position = UDim2.new(0, 8, 1, -44)
+    else
+        argLabel.Visible = false
+        argBox.Visible = false
+        previewLabel.Visible = false
+        runBtn.Position = UDim2.new(1, -108, 1, -44)
+        backBtn.Position = UDim2.new(0, 8, 1, -44)
+    end
+
     detailFrame.Visible = true
     scroll.Visible = false
     filterFrame.Visible = false
@@ -296,32 +311,34 @@ local function executeCommand(cmdName, args)
     end
 
     pcall(function()
-        local CoreGui = game:GetService("CoreGui")
-        local playerGui = LP:WaitForChild("PlayerGui")
+        local StarterGui = game:GetService("StarterGui")
+        StarterGui:SendCoreMessage("TypeChatMessage", {Prefix = ":", Message = fullCmd})
+    end)
 
-        local chatBar = nil
-        pcall(function() chatBar = CoreGui:FindFirstChild("Chat"):FindFirstChild("ChatBar") end)
-        if not chatBar then
-            pcall(function() chatBar = playerGui:FindFirstChild("Chat"):FindFirstChild("ChatBar") end)
-        end
-        if not chatBar then
-            pcall(function()
-                local chatFrame = playerGui:WaitForChild("Chat", 2)
-                if chatFrame then chatBar = chatFrame:FindFirstChild("ChatBar") end
-            end)
-        end
+    pcall(function()
+        local ReplicatedStorage = game:GetService("ReplicatedStorage")
+        local TextChatService = game:GetService("TextChatService")
 
-        if chatBar then
-            chatBar:CaptureFocus()
-            chatBar.Text = ":" .. fullCmd
-            task.wait(0.1)
-            game:GetService("VirtualInputManager"):SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+        if TextChatService and TextChatService.TextChannels then
+            local General = TextChatService.TextChannels:FindFirstChild("RBXGeneral")
+            if General then
+                General:SendAsync(":" .. fullCmd)
+            end
         end
     end)
 
     pcall(function()
-        if not chatBar then
-            game:GetService("StarterGui"):SetCore("ChatMessage", fullCmd)
+        local chatBar = LP.PlayerGui:FindFirstChild("Chat")
+        if chatBar then
+            chatBar = chatBar:FindFirstChild("ChatBar")
+            if chatBar then
+                chatBar:CaptureFocus()
+                chatBar.Text = ":" .. fullCmd
+                task.wait(0.05)
+                pcall(function()
+                    game:GetService("VirtualInputManager"):SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+                end)
+            end
         end
     end)
 end

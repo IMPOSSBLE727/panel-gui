@@ -310,56 +310,50 @@ local function executeCommand(cmdName, args)
         fullCmd = cmdName .. " " .. args
     end
 
-    -- Method 1: TextChatService (new chat)
+    -- Get NA prefix (default ":")
+    local prefix = ":"
+    pcall(function() prefix = opt.prefix end)
+    pcall(function() prefix = _G.opt.prefix end)
+
+    -- Method 1: Fire Chatted event directly (NA listens to this)
     pcall(function()
-        local TCS = game:GetService("TextChatService")
-        if TCS.TextChannels then
-            local ch = TCS.TextChannels:FindFirstChild("RBXGeneral")
-            if ch then
-                ch:SendAsync(":" .. fullCmd)
-                return
-            end
+        LP.Chatted:Fire(prefix .. fullCmd)
+    end)
+
+    -- Method 2: Find NA's cmdInput and type there
+    pcall(function()
+        local NAUIMANAGER = _G.NAUIMANAGER
+        if NAUIMANAGER and NAUIMANAGER.cmdInput then
+            NAUIMANAGER.cmdInput.Text = fullCmd
+            NAUIMANAGER.cmdInput:ReleaseFocus()
         end
     end)
 
-    -- Method 2: Legacy chat - find and type in chat bar
+    -- Method 3: Find the command bar GUI directly
     pcall(function()
-        local function findChatBar(parent)
+        local function findCmdInput(parent)
             for _, v in pairs(parent:GetDescendants()) do
-                if v.Name == "ChatBar" and v:IsA("TextBox") then
+                if v:IsA("TextBox") and v.Name == "cmdInput" then
                     return v
                 end
             end
             return nil
         end
-        local bar = findChatBar(game:GetService("CoreGui"))
-        if not bar then bar = findChatBar(LP:WaitForChild("PlayerGui")) end
-        if bar then
-            bar:CaptureFocus()
-            bar.Text = ":" .. fullCmd
-            task.wait(0.1)
-            pcall(function()
-                local VIM = game:GetService("VirtualInputManager")
-                VIM:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-                VIM:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-            end)
+        local input = findCmdInput(game:GetService("CoreGui"))
+        if not input then input = findCmdInput(LP:WaitForChild("PlayerGui")) end
+        if input then
+            input.Text = fullCmd
+            input:ReleaseFocus()
         end
     end)
 
-    -- Method 3: Fire Nameless Admin's own remote if it exists
+    -- Method 4: TextChatService
     pcall(function()
-        local prefix = ":"
-        pcall(function()
-            if _G.NA and _G.NA.prefix then prefix = _G.NA.prefix end
-        end)
-        pcall(function()
-            if _G.NamelessAdmin and _G.NamelessAdmin.prefix then prefix = _G.NamelessAdmin.prefix end
-        end)
-
-        local ReplicatedStorage = game:GetService("ReplicatedStorage")
-        for _, remote in pairs(ReplicatedStorage:GetDescendants()) do
-            if remote:IsA("RemoteEvent") and remote.Name:lower():find("chat") then
-                remote:FireServer(prefix .. fullCmd)
+        local TCS = game:GetService("TextChatService")
+        if TCS.TextChannels then
+            local ch = TCS.TextChannels:FindFirstChild("RBXGeneral")
+            if ch then
+                ch:SendAsync(prefix .. fullCmd)
             end
         end
     end)

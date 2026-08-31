@@ -121,6 +121,31 @@ for i, usage in ipairs(cmds) do
     b.LayoutOrder = i
     b.AutoButtonColor = false
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+    b.MouseButton1Click:Connect(function()
+        local cmdName = string.match(usage, "^%[PATCHED%]%s*(.+)")
+        if not cmdName then cmdName = string.match(usage, "^(%S+)") end
+        if cmdName then
+            for _, v in pairs(PG:GetChildren()) do
+                if v.Name == "NACmds" then v.Visible = false end
+            end
+            pcall(function()
+                game:GetService("VirtualInputManager"):SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+                task.wait(0.05)
+            end)
+            local chatBox = PG:FindFirstChild("Chat"):FindFirstChild("ChatBar")
+            if chatBox then
+                chatBox:CaptureFocus()
+                chatBox.Text = ":" .. cmdName
+                task.wait(0.05)
+                game:GetService("VirtualInputManager"):SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+            end
+            task.wait(0.3)
+            for _, v in pairs(PG:GetChildren()) do
+                if v.Name == "NACmds" then v.Visible = true end
+            end
+        end
+    end)
+
     table.insert(btns, {btn = b, usage = usage, patched = isPatched})
 end
 

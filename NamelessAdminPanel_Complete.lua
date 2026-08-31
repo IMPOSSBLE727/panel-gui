@@ -7879,6 +7879,737 @@ NAmanage.GetLogicalWindowSize = function(inst)
 	return Vector2.new(math.max(1, size.X / scaleX), math.max(1, size.Y / scaleY))
 end
 
+NAmanage.CreateNAFreecam=function()
+	const module = {}
+
+	const pi = math.pi
+	const clamp = math.clamp
+	const exp = math.exp
+	const rad = math.rad
+	const sqrt = math.sqrt
+	const tan = math.tan
+
+	local Camera = Services.Workspace.CurrentCamera
+
+	Services.Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+		if Services.Workspace.CurrentCamera then
+			Camera = Services.Workspace.CurrentCamera
+		end
+	end)
+
+	const Spring = {} do
+		Spring.__index = Spring
+
+		function Spring.new(freq, pos)
+			const self = setmetatable({}, Spring)
+			self.f = freq
+			self.p = pos
+			self.v = pos*0
+			return self
+		end
+
+		function Spring:Update(dt, goal)
+			const f = self.f*2*pi
+			const p0 = self.p
+			const v0 = self.v
+
+			const offset = goal - p0
+			const decay = exp(-f*dt)
+
+			const p1 = goal + (v0*dt - offset*(f*dt + 1))*decay
+			const v1 = (f*dt*(offset*f - v0) + v0)*decay
+
+			self.p = p1
+			self.v = v1
+
+			return p1
+		end
+
+		function Spring:SetFreq(freq)
+			self.f = freq
+		end
+
+		function Spring:Reset(pos)
+			self.p = pos
+			self.v = pos*0
+		end
+	end
+
+	local cameraPos = Vector3.new(0, 0, 0)
+	local cameraRot = Vector2.new()
+	local cameraFov = 70
+
+	const velSpring = Spring.new(1.5, Vector3.new(0, 0, 0))
+	const panSpring = Spring.new(1.0, Vector2.new())
+	const fovSpring = Spring.new(4.0, 0)
+
+	const NAV_GAIN = Vector3.new(1, 1, 1)*64
+	const FOV_GAIN = 300
+	const PITCH_LIMIT = rad(90)
+
+	const PAN_PIXELS_TO_RADIANS = rad(0.5)
+	const FOV_WHEEL_SPEED = 1.0
+	const FOV_WHEEL_SPEED_DT = FOV_WHEEL_SPEED/60
+
+	const NAV_ADJ_SPEED = 0.75
+	const NAV_MIN_SPEED = 0.01
+	const NAV_MAX_SPEED = 4.0
+	const NAV_SHIFT_MUL = 0.25
+
+	const keyboard = {
+		[Enum.KeyCode.W] = 0,
+		[Enum.KeyCode.A] = 0,
+		[Enum.KeyCode.S] = 0,
+		[Enum.KeyCode.D] = 0,
+		[Enum.KeyCode.Up] = 0,
+		[Enum.KeyCode.Down] = 0,
+	}
+
+	const function normalizeKeyName(value, fallback)
+		local key = value
+		if type(key) ~= "string" then
+			key = tostring(key or "")
+		end
+		key = key:match("^%s*(.-)%s*$") or ""
+		if key == "" then
+			key = tostring(fallback or "")
+		end
+		key = key:gsub("^Enum%.KeyCode%.", "")
+		return key
+	end
+
+	const function keyCodeFromName(value, fallback)
+		const name = normalizeKeyName(value, fallback)
+		local ok, code = pcall(function()
+			return Enum.KeyCode[name]
+		end)
+		if ok and code and code ~= Enum.KeyCode.Unknown then
+			return code
+		end
+		const lowerName = Lower(name)
+		for _, enumKey in Enum.KeyCode:GetEnumItems() do
+			if Lower(enumKey.Name) == lowerName then
+				return enumKey
+			end
+		end
+		return nil
+	end
+
+	const function getVerticalKeys()
+		const upKey = keyCodeFromName(NAStuff.FreecamUpKey, "E") or Enum.KeyCode.E
+		const downKey = keyCodeFromName(NAStuff.FreecamDownKey, "Q") or Enum.KeyCode.Q
+		return upKey, downKey
+	end
+
+	const function isFreecamKeyboardKey(keyCode)
+		if keyboard[keyCode] ~= nil then
+			return true
+		end
+		local upKey, downKey = getVerticalKeys()
+		return keyCode == upKey or keyCode == downKey
+	end
+
+	const mouse = {
+		Delta = Vector2.new(),
+		MouseWheel = 0,
+	}
+
+	local navSpeed = 1
+
+	const function zeroInput()
+		for key in keyboard do
+			keyboard[key] = 0
+		end
+		mouse.Delta = Vector2.new()
+		mouse.MouseWheel = 0
+	end
+
+	local capturing = false
+	local touchConnection = nil
+
+	const function onKeypress(_, inputState, input)
+		if input.KeyCode and isFreecamKeyboardKey(input.KeyCode) then
+			if inputState == Enum.UserInputState.Begin then
+				keyboard[input.KeyCode] = 1
+			elseif inputState == Enum.UserInputState.End then
+				keyboard[input.KeyCode] = 0
+			end
+			return Enum.ContextActionResult.Sink
+		end
+		return Enum.ContextActionResult.Pass
+	end
+
+	const function onMousePan(_, inputState, input)
+		if inputState == Enum.UserInputState.Change then
+			const delta = input.Delta
+			mouse.Delta = Vector2.new(-delta.Y, -delta.X)
+		end
+		return Enum.ContextActionResult.Sink
+	end
+
+	const function onTouchPan(_, inputState, input)
+		if inputState == Enum.UserInputState.Change then
+			const delta = input.Delta
+			mouse.Delta = Vector2.new(-delta.Y, -delta.X)
+		end
+		return Enum.ContextActionResult.Pass
+	end
+
+	const function onMouseWheel(_, inputState, input)
+		if inputState == Enum.UserInputState.Change then
+			mouse.MouseWheel = -input.Position.Z
+		end
+		return Enum.ContextActionResult.Sink
+	end
+
+	const function inputVel(dt)
+		if not IsOnMobile then
+			navSpeed = clamp(navSpeed + dt*(keyboard[Enum.KeyCode.Up] - keyboard[Enum.KeyCode.Down])*NAV_ADJ_SPEED, NAV_MIN_SPEED, NAV_MAX_SPEED)
+		end
+
+		local move = Vector3.new(0, 0, 0)
+
+		if IsOnMobile and typeof(GetCustomMoveVector) == "function" then
+			local ok, vec = pcall(GetCustomMoveVector)
+			if ok and vec and vec.Magnitude > 0 then
+				move = vec
+			end
+		else
+			local freecamUpKey, freecamDownKey = getVerticalKeys()
+			move = Vector3.new(
+				(keyboard[Enum.KeyCode.D] - keyboard[Enum.KeyCode.A]),
+				(keyboard[freecamUpKey] or 0) - (keyboard[freecamDownKey] or 0),
+				-(keyboard[Enum.KeyCode.W] - keyboard[Enum.KeyCode.S])
+			)
+		end
+
+		const shift = __lt.cm("UserInputService", "IsKeyDown", Enum.KeyCode.LeftShift) or __lt.cm("UserInputService", "IsKeyDown", Enum.KeyCode.RightShift)
+
+		return move*(navSpeed*(shift and NAV_SHIFT_MUL or 1))
+	end
+
+	const function inputPan(dt)
+		const kMouse = mouse.Delta
+		mouse.Delta = Vector2.new()
+		return kMouse
+	end
+
+	const function inputFov(dt)
+		local kMouse = mouse.MouseWheel*FOV_WHEEL_SPEED
+		if dt > 0 then
+			kMouse = (mouse.MouseWheel/dt)*FOV_WHEEL_SPEED_DT
+		end
+		mouse.MouseWheel = 0
+		return kMouse
+	end
+
+	local enabled = false
+	const storedState = {}
+
+	const function setCameraCFrame(cframe)
+		if typeof(cframe) ~= "CFrame" or not Camera then
+			return false
+		end
+
+		local x, y, _ = cframe:ToOrientation()
+		cameraPos = cframe.Position
+		cameraRot = Vector2.new(x, y)
+		cameraFov = Camera.FieldOfView
+		velSpring:Reset(Vector3.new())
+		panSpring:Reset(Vector2.new())
+		fovSpring:Reset(0)
+		zeroInput()
+		Camera.CFrame = cframe
+		Camera.Focus = cframe
+		return true
+	end
+
+	const function stepFreecam(dt)
+		if not Camera then
+			return
+		end
+
+		const vel = inputVel(dt)
+		const pan = inputPan(dt)
+		const fovStep = inputFov(dt)
+
+		const zoomFactor = sqrt(tan(rad(70/2))/tan(rad(cameraFov/2)))
+		cameraFov = clamp(cameraFov + fovStep*FOV_GAIN*(dt/zoomFactor), 1, 120)
+
+		cameraRot = cameraRot + pan*(PAN_PIXELS_TO_RADIANS/zoomFactor)
+		cameraRot = Vector2.new(clamp(cameraRot.X, -PITCH_LIMIT, PITCH_LIMIT), cameraRot.Y%(2*pi))
+
+		const cf = CFrame.new(cameraPos)*CFrame.fromOrientation(cameraRot.X, cameraRot.Y, 0)*CFrame.new(vel*NAV_GAIN*dt)
+
+		cameraPos = cf.Position
+
+		Camera.CFrame = cf
+		Camera.Focus = cf
+		Camera.FieldOfView = cameraFov
+	end
+
+	function module.Start(initialSpeed, initialCFrame)
+		if enabled or not Camera then
+			return
+		end
+
+		enabled = true
+
+		if initialSpeed ~= nil then
+			const scaled = tonumber(initialSpeed)
+			if scaled then
+				navSpeed = clamp(scaled, NAV_MIN_SPEED, NAV_MAX_SPEED)
+			end
+		end
+
+		storedState.cameraType = Camera.CameraType
+		storedState.cameraCFrame = Camera.CFrame
+		storedState.cameraFocus = Camera.Focus
+		storedState.cameraFov = Camera.FieldOfView
+		storedState.mouseIconEnabled = Services.UserInputService.MouseIconEnabled
+		storedState.mouseBehavior = Services.UserInputService.MouseBehavior
+
+		const cframe = typeof(initialCFrame) == "CFrame" and initialCFrame or Camera.CFrame
+		setCameraCFrame(cframe)
+
+		Camera.CameraType = Enum.CameraType.Fixed
+		Services.UserInputService.MouseIconEnabled = false
+		Services.UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+
+		if not capturing and Services.ContextActionService then
+			const freecamKeyboardAction = NAmanage.GetSessionActionName("FreecamKeyboard")
+			const freecamMousePanAction = NAmanage.GetSessionActionName("FreecamMousePan")
+			const freecamMouseWheelAction = NAmanage.GetSessionActionName("FreecamMouseWheel")
+			local freecamUpKey, freecamDownKey = getVerticalKeys()
+			capturing = true
+			__lt.cm("ContextActionService", "BindActionAtPriority", freecamKeyboardAction, onKeypress, false, Enum.ContextActionPriority.High.Value,
+				Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D,
+				freecamUpKey, freecamDownKey,
+				Enum.KeyCode.Up, Enum.KeyCode.Down
+			)
+			__lt.cm("ContextActionService", "BindActionAtPriority", freecamMousePanAction, onMousePan, false, Enum.ContextActionPriority.High.Value, Enum.UserInputType.MouseMovement)
+			__lt.cm("ContextActionService", "BindActionAtPriority", freecamMouseWheelAction, onMouseWheel, false, Enum.ContextActionPriority.High.Value, Enum.UserInputType.MouseWheel)
+		end
+
+		if IsOnMobile and not touchConnection then
+			touchConnection = Services.UserInputService.InputChanged:Connect(function(input, gameProcessed)
+				if input.UserInputType ~= Enum.UserInputType.Touch then
+					return
+				end
+				if gameProcessed then
+					return
+				end
+				if input.UserInputState ~= Enum.UserInputState.Change then
+					return
+				end
+				const delta = input.Delta
+				mouse.Delta = Vector2.new(-delta.Y, -delta.X)
+			end)
+		end
+
+		const freecamRenderBind = NAmanage.GetSessionActionName("FreecamRenderStep")
+		__lt.cm("RunService", "BindToRenderStep", freecamRenderBind, Enum.RenderPriority.Camera.Value, stepFreecam)
+	end
+
+	function module.Stop()
+		if not enabled then
+			return
+		end
+
+		enabled = false
+		const freecamRenderBind = NAmanage.GetSessionActionName("FreecamRenderStep")
+		__lt.cm("RunService", "UnbindFromRenderStep", freecamRenderBind)
+
+		if capturing and Services.ContextActionService then
+			const freecamKeyboardAction = NAmanage.GetSessionActionName("FreecamKeyboard")
+			const freecamMousePanAction = NAmanage.GetSessionActionName("FreecamMousePan")
+			const freecamMouseWheelAction = NAmanage.GetSessionActionName("FreecamMouseWheel")
+			capturing = false
+			__lt.cm("ContextActionService", "UnbindAction", freecamKeyboardAction)
+			__lt.cm("ContextActionService", "UnbindAction", freecamMousePanAction)
+			__lt.cm("ContextActionService", "UnbindAction", freecamMouseWheelAction)
+		end
+
+		if touchConnection then
+			touchConnection:Disconnect()
+			touchConnection = nil
+		end
+
+		zeroInput()
+
+		if Camera and storedState.cameraType then
+			Camera.CameraType = storedState.cameraType
+			Camera.CFrame = storedState.cameraCFrame
+			Camera.Focus = storedState.cameraFocus
+			Camera.FieldOfView = storedState.cameraFov
+		end
+
+		if storedState.mouseIconEnabled ~= nil then
+			Services.UserInputService.MouseIconEnabled = storedState.mouseIconEnabled
+		end
+		if storedState.mouseBehavior ~= nil then
+			local behavior = storedState.mouseBehavior
+			if behavior == Enum.MouseBehavior.LockCenter then
+				behavior = Enum.MouseBehavior.Default
+			end
+			Services.UserInputService.MouseBehavior = behavior
+		end
+	end
+
+	function module.SetCFrame(cframe)
+		if not enabled then
+			return false
+		end
+		return setCameraCFrame(cframe)
+	end
+
+	function module.SetSpeed(newSpeed)
+		const scaled = tonumber(newSpeed)
+		if scaled then
+			navSpeed = clamp(scaled, NAV_MIN_SPEED, NAV_MAX_SPEED)
+		end
+	end
+
+	function module.Toggle(initialSpeed)
+		if enabled then
+			module.Stop()
+		else
+			module.Start(initialSpeed)
+		end
+	end
+
+	function module.IsEnabled()
+		return enabled
+	end
+
+	const FREECAM_MACRO_KEYS = { Enum.KeyCode.LeftShift, Enum.KeyCode.P }
+
+	const function checkMacro()
+		for i = 1, #FREECAM_MACRO_KEYS - 1 do
+			if not __lt.cm("UserInputService", "IsKeyDown", FREECAM_MACRO_KEYS[i]) then
+				return
+			end
+		end
+
+		if _na_env.NAFreecamKeybindEnabled ~= true then
+			return
+		end
+
+		module.Toggle()
+	end
+
+	if Services.ContextActionService then
+		const freecamToggleAction = NAmanage.GetSessionActionName("FreecamToggleKey")
+		__lt.cm("ContextActionService", "BindActionAtPriority", freecamToggleAction, function(_, state, input)
+			if state == Enum.UserInputState.Begin and input.KeyCode == FREECAM_MACRO_KEYS[#FREECAM_MACRO_KEYS] then
+				checkMacro()
+			end
+			return Enum.ContextActionResult.Pass
+		end, false, Enum.ContextActionPriority.Low.Value, FREECAM_MACRO_KEYS[#FREECAM_MACRO_KEYS])
+	end
+
+	return module
+end
+
+const NAFreecam = NAmanage.CreateNAFreecam()
+
+--[[ legacy NAFreecam implementation (disabled)
+local NAFreecam = {}
+do
+	local pi = math.pi
+	local clamp = math.clamp
+	local exp = math.exp
+	local rad = math.rad
+	local sqrt = math.sqrt
+	local tan = math.tan
+
+	local Camera = Workspace.CurrentCamera
+
+	Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+		if Workspace.CurrentCamera then
+			Camera = Workspace.CurrentCamera
+		end
+	end)
+
+	local Spring = {} do
+		Spring.__index = Spring
+
+		function Spring.new(freq, pos)
+			local self = setmetatable({}, Spring)
+			self.f = freq
+			self.p = pos
+			self.v = pos*0
+			return self
+		end
+
+		function Spring:Update(dt, goal)
+			local f = self.f*2*pi
+			local p0 = self.p
+			local v0 = self.v
+
+			local offset = goal - p0
+			local decay = exp(-f*dt)
+
+			local p1 = goal + (v0*dt - offset*(f*dt + 1))*decay
+			local v1 = (f*dt*(offset*f - v0) + v0)*decay
+
+			self.p = p1
+			self.v = v1
+
+			return p1
+		end
+
+		function Spring:SetFreq(freq)
+			self.f = freq
+		end
+
+		function Spring:Reset(pos)
+			self.p = pos
+			self.v = pos*0
+		end
+	end
+
+	local cameraPos = Vector3.new(0, 0, 0)
+	local cameraRot = Vector2.new()
+	local cameraFov = 70
+
+	local velSpring = Spring.new(1.5, Vector3.new(0, 0, 0))
+	local panSpring = Spring.new(1.0, Vector2.new())
+	local fovSpring = Spring.new(4.0, 0)
+
+	local NAV_GAIN = Vector3.new(1, 1, 1)*64
+	local PAN_GAIN = Vector2.new(0.75, 1)*8
+	local FOV_GAIN = 300
+	local PITCH_LIMIT = rad(90)
+
+	local DEFAULT_FPS = 60
+	local PAN_MOUSE_SPEED = Vector2.new(1, 1)*(pi/64)
+	local PAN_MOUSE_SPEED_DT = PAN_MOUSE_SPEED/DEFAULT_FPS
+	local FOV_WHEEL_SPEED = 1.0
+	local FOV_WHEEL_SPEED_DT = FOV_WHEEL_SPEED/DEFAULT_FPS
+
+	local NAV_ADJ_SPEED = 0.75
+	local NAV_MIN_SPEED = 0.01
+	local NAV_MAX_SPEED = 4.0
+	local NAV_SHIFT_MUL = 0.25
+
+	local keyboard = {
+		[Enum.KeyCode.W] = 0,
+		[Enum.KeyCode.A] = 0,
+		[Enum.KeyCode.S] = 0,
+		[Enum.KeyCode.D] = 0,
+		[Enum.KeyCode.Q] = 0,
+		[Enum.KeyCode.E] = 0,
+		[Enum.KeyCode.Up] = 0,
+		[Enum.KeyCode.Down] = 0,
+	}
+
+	local mouse = {
+		Delta = Vector2.new(),
+		MouseWheel = 0,
+	}
+
+	local navSpeed = 1
+
+	local function zeroInput()
+		for key in keyboard do
+			keyboard[key] = 0
+		end
+		mouse.Delta = Vector2.new()
+		mouse.MouseWheel = 0
+	end
+
+	local capturing = false
+
+	local function onKeypress(_, inputState, input)
+		if input.KeyCode and keyboard[input.KeyCode] ~= nil then
+			if inputState == Enum.UserInputState.Begin then
+				keyboard[input.KeyCode] = 1
+			elseif inputState == Enum.UserInputState.End then
+				keyboard[input.KeyCode] = 0
+			end
+			return Enum.ContextActionResult.Sink
+		end
+		return Enum.ContextActionResult.Pass
+	end
+
+	local function onMousePan(_, inputState, input)
+		if inputState == Enum.UserInputState.Change then
+			local delta = input.Delta
+			mouse.Delta = Vector2.new(-delta.Y, -delta.X)
+		end
+		return Enum.ContextActionResult.Sink
+	end
+
+	local function onMouseWheel(_, inputState, input)
+		if inputState == Enum.UserInputState.Change then
+			mouse.MouseWheel = input.Position.Z
+		end
+		return Enum.ContextActionResult.Sink
+	end
+
+	local function inputVel(dt)
+		navSpeed = clamp(navSpeed + dt*(keyboard[Enum.KeyCode.Up] - keyboard[Enum.KeyCode.Down])*NAV_ADJ_SPEED, NAV_MIN_SPEED, NAV_MAX_SPEED)
+
+		local kKeyboard = Vector3.new(
+			(keyboard[Enum.KeyCode.D] - keyboard[Enum.KeyCode.A]),
+			(keyboard[Enum.KeyCode.E] - keyboard[Enum.KeyCode.Q]),
+			-(keyboard[Enum.KeyCode.W] - keyboard[Enum.KeyCode.S])
+		)
+
+		local shift = __lt.cm("UserInputService", "IsKeyDown", Enum.KeyCode.LeftShift) or __lt.cm("UserInputService", "IsKeyDown", Enum.KeyCode.RightShift)
+
+		return kKeyboard*(navSpeed*(shift and NAV_SHIFT_MUL or 1))
+	end
+
+	local function inputPan(dt)
+		local kMouse = mouse.Delta*PAN_MOUSE_SPEED
+		if dt > 0 then
+			kMouse = (mouse.Delta/dt)*PAN_MOUSE_SPEED_DT
+		end
+		mouse.Delta = Vector2.new()
+		return kMouse
+	end
+
+	local function inputFov(dt)
+		local kMouse = mouse.MouseWheel*FOV_WHEEL_SPEED
+		if dt > 0 then
+			kMouse = (mouse.MouseWheel/dt)*FOV_WHEEL_SPEED_DT
+		end
+		mouse.MouseWheel = 0
+		return kMouse
+	end
+
+	local enabled = false
+	local storedState = {}
+
+	local function stepFreecam(dt)
+		if not Camera then
+			return
+		end
+
+		local vel = velSpring:Update(dt, inputVel(dt))
+		local pan = panSpring:Update(dt, inputPan(dt))
+		local fovStep = fovSpring:Update(dt, inputFov(dt))
+
+		local zoomFactor = sqrt(tan(rad(70/2))/tan(rad(cameraFov/2)))
+		cameraFov = clamp(cameraFov + fovStep*FOV_GAIN*(dt/zoomFactor), 1, 120)
+
+		cameraRot = cameraRot + pan*PAN_GAIN*(dt/zoomFactor)
+		cameraRot = Vector2.new(clamp(cameraRot.X, -PITCH_LIMIT, PITCH_LIMIT), cameraRot.Y%(2*pi))
+
+		local cf = CFrame.new(cameraPos)*CFrame.fromOrientation(cameraRot.X, cameraRot.Y, 0)*CFrame.new(vel*NAV_GAIN*dt)
+
+		cameraPos = cf.Position
+
+		Camera.CFrame = cf
+		Camera.Focus = cf
+		Camera.FieldOfView = cameraFov
+	end
+
+	function NAFreecam.Start(initialSpeed)
+		if enabled or not Camera then
+			return
+		end
+
+		enabled = true
+
+		if initialSpeed ~= nil then
+			local scaled = tonumber(initialSpeed)
+			if scaled then
+				navSpeed = clamp(scaled, NAV_MIN_SPEED, NAV_MAX_SPEED)
+			end
+		end
+
+		storedState.cameraType = Camera.CameraType
+		storedState.cameraCFrame = Camera.CFrame
+		storedState.cameraFocus = Camera.Focus
+		storedState.cameraFov = Camera.FieldOfView
+		storedState.mouseIconEnabled = UserInputService.MouseIconEnabled
+		storedState.mouseBehavior = UserInputService.MouseBehavior
+
+		local cframe = Camera.CFrame
+		local x, y, _ = cframe:ToOrientation()
+		cameraPos = cframe.Position
+		cameraRot = Vector2.new(x, y)
+		cameraFov = Camera.FieldOfView
+
+		velSpring:Reset(Vector3.new(0, 0, 0))
+		panSpring:Reset(Vector2.new())
+		fovSpring:Reset(0)
+
+		Camera.CameraType = Enum.CameraType.Fixed
+		UserInputService.MouseIconEnabled = false
+		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+
+		if not capturing and ContextActionService then
+			local freecamKeyboardAction = NAmanage.GetSessionActionName("FreecamKeyboard")
+			local freecamMousePanAction = NAmanage.GetSessionActionName("FreecamMousePan")
+			local freecamMouseWheelAction = NAmanage.GetSessionActionName("FreecamMouseWheel")
+			capturing = true
+			__lt.cm("ContextActionService", "BindActionAtPriority", freecamKeyboardAction, onKeypress, false, Enum.ContextActionPriority.High.Value,
+				Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D,
+				Enum.KeyCode.Q, Enum.KeyCode.E,
+				Enum.KeyCode.Up, Enum.KeyCode.Down
+			)
+			__lt.cm("ContextActionService", "BindActionAtPriority", freecamMousePanAction, onMousePan, false, Enum.ContextActionPriority.High.Value, Enum.UserInputType.MouseMovement)
+			__lt.cm("ContextActionService", "BindActionAtPriority", freecamMouseWheelAction, onMouseWheel, false, Enum.ContextActionPriority.High.Value, Enum.UserInputType.MouseWheel)
+		end
+
+		local freecamRenderBind = NAmanage.GetSessionActionName("FreecamRenderStep")
+		__lt.cm("RunService", "BindToRenderStep", freecamRenderBind, Enum.RenderPriority.Camera.Value, stepFreecam)
+	end
+
+	function NAFreecam.Stop()
+		if not enabled then
+			return
+		end
+
+		enabled = false
+		local freecamRenderBind = NAmanage.GetSessionActionName("FreecamRenderStep")
+		__lt.cm("RunService", "UnbindFromRenderStep", freecamRenderBind)
+
+		if capturing and ContextActionService then
+			local freecamKeyboardAction = NAmanage.GetSessionActionName("FreecamKeyboard")
+			local freecamMousePanAction = NAmanage.GetSessionActionName("FreecamMousePan")
+			local freecamMouseWheelAction = NAmanage.GetSessionActionName("FreecamMouseWheel")
+			capturing = false
+			__lt.cm("ContextActionService", "UnbindAction", freecamKeyboardAction)
+			__lt.cm("ContextActionService", "UnbindAction", freecamMousePanAction)
+			__lt.cm("ContextActionService", "UnbindAction", freecamMouseWheelAction)
+		end
+
+		zeroInput()
+
+		if Camera and storedState.cameraType then
+			Camera.CameraType = storedState.cameraType
+			Camera.CFrame = storedState.cameraCFrame
+			Camera.Focus = storedState.cameraFocus
+			Camera.FieldOfView = storedState.cameraFov
+		end
+
+		if storedState.mouseIconEnabled ~= nil then
+			UserInputService.MouseIconEnabled = storedState.mouseIconEnabled
+		end
+		if storedState.mouseBehavior ~= nil then
+			UserInputService.MouseBehavior = storedState.mouseBehavior
+		end
+	end
+
+	function NAFreecam.Toggle(initialSpeed)
+		if enabled then
+			NAFreecam.Stop()
+		else
+			NAFreecam.Start(initialSpeed)
+		end
+	end
+
+	function NAFreecam.IsEnabled()
+		return enabled
+	end
+end
+]]
+
 const originalIO = {}
 
 originalIO.captureIO=function(name)
@@ -42178,6 +42909,3772 @@ NAmanage.LoadPlugins = function(opts)
 			return _plugPush(export, useCtx, export.Description or export.Info or export.desc)
 		end
 
+		const _plugMethods = {}
+		function _plugMethods:Command(...)
+			const cmdDef = {
+				Aliases = _plugAliases(...),
+				Info = self.Description or self.Info or "No description",
+				_na_ctx = true,
+			}
+			self._cmds[#self._cmds + 1] = cmdDef
+			self._active = cmdDef
+			return self
+		end
+		_plugMethods.command = _plugMethods.Command
+		_plugMethods.Cmd = _plugMethods.Command
+		_plugMethods.cmd = _plugMethods.Command
+		_plugMethods.AddCommand = _plugMethods.Command
+		_plugMethods.addCommand = _plugMethods.Command
+		function _plugMethods:Aliases(...)
+			if self._active then
+				const seen = {}
+				for _, alias in self._active.Aliases or {} do
+					seen[tostring(alias):lower()] = true
+				end
+				for _, alias in _plugAliases(...) do
+					_plugAddAlias(self._active.Aliases, seen, alias)
+				end
+			end
+			return self
+		end
+		_plugMethods.aliases = _plugMethods.Aliases
+		_plugMethods.Alias = _plugMethods.Aliases
+		_plugMethods.alias = _plugMethods.Aliases
+		function _plugMethods:Args(value)
+			if self._active then
+				self._active.ArgsHint = tostring(value or "")
+			end
+			return self
+		end
+		_plugMethods.args = _plugMethods.Args
+		_plugMethods.Arguments = _plugMethods.Args
+		_plugMethods.arguments = _plugMethods.Args
+		function _plugMethods:Info(value)
+			if self._active then
+				self._active.Info = tostring(value or "")
+			else
+				self.Info = tostring(value or "")
+			end
+			return self
+		end
+		_plugMethods.info = _plugMethods.Info
+		_plugMethods.Desc = _plugMethods.Info
+		_plugMethods.desc = _plugMethods.Info
+		_plugMethods.Description = _plugMethods.Info
+		_plugMethods.description = _plugMethods.Info
+		function _plugMethods:RequiresArgs(value)
+			if self._active then
+				self._active.RequiresArguments = value ~= false
+			end
+			return self
+		end
+		_plugMethods.requiresArgs = _plugMethods.RequiresArgs
+		_plugMethods.RequiresArguments = _plugMethods.RequiresArgs
+		_plugMethods.requiresArguments = _plugMethods.RequiresArgs
+		_plugMethods.NeedArgs = _plugMethods.RequiresArgs
+		_plugMethods.needArgs = _plugMethods.RequiresArgs
+		function _plugMethods:NoArgs()
+			if self._active then
+				self._active.RequiresArguments = false
+			end
+			return self
+		end
+		_plugMethods.noArgs = _plugMethods.NoArgs
+		function _plugMethods:OverrideAliases(value)
+			if self._active then
+				self._active.OverrideAliases = value ~= false
+			end
+			return self
+		end
+		_plugMethods.overrideAliases = _plugMethods.OverrideAliases
+		_plugMethods.Override = _plugMethods.OverrideAliases
+		_plugMethods.override = _plugMethods.OverrideAliases
+		_plugMethods.ReplaceExisting = _plugMethods.OverrideAliases
+		_plugMethods.replaceExisting = _plugMethods.OverrideAliases
+		_plugMethods.TakePriority = _plugMethods.OverrideAliases
+		_plugMethods.takePriority = _plugMethods.OverrideAliases
+		function _plugMethods:UserButton(spec, command, command2)
+			if self._active then
+				const opts = type(spec) == "table" and _plugCopy(spec) or { Label = spec }
+				opts.Label = opts.Label or opts.label or opts.Text or opts.text or (self._active.Aliases and self._active.Aliases[1])
+				opts.Cmd1 = opts.Cmd1 or opts.Command or opts.command or (self._active.Aliases and self._active.Aliases[1])
+				opts.Cmd2 = opts.Cmd2 or opts.Command2 or opts.command2 or command
+				NAmanage.PluginUserButtonAdd(pluginKey, baseName, opts)
+				return self
+			end
+			NAmanage.PluginUserButtonAdd(pluginKey, baseName, spec, command, command2)
+			return self
+		end
+		_plugMethods.userButton = _plugMethods.UserButton
+		_plugMethods.Button = _plugMethods.UserButton
+		_plugMethods.button = _plugMethods.UserButton
+		_plugMethods.MobileButton = _plugMethods.UserButton
+		_plugMethods.mobileButton = _plugMethods.UserButton
+		function _plugMethods:ButtonOnRun(spec)
+			if self._active then
+				const opts = type(spec) == "table" and _plugCopy(spec) or { Label = spec }
+				opts.Label = opts.Label or opts.label or opts.Text or opts.text or (self._active.Aliases and self._active.Aliases[1])
+				opts.Cmd1 = opts.Cmd1 or opts.Command or opts.command or (self._active.Aliases and self._active.Aliases[1])
+				opts.Id = opts.Id or opts.id or opts.Label
+				self._active.ButtonOnRun = opts
+			end
+			return self
+		end
+		_plugMethods.buttonOnRun = _plugMethods.ButtonOnRun
+		_plugMethods.UserButtonOnRun = _plugMethods.ButtonOnRun
+		_plugMethods.userButtonOnRun = _plugMethods.ButtonOnRun
+		_plugMethods.CreateButtonOnRun = _plugMethods.ButtonOnRun
+		_plugMethods.createButtonOnRun = _plugMethods.ButtonOnRun
+		function _plugMethods:RemoveButtonOnRun(query)
+			if self._active then
+				self._active.RemoveButtonOnRun = query or (self._active.Aliases and self._active.Aliases[1])
+			end
+			return self
+		end
+		_plugMethods.removeButtonOnRun = _plugMethods.RemoveButtonOnRun
+		_plugMethods.RemoveUserButtonOnRun = _plugMethods.RemoveButtonOnRun
+		_plugMethods.removeUserButtonOnRun = _plugMethods.RemoveButtonOnRun
+		function _plugMethods:ToggleButton(spec, offCommand)
+			const opts = type(spec) == "table" and _plugCopy(spec) or { Label = spec }
+			opts.Mode = opts.Mode or opts.mode or "toggle"
+			if self._active then
+				opts.Cmd1 = opts.Cmd1 or opts.Command or opts.command or (self._active.Aliases and self._active.Aliases[1])
+				opts.Cmd2 = opts.Cmd2 or opts.Command2 or opts.command2 or offCommand
+				NAmanage.PluginUserButtonAdd(pluginKey, baseName, opts)
+			else
+				NAmanage.PluginUserButtonAdd(pluginKey, baseName, opts)
+			end
+			return self
+		end
+		_plugMethods.toggleButton = _plugMethods.ToggleButton
+		function _plugMethods:Run(fn)
+			if self._active and type(fn) == "function" then
+				self._active.Function = fn
+				_plugPush(self._active, true, self.Description or self.Info)
+			end
+			return self
+		end
+		_plugMethods.run = _plugMethods.Run
+		_plugMethods.Callback = _plugMethods.Run
+		_plugMethods.callback = _plugMethods.Run
+		_plugMethods.Function = _plugMethods.Run
+		_plugMethods.func = _plugMethods.Run
+		function _plugMethods:End()
+			self._active = nil
+			return self
+		end
+		_plugMethods.done = _plugMethods.End
+		_plugMethods.Done = _plugMethods.End
+
+		const function _plugNew(name, desc)
+			const builder = {
+				_na_builder = true,
+				Name = tostring(name or baseName or "Plugin"),
+				Description = type(desc) == "string" and desc or nil,
+				_cmds = {},
+				_active = nil,
+			}
+			return setmetatable(builder, { __index = _plugMethods })
+		end
+
+		pluginApi = setmetatable({
+			new = _plugNew,
+			New = _plugNew,
+			create = _plugNew,
+			Create = _plugNew,
+			addUserButton = function(...)
+				return NAmanage.PluginUserButtonAdd(pluginKey, baseName, ...)
+			end,
+			AddUserButton = function(...)
+				return NAmanage.PluginUserButtonAdd(pluginKey, baseName, ...)
+			end,
+			removeUserButton = function(...)
+				return NAmanage.PluginUserButtonRemove(pluginKey, ...)
+			end,
+			RemoveUserButton = function(...)
+				return NAmanage.PluginUserButtonRemove(pluginKey, ...)
+			end,
+			clearUserButtons = function()
+				return NAmanage.PluginUserButtonRemove(pluginKey)
+			end,
+		}, {
+			__call = function(_, ...)
+				return _plugNew(...)
+			end
+		})
+
+		proxyEnv.NAPlugin = _plugNew
+		proxyEnv.plugin = _plugNew
+		proxyEnv.Plugin = pluginApi
+		proxyEnv.addUserButton = function(...)
+			return NAmanage.PluginUserButtonAdd(pluginKey, baseName, ...)
+		end
+		proxyEnv.removeUserButton = function(...)
+			return NAmanage.PluginUserButtonRemove(pluginKey, ...)
+		end
+		proxyEnv.clearUserButtons = function()
+			return NAmanage.PluginUserButtonRemove(pluginKey)
+		end
+		proxyEnv.createUserButton = proxyEnv.addUserButton
+		proxyEnv.command = function(...)
+			return _plugNew(baseName):Command(...)
+		end
+		proxyEnv.Command = proxyEnv.command
+		proxyEnv.cmdPlugin = proxyEnv.command
+
+		const pluginServices = setmetatable({}, {
+			__index = function(self, key)
+				const svc = _plugGetService(key)
+				if svc then
+					rawset(self, key, svc)
+				end
+				return svc
+			end
+		})
+
+		const function _plugSetService(globalName, serviceName)
+			const svc = proxyEnv[globalName] or _plugGetService(serviceName or globalName)
+			if svc then
+				proxyEnv[globalName] = svc
+			end
+			return svc
+		end
+
+		const function _plugApplyServiceGlobals()
+			proxyEnv.Services = proxyEnv.Services or pluginServices
+			proxyEnv.services = proxyEnv.services or pluginServices
+			proxyEnv.IsOnMobile = IsOnMobile == true
+			proxyEnv.IsOnPC = IsOnPC == true
+			proxyEnv.IsMobile = proxyEnv.IsOnMobile
+			proxyEnv.IsPC = proxyEnv.IsOnPC
+			proxyEnv.NA_GRAB_BODY = NA_GRAB_BODY
+			proxyEnv.getRoot = proxyEnv.getRoot or getRoot
+			proxyEnv.GetRoot = proxyEnv.GetRoot or getRoot
+			proxyEnv.getChar = proxyEnv.getChar or getChar
+			proxyEnv.GetChar = proxyEnv.GetChar or getChar
+			proxyEnv.getHum = proxyEnv.getHum or getHum
+			proxyEnv.GetHum = proxyEnv.GetHum or getHum
+			proxyEnv.getTorso = proxyEnv.getTorso or getTorso
+			proxyEnv.GetTorso = proxyEnv.GetTorso or getTorso
+			proxyEnv.getHead = proxyEnv.getHead or getHead
+			proxyEnv.GetHead = proxyEnv.GetHead or getHead
+			proxyEnv.PlaceId = proxyEnv.PlaceId or tonumber(rawGame and rawGame.PlaceId) or 0
+			proxyEnv.JobId = proxyEnv.JobId or tostring((rawGame and rawGame.JobId) or "")
+		end
+
+		_plugApplyServiceGlobals()
+
+		if mode == "iy" then
+			const function fetchService(name)
+				return _plugGetService(name)
+			end
+			const iyServices = setmetatable({}, {
+				__index = function(_, k)
+					return fetchService(k)
+				end
+			})
+			proxyEnv.Services = iyServices
+			proxyEnv.services = iyServices
+			const iyPlayers = _plugGetService("Players")
+			const iyUserInputService = _plugGetService("UserInputService")
+			const iyTextChatService = _plugGetService("TextChatService")
+
+			local iySplitString
+
+			const function iyGetPlayers(query, speaker)
+				const results = {}
+				if type(getPlr) ~= "function" then
+					return results
+				end
+				local ok, targets = pcall(function()
+					return getPlr(speaker, query or "")
+				end)
+				if not ok or type(targets) ~= "table" then
+					return results
+				end
+				for _, plr in targets do
+					if plr and plr.Name then
+						results[#results + 1] = plr.Name
+					end
+				end
+				return results
+			end
+			proxyEnv.getPlayersByName = iyGetPlayers
+			proxyEnv.getPlayer = iyGetPlayers
+			proxyEnv.GetPlayer = iyGetPlayers
+			proxyEnv.r15 = function(plr)
+				local target = plr
+				if not target and iyPlayers then
+					target = iyPlayers.LocalPlayer
+				end
+				const hum = target and target.Character and getPlrHum(target.Character)
+				return hum and hum.RigType == Enum.HumanoidRigType.R15
+			end
+			proxyEnv.Services = proxyEnv.Services or iyServices
+			proxyEnv.getstring = function(startIdx)
+				const args = iyCallCtx.args or {}
+				local start = tonumber(startIdx) or 1
+				if start < 1 then start = 1 end
+				const parts = {}
+				for i = start, #args do
+					parts[#parts+1] = tostring(args[i])
+				end
+				return Concat(parts, " ")
+			end
+			proxyEnv.getString = proxyEnv.getstring
+
+			const function iyIsNumber(str)
+				return tonumber(str) ~= nil
+			end
+			proxyEnv.isNumber = iyIsNumber
+			proxyEnv.isnumber = iyIsNumber
+
+			function iySplitString(str, delim)
+				const out = {}
+				str = tostring(str or "")
+				delim = tostring(delim or ",")
+				for part in string.gmatch(str, "[^"..delim.."]+") do
+					const trimmed = part:match("^%s*(.-)%s*$")
+					if trimmed and trimmed ~= "" then
+						out[#out+1] = trimmed
+					end
+				end
+				return out
+			end
+			proxyEnv.splitString = iySplitString
+
+			const function iyToClipboard(txt)
+				const payload = tostring(txt or "")
+				if typeof(setclipboard) == "function" then
+					const ok = pcall(setclipboard, payload)
+					if ok then
+						return true
+					end
+				end
+				warn("Clipboard unavailable; value: "..payload)
+				return false
+			end
+			proxyEnv.toClipboard = iyToClipboard
+			proxyEnv.toclipboard = iyToClipboard
+
+			const lp = iyPlayers and iyPlayers.LocalPlayer or nil
+			proxyEnv.Players = proxyEnv.Players or iyPlayers
+			proxyEnv.LocalPlayer = lp
+			proxyEnv.Player = lp
+			proxyEnv.lplr = lp
+			proxyEnv.Char = lp and lp.Character or nil
+			proxyEnv.Character = lp and lp.Character or nil
+			proxyEnv.PlayerGui = lp and lp:FindFirstChildWhichIsA("PlayerGui") or nil
+			proxyEnv.PlaceId = tonumber(game and game.PlaceId) or 0
+			proxyEnv.JobId = tostring((game and game.JobId) or "")
+			proxyEnv.COREGUI = _plugGetService("CoreGui")
+			proxyEnv.UserInputService = proxyEnv.UserInputService or iyUserInputService
+			proxyEnv.RunService = proxyEnv.RunService or _plugGetService("RunService")
+			proxyEnv.TweenService = proxyEnv.TweenService or _plugGetService("TweenService")
+			proxyEnv.HttpService = proxyEnv.HttpService or _plugGetService("HttpService")
+			proxyEnv.TextChatService = proxyEnv.TextChatService or iyTextChatService
+			proxyEnv.TextService = proxyEnv.TextService or _plugGetService("TextService")
+			proxyEnv.StarterGui = proxyEnv.StarterGui or _plugGetService("StarterGui")
+			proxyEnv.ReplicatedStorage = proxyEnv.ReplicatedStorage or _plugGetService("ReplicatedStorage")
+			proxyEnv.Lighting = proxyEnv.Lighting or _plugGetService("Lighting")
+			proxyEnv.ContextActionService = proxyEnv.ContextActionService or _plugGetService("ContextActionService")
+
+			const function iyMouse()
+				return NAmanage.GetMouse(lp)
+			end
+			proxyEnv.IYMouse = iyMouse()
+
+			const function iyIsOnMobile()
+				if iyUserInputService and typeof(iyUserInputService.GetPlatform) == "function" then
+					const platform = iyUserInputService:GetPlatform()
+					return platform == Enum.Platform.Android or platform == Enum.Platform.IOS
+				end
+				return iyUserInputService and iyUserInputService.TouchEnabled and not iyUserInputService.KeyboardEnabled
+			end
+			proxyEnv.IsOnMobile = iyIsOnMobile()
+			proxyEnv.IsOnPC = IsOnPC == true
+			proxyEnv.IsMobile = proxyEnv.IsOnMobile
+			proxyEnv.IsPC = proxyEnv.IsOnPC
+			proxyEnv.NA_GRAB_BODY = NA_GRAB_BODY
+
+			const function iyLegacyChat()
+				if iyTextChatService and iyTextChatService.ChatVersion then
+					return iyTextChatService.ChatVersion == Enum.ChatVersion.LegacyChatService
+				end
+				return false
+			end
+			proxyEnv.isLegacyChat = iyLegacyChat()
+
+			proxyEnv.currentVersion = proxyEnv.currentVersion or "IY-compat"
+
+			proxyEnv.getRoot = function(char)
+				if not char then
+					return nil
+				end
+				return char:FindFirstChild("HumanoidRootPart")
+					or char:FindFirstChild("Torso")
+					or char:FindFirstChild("UpperTorso")
+					or char.PrimaryPart
+			end
+
+			proxyEnv.Time = function()
+				return os.date("%X")
+			end
+
+			if not proxyEnv.buffer or type(proxyEnv.buffer.create) ~= "function" then
+				const bufShim = {}
+				bufShim.__index = bufShim
+				function bufShim.create(n)
+					return setmetatable({ len = tonumber(n) or 0, data = {} }, bufShim)
+				end
+				function bufShim.writeu8(b, idx, val)
+					if not (b and b.data) then
+						return
+					end
+					b.data[(idx or 0) + 1] = val
+				end
+				function bufShim.tostring(b)
+					if not b or not b.data then
+						return ""
+					end
+					const out = {}
+					for i = 1, b.len do
+						out[i] = string.char(b.data[i] or 0)
+					end
+					return Concat(out)
+				end
+				proxyEnv.buffer = bufShim
+			end
+		end
+
+		setmetatable(proxyEnv, {
+			__metatable = "NAPluginEnvironment",
+			__index = function(_, k)
+				if k == "loadstring" then
+					const baseLoader = baseEnv.loadstring or loadstring
+					const function collectRemoteReturn(...)
+						const first = select(1, ...)
+						if type(first) == "table" then
+							if mode == "iy" then
+								appendIYCommands(colPlugins, first)
+							else
+								_plugAppend(first, true)
+							end
+						end
+						return ...
+					end
+					return function(code, chunkname)
+						if (tonumber(NAmanage._cmdRunDepth) or 0) > 0 then
+							const src = tostring(code or "")
+							return function(...)
+								return NAmanage.RunSourceInEnv(src, chunkname or "@NAPluginRuntime", proxyEnv, collectRemoteReturn, ...)
+							end
+						end
+						local f, e = baseLoader(code, chunkname)
+						if not f then
+							return nil, e
+						end
+						setfenv(f, proxyEnv)
+						return function(...)
+							return collectRemoteReturn(f(...))
+						end
+					end
+				elseif k == "load" then
+					const baseLoad = baseEnv.load
+					if not baseLoad then return nil end
+					return function(chunk, chunkname, mode2)
+						return baseLoad(chunk, chunkname, mode2, proxyEnv)
+					end
+				elseif k == "Plugin" then
+					return pluginApi
+				elseif k == "NAPlugin" or k == "plugin" then
+					return _plugNew
+				elseif k == "command" or k == "Command" or k == "cmdPlugin" then
+					return function(...)
+						return _plugNew(baseName):Command(...)
+					end
+				elseif k == "game" then
+					return gameProxy
+				elseif k == "httprequest" or k == "request" or k == "http_request" then
+					return _pluginRequest
+				elseif k == "cmdPluginAdd" then
+					return function(v)
+						return _plugAppend(v, false)
+					end
+				end
+				const shimValue = pluginEnvShims[k]
+				if shimValue ~= nil then
+					return shimValue
+				end
+				const localValue = pluginGlobals[k]
+				if localValue == pluginNil then
+					return nil
+				end
+				if localValue ~= nil then
+					return localValue
+				end
+				if k == "LocalPlayer" or k == "Player" or k == "lplr" or k == "Speaker" or k == "speaker" then
+					const pls = _plugGetService("Players")
+					return pls and pls.LocalPlayer or nil
+				elseif k == "Char" or k == "Character" then
+					const pls = _plugGetService("Players")
+					const lp = pls and pls.LocalPlayer or nil
+					return lp and lp.Character or nil
+				elseif k == "PlayerGui" then
+					const pls = _plugGetService("Players")
+					const lp = pls and pls.LocalPlayer or nil
+					return lp and lp:FindFirstChildWhichIsA("PlayerGui") or nil
+				elseif k == "workspace" then
+					return _plugGetService("Workspace")
+				end
+				const serviceValue = pluginServices[k]
+				if serviceValue ~= nil then
+					return serviceValue
+				end
+				const serviceName = _plugServiceName(k)
+				if type(serviceName) == "string" and pluginServiceNames[serviceName] then
+					return _plugGetService(serviceName)
+				end
+				if pluginBlockedGlobals[k] then
+					return nil
+				end
+				return pluginBaseGlobals[k]
+			end,
+			__newindex = function(_, k, v)
+				if k == "cmdPluginAdd" then
+					_plugAppend(v, false)
+				else
+					pluginGlobals[k] = (v == nil) and pluginNil or v
+				end
+			end
+		})
+
+		setfenv(func, proxyEnv)
+
+		const prevSkipAdd = cmds._skipAutoSuffix
+		cmds._skipAutoSuffix = true
+		local ok, execRes = NACaller(func)
+		cmds._skipAutoSuffix = prevSkipAdd
+		if not ok then
+			DoWindow("[Plugin Error] '"..file.."' => "..tostring(execRes))
+			return
+		end
+
+		if mode == "iy" and type(execRes) == "table" then
+			appendIYCommands(colPlugins, execRes)
+		elseif mode == "na" and type(execRes) == "table" then
+			_plugAppend(execRes, true)
+		end
+
+		const cmdNames = {}
+		for _, plugin in colPlugins do
+			const aliases = plugin.Aliases
+			const handler = plugin.Function
+			if type(aliases) == "table" and type(handler) == "function" then
+				local uniqueAliases, replacedAliases, overriddenAliases = makeUniqueAliases(pluginKey, aliases, plugin.OverrideAliases == true)
+				if #uniqueAliases == 0 then
+					DoWindow("[Plugin Invalid] '"..file.."' has no usable aliases (conflicts removed)")
+				else
+					const argsHint = plugin.ArgsHint or ""
+					const formattedDisplay = formatInfo(uniqueAliases, argsHint)
+					local desc = plugin.Info or "No description"
+					const notes = {}
+					const swapNote = formatAliasSwapNote(replacedAliases)
+					const overrideNote = formatAliasOverrideNote(overriddenAliases)
+					if swapNote then
+						notes[#notes + 1] = swapNote
+					end
+					if overrideNote then
+						notes[#notes + 1] = overrideNote
+					end
+					if #notes > 0 then
+						desc = desc.." | "..Concat(notes, " | ")
+					end
+					const info = { formattedDisplay, desc }
+					const displaced = displaceCoreAliases(pluginKey, overriddenAliases)
+					const prevSkip = cmds._skipAutoSuffix
+					cmds._skipAutoSuffix = true
+					local okAdd, errAdd = pcall(cmd.add, uniqueAliases, info, handler, plugin.RequiresArguments or false)
+					cmds._skipAutoSuffix = prevSkip
+					const primaryLow = uniqueAliases[1] and type(uniqueAliases[1]) == "string" and uniqueAliases[1]:lower() or nil
+					const dataRef = primaryLow and cmds.Commands[primaryLow] or nil
+					if okAdd and dataRef then
+						AddCmdPlug(pluginKey, uniqueAliases, dataRef)
+						Insert(cmdNames, uniqueAliases[1])
+					else
+						restoreDisplacedAliases(pluginKey, displaced)
+						DoWindow("[Plugin Error] Failed to register command: "..tostring(errAdd or "command data unavailable"))
+					end
+				end
+			else
+				DoWindow("[Plugin Invalid] '"..file.."' is missing valid Aliases or Function")
+			end
+		end
+
+		if #cmdNames > 0 then
+			const fileName = file:match("[^\\/]+$") or file
+			if runMeta[pluginKey] then
+				runMeta[pluginKey].loaded = true
+				runMeta[pluginKey].commands = cmdNames
+			end
+			Insert(loadedSumm, fileName.." ("..Concat(cmdNames, ", ")..")")
+		else
+			const buttonBucket = type(NAPluginUserButtons) == "table" and NAPluginUserButtons[pluginKey] or nil
+			const buttonCount = type(buttonBucket) == "table" and type(buttonBucket.items) == "table" and #buttonBucket.items or 0
+			if buttonCount > 0 then
+				const fileName = file:match("[^\\/]+$") or file
+				if runMeta[pluginKey] then
+					runMeta[pluginKey].loaded = true
+					runMeta[pluginKey].commands = {}
+				end
+				Insert(loadedSumm, fileName.." ("..tostring(buttonCount).." button"..(buttonCount == 1 and "" or "s")..")")
+			end
+		end
+	end
+
+	const prevPluginButtonPause = NAStuff and NAStuff.PluginUserButtonRenderPaused
+	if NAStuff then
+		NAStuff.PluginUserButtonRenderPaused = true
+	end
+	for _, file in filesNA do
+		loadPluginFile(file, "na")
+	end
+	for _, file in filesIY do
+		loadPluginFile(file, "iy")
+	end
+
+	const staleKeys = {}
+	for key in NAmanage._pluginCommandRecords do
+		if not seenKeys[key] then
+			Insert(staleKeys, key)
+		end
+	end
+	for _, key in staleKeys do
+		UnplugCmd(key)
+		if NAmanage.PluginUIClear then
+			pcall(NAmanage.PluginUIClear, key)
+		end
+	end
+	NAmanage._pluginFileMeta = runMeta
+	if NAStuff then
+		NAStuff.PluginUserButtonRenderPaused = prevPluginButtonPause
+	end
+	if NAStuff and NAStuff.PluginUserButtonsDirty and NAmanage.RenderUserButtons then
+		NAStuff.PluginUserButtonsDirty = false
+		pcall(NAmanage.RenderUserButtons)
+	end
+
+	const hideStartupNotif = opts.startup == true and type(NAmanage.isStartupHidden) == "function" and NAmanage.isStartupHidden() == true
+	const allowNotif = (forceNotify == true) or ((NAmanage.jlCfg.PluginNotif ~= false) and not hideStartupNotif)
+	if #loadedSumm > 0 and allowNotif and not silent then
+		DoNotif("Loaded plugins:\n\n"..Concat(loadedSumm, "\n\n"), 5.7)
+	end
+
+	if NAgui and NAgui.loadCMDS then
+		pcall(NAgui.loadCMDS, { force = true })
+	end
+	if NAgui and NAgui.commands and NAUIMANAGER and NAUIMANAGER.commandsFrame and NAUIMANAGER.commandsFrame.Visible then
+		pcall(NAgui.commands)
+	end
+
+	return true
+end
+
+NAmanage.IsPluginCommand = function(cmdName)
+	if type(cmdName) ~= "string" then
+		return false
+	end
+	local sources = NAmanage and NAmanage._pluginCommandSources
+	if type(sources) ~= "table" then
+		sources = {}
+	end
+	const lowerName = Lower(cmdName)
+	const entry = sources[lowerName]
+	if entry then
+		if entry.data and cmds and cmds.Commands and cmds.Commands[lowerName] ~= entry.data then
+			return false
+		end
+		local pluginType
+		if type(entry.key) == "string" then
+			if entry.key:match("%.na$") then
+				pluginType = ".na"
+			elseif entry.key:match("%.iy$") then
+				pluginType = ".iy"
+			end
+		end
+		return true, pluginType, entry.key
+	end
+
+	if cmds and cmds.PluginSources and cmds.PluginSources[lowerName] then
+		const key = cmds.PluginSources[lowerName]
+		local pluginType
+		if type(key) == "string" then
+			if key:match("%.na$") then
+				pluginType = ".na"
+			elseif key:match("%.iy$") then
+				pluginType = ".iy"
+			end
+		end
+		return true, pluginType, key
+	end
+
+	return false
+end
+
+NAmanage.InitPlugs=function()
+	const lp = function(p)
+		p = (p or ""):gsub("\\","/"):gsub("/+","/")
+		return Lower(p:gsub("/+$",""))
+	end
+	const bn = function(p) return (p and p:match("[^\\/]+$")) or p end
+	const jp = function(d, n) d = d or ""; return (#d > 0) and (d.."/"..n) or n end
+	const mk = function(p) if p and #p > 0 and not isfolder(p) then makefolder(p) end end
+	const isIgnoredIY = function(p)
+		const base = bn(p)
+		return type(base) == "string" and base:lower() == "iy_fe.iy"
+	end
+	const isPluginFile = function(p)
+		const n = lp(p)
+		if isIgnoredIY(p) then
+			return false
+		end
+		return n:match("%.na$") ~= nil or n:match("%.iy$") ~= nil
+	end
+	const uniq = function(dir, fname)
+		local name, ext = fname:match("^(.*)(%.[^%.]+)$"); name, ext = name or fname, ext or ""
+		local try = jp(dir, fname); if not isfile(try) then return try end
+		local n = 1
+		while true do
+			try = jp(dir, Format("%s (%d)%s", name, n, ext))
+			if not isfile(try) then return try end
+			n += 1
+		end
+	end
+	const root = function()
+		for _, c in {"", ".", "/"} do
+			local ok, t = pcall(listfiles, c)
+			if ok and type(t) == "table" then return c end
+		end
+		return ""
+	end
+
+	const plugsDirNA = NAfiles.NAPLUGINFILEPATH
+	const plugsDirIY = NAfiles.NAIYPLUGINFILEPATH or (NAfiles.NAFILEPATH.."/PluginsIY")
+	const plugsInfo = {}
+	for _, dir in {plugsDirNA, plugsDirIY} do
+		const norm = lp(dir)
+		const tail = norm:match("([^/]+/[^/]+)$") or norm
+		Insert(plugsInfo, { norm = norm, tail = tail })
+	end
+	const inPlugs = function(path)
+		const p = lp(path)
+		for _, info in plugsInfo do
+			if p == info.norm then return true end
+			if p:sub(1, #info.norm + 1) == (info.norm.."/") then return true end
+			if p:find("/"..info.tail.."/", 1, true) then return true end
+		end
+		return false
+	end
+
+	const scan = function(startDir)
+		const out = {}
+		const function rec(dir)
+			local ok, items = pcall(listfiles, dir)
+			if not ok or type(items) ~= "table" then return end
+			for _, p in items do
+				local okd, isd = pcall(isfolder, p)
+				if okd and isd then
+					if not inPlugs(p) then rec(p) end
+				else
+					if isPluginFile(p) and not inPlugs(p) then Insert(out, p) end
+				end
+			end
+		end
+		rec(startDir)
+		return out
+	end
+	const deferPluginReload = function(loadOpts, onDone)
+		if not (NAmanage and NAmanage.LoadPlugins) then
+			return false
+		end
+		Spawn(function()
+			Wait()
+			const ok = NAmanage.LoadPlugins(loadOpts)
+			if type(onDone) == "function" then
+				pcall(onDone, ok)
+			end
+		end)
+		return true
+	end
+
+
+	NAStuff.PluginMaker = NAStuff.PluginMaker or {}
+
+	NAmanage.PluginMaker_Quote = function(value)
+		return string.format("%q", tostring(value or ""))
+	end
+
+	NAmanage.PluginMaker_Trim = function(value)
+		return tostring(value or ""):match("^%s*(.-)%s*$") or ""
+	end
+
+	NAmanage.PluginMaker_SafeFileName = function(value)
+		local name = NAmanage.PluginMaker_Trim(value)
+		name = name:gsub("[\\/:*?\"<>|]", "_"):gsub("%s+", "_"):gsub("[^%w%._%-]", "_")
+		name = name:gsub("_+", "_"):gsub("^_+", ""):gsub("_+$", "")
+		if name == "" then
+			name = "MyPlugin"
+		end
+		return name
+	end
+
+	NAmanage.PluginMaker_SplitAliases = function(value)
+		local out = {}
+		local seen = {}
+		for part in tostring(value or ""):gmatch("[^,|/]+") do
+			local alias = NAmanage.PluginMaker_Trim(part)
+			if alias ~= "" then
+				local key = alias:lower()
+				if not seen[key] then
+					seen[key] = true
+					out[#out + 1] = alias
+				end
+			end
+		end
+		return out
+	end
+
+	NAmanage.PluginMaker_DefaultCommand = function(index)
+		index = tonumber(index) or 1
+		return {
+			name = index == 1 and "hello" or ("command"..tostring(index));
+			aliases = index == 1 and "hi" or "";
+			argsHint = index == 1 and "[name]" or "";
+			description = index == 1 and "Example command made with Plugin Maker" or "Plugin command";
+			requiresArgs = false;
+			overrideAliases = false;
+			userButton = index == 1;
+			userButtonLabel = index == 1 and "Hello" or "";
+			saveButtonArgs = true;
+			customCode = "";
+			actions = index == 1 and {
+				{ type = "notify"; value = "Hello {1}!"; extra = "3" };
+			} or {
+				{ type = "notify"; value = "Command executed"; extra = "3" };
+			};
+		}
+	end
+
+	NAmanage.PluginMaker_ResetState = function()
+		local pm = NAStuff.PluginMaker
+		pm.format = "na"
+		pm.pluginName = "My Plugin"
+		pm.fileName = "MyPlugin"
+		pm.description = "Created with Nameless Admin Plugin Maker"
+		pm.commands = { NAmanage.PluginMaker_DefaultCommand(1) }
+		pm.selectedCommand = 1
+		pm.actionType = "notify"
+		pm.actionValue = ""
+		pm.actionExtra = "3"
+		pm.startupCode = ""
+		pm.codeEditTarget = nil
+		pm.selectedServices = {}
+		pm.customServices = {}
+		pm.dirty = false
+	end
+
+	NAmanage.PluginMaker_GetSelectedCommand = function()
+		local pm = NAStuff.PluginMaker
+		if type(pm.commands) ~= "table" then
+			pm.commands = {}
+		end
+		local index = math.clamp(math.floor(tonumber(pm.selectedCommand) or 1), 1, math.max(#pm.commands, 1))
+		pm.selectedCommand = index
+		return pm.commands[index], index
+	end
+
+	NAmanage.PluginMaker_TemplateHelper = function()
+		return table.concat({
+			"local function __na_pm_fill(text, args, player)";
+			"\tlocal out = tostring(text or \"\")";
+			"\tlocal parts = {}";
+			"\tfor i = 1, #(args or {}) do parts[i] = tostring(args[i]) end";
+			"\tout = out:gsub(\"{args}\", function() return table.concat(parts, \" \") end)";
+			"\tout = out:gsub(\"{user}\", function() return player and tostring(player.Name or \"\") or \"\" end)";
+			"\tout = out:gsub(\"{display}\", function() return player and tostring(player.DisplayName or \"\") or \"\" end)";
+			"\tout = out:gsub(\"{placeid}\", function() return tostring(game.PlaceId or \"\") end)";
+			"\tout = out:gsub(\"{jobid}\", function() return tostring(game.JobId or \"\") end)";
+			"\tfor i = 1, #parts do";
+			"\t\tlocal key = \"{\"..tostring(i)..\"}\"";
+			"\t\tlocal value = parts[i]";
+			"\t\tout = out:gsub(key, function() return value end)";
+			"\tend";
+			"\treturn out";
+			"end";
+		}, "\n")
+	end
+
+
+	NAmanage.PluginMaker_ServiceCatalog = {
+		"AdService";
+		"AnalyticsService";
+		"AnimationClipProvider";
+		"AnimationFromVideoCreatorService";
+		"AssetDeliveryProxy";
+		"AssetManagerService";
+		"AssetService";
+		"AvatarCreationService";
+		"AvatarEditorService";
+		"AvatarImportService";
+		"BadgeService";
+		"BrowserService";
+		"BulkImportService";
+		"CaptureService";
+		"ChangeHistoryService";
+		"Chat";
+		"CollectionService";
+		"CommerceService";
+		"ConfigService";
+		"ConfigureServerService";
+		"ContentProvider";
+		"ContextActionService";
+		"ControllerService";
+		"CookiesService";
+		"CoreGui";
+		"CoreScriptSyncService";
+		"CreatorStoreService";
+		"DataStoreService";
+		"Debris";
+		"DebugSettings";
+		"DraftsService";
+		"EditableService";
+		"ExperienceService";
+		"GamepadService";
+		"GeometryService";
+		"GroupService";
+		"GuiService";
+		"HapticService";
+		"HttpRbxApiService";
+		"HttpService";
+		"InsertService";
+		"JointsService";
+		"KeyboardService";
+		"KeyframeSequenceProvider";
+		"LanguageService";
+		"Lighting";
+		"LocalizationService";
+		"LoginService";
+		"LogService";
+		"LuaWebService";
+		"MarketplaceService";
+		"MatchmakingService";
+		"MaterialGenerationService";
+		"MaterialService";
+		"MemoryStoreService";
+		"MemStorageService";
+		"MessagingService";
+		"MicroProfilerService";
+		"MLService";
+		"ModerationService";
+		"MouseService";
+		"NetworkClient";
+		"NetworkServer";
+		"NotificationService";
+		"OpenCloudService";
+		"PackageService";
+		"PathfindingService";
+		"PermissionsService";
+		"PhysicsService";
+		"PlacesService";
+		"Players";
+		"PlayerViewService";
+		"PluginConnectionService";
+		"PluginDebugService";
+		"PluginGuiService";
+		"PluginManagementService";
+		"PluginPolicyService";
+		"PointsService";
+		"PolicyService";
+		"ProcessInstancePhysicsService";
+		"ProximityPromptService";
+		"PublishService";
+		"RbxAnalyticsService";
+		"RecommendationService";
+		"ReflectionService";
+		"RemoteCommandService";
+		"ReplicatedFirst";
+		"ReplicatedStorage";
+		"RunService";
+		"SceneAnalysisService";
+		"ScriptContext";
+		"ScriptDebuggerService";
+		"ScriptEditorService";
+		"ScriptProfilerService";
+		"ScriptService";
+		"Selection";
+		"SerializationService";
+		"ServerScriptService";
+		"ServerStorage";
+		"SessionCheckService";
+		"SmoothVoxelsUpgraderService";
+		"SocialService";
+		"SoundService";
+		"SpawnerService";
+		"StarterGui";
+		"StarterPack";
+		"StarterPlayer";
+		"StartupMessageService";
+		"Stats";
+		"StudioCaptureService";
+		"StudioDataService";
+		"StudioDeviceEmulatorService";
+		"StudioDeviceSimulatorService";
+		"StudioPublishService";
+		"StudioScreenshotCapture";
+		"StudioService";
+		"StudioTestService";
+		"TeamCreateService";
+		"Teams";
+		"TeleportService";
+		"TestService";
+		"TextBoxService";
+		"TextChatService";
+		"TextService";
+		"TimerService";
+		"TouchInputService";
+		"TweenService";
+		"UGCValidationService";
+		"UniqueIdLookupService";
+		"UserInputService";
+		"UserService";
+		"VideoCaptureService";
+		"VideoService";
+		"VirtualInputManager";
+		"VirtualUser";
+		"VoiceChatService";
+		"VRService";
+		"VRStatusService";
+		"Workspace";
+	}
+
+	NAmanage.PluginMaker_ServiceVar = function(name)
+		name = tostring(name or ""):gsub("[^%w_]", "_")
+		if name == "" then
+			return nil
+		end
+		local reserved = {
+			["and"] = true; ["break"] = true; ["do"] = true; ["else"] = true; ["elseif"] = true;
+			["end"] = true; ["false"] = true; ["for"] = true; ["function"] = true; ["if"] = true;
+			["in"] = true; ["local"] = true; ["nil"] = true; ["not"] = true; ["or"] = true;
+			["repeat"] = true; ["return"] = true; ["then"] = true; ["true"] = true; ["until"] = true;
+			["while"] = true; ["continue"] = true; ["export"] = true; ["type"] = true;
+		}
+		if name:match("^%d") or reserved[name] then
+			name = "Service_"..name
+		end
+		return name
+	end
+
+	NAmanage.PluginMaker_NormalizeServices = function()
+		local pm = NAStuff.PluginMaker
+		pm.selectedServices = type(pm.selectedServices) == "table" and pm.selectedServices or {}
+		pm.customServices = type(pm.customServices) == "table" and pm.customServices or {}
+		local clean = {}
+		for name, enabled in pm.selectedServices do
+			name = NAmanage.PluginMaker_Trim(name)
+			if enabled == true and name:match("^[%a_][%w_]*$") then
+				clean[name] = true
+			end
+		end
+		pm.selectedServices = clean
+		return clean
+	end
+
+	NAmanage.PluginMaker_GetServiceCatalog = function()
+		local pm = NAStuff.PluginMaker
+		local out, seen = {}, {}
+		local function add(name)
+			name = NAmanage.PluginMaker_Trim(name)
+			if name == "" or not name:match("^[%a_][%w_]*$") then
+				return
+			end
+			local key = name:lower()
+			if not seen[key] then
+				seen[key] = true
+				out[#out + 1] = name
+			end
+		end
+		for _, name in NAmanage.PluginMaker_ServiceCatalog do
+			add(name)
+		end
+		for _, name in pm.customServices or {} do
+			add(name)
+		end
+		pcall(function()
+			for _, child in game:GetChildren() do
+				if typeof(child) == "Instance" then
+					add(child.ClassName)
+				end
+			end
+		end)
+		table.sort(out, function(a, b)
+			local sa = pm.selectedServices and pm.selectedServices[a] == true
+			local sb = pm.selectedServices and pm.selectedServices[b] == true
+			if sa ~= sb then
+				return sa
+			end
+			return a:lower() < b:lower()
+		end)
+		return out
+	end
+
+	NAmanage.PluginMaker_GetSelectedServices = function()
+		local selected = NAmanage.PluginMaker_NormalizeServices()
+		local out = {}
+		for name, enabled in selected do
+			if enabled == true then
+				out[#out + 1] = name
+			end
+		end
+		table.sort(out, function(a, b)
+			return a:lower() < b:lower()
+		end)
+		return out
+	end
+
+	NAmanage.PluginMaker_ServicePrelude = function()
+		local selected = NAmanage.PluginMaker_GetSelectedServices()
+		local lines = {
+			"local ServiceResolver = ServiceResolver";
+			"assert(type(ServiceResolver) == \"table\", \"NA ServiceResolver unavailable\")";
+			"local __na_pm_resolve = ServiceResolver.cs or ServiceResolver.GetService or ServiceResolver.getService";
+			"local __na_pm_resolveRaw = ServiceResolver.gs or ServiceResolver.GetRawService or ServiceResolver.getRawService";
+			"assert(type(__na_pm_resolve) == \"function\" or type(__na_pm_resolveRaw) == \"function\", \"NA ServiceResolver has no resolver method\")";
+			"local Services = setmetatable({}, {";
+			"\t__index = function(self, name)";
+			"\t\tlocal service = type(__na_pm_resolve) == \"function\" and __na_pm_resolve(name) or nil";
+			"\t\tif service == nil and type(__na_pm_resolveRaw) == \"function\" then service = __na_pm_resolveRaw(name) end";
+			"\t\tif service ~= nil then rawset(self, name, service) end";
+			"\t\treturn service";
+			"\tend";
+			"})";
+		}
+		for _, serviceName in selected do
+			local varName = NAmanage.PluginMaker_ServiceVar(serviceName)
+			if varName then
+				lines[#lines + 1] = "local "..varName.." = Services["..NAmanage.PluginMaker_Quote(serviceName).."]"
+			end
+		end
+		if NAStuff.PluginMaker.selectedServices and NAStuff.PluginMaker.selectedServices.Players == true then
+			lines[#lines + 1] = "local LocalPlayer = Players and Players.LocalPlayer or nil"
+		end
+		return table.concat(lines, "\n")
+	end
+
+	NAmanage.PluginMaker_AppendRaw = function(lines, code, indent)
+		if type(lines) ~= "table" then
+			return
+		end
+		code = tostring(code or "")
+		if code == "" then
+			return
+		end
+		indent = tostring(indent or "")
+		for line in (code.."\n"):gmatch("(.-)\n") do
+			lines[#lines + 1] = indent..line
+		end
+	end
+
+	NAmanage.PluginMaker_IYContextLines = function()
+		return {
+			"\t\t\t\tlocal ctx = {";
+			"\t\t\t\t\tLocalPlayer = player;";
+			"\t\t\t\t\tPlayer = player;";
+			"\t\t\t\t\tServices = Services;";
+			"\t\t\t\t\tServiceResolver = ServiceResolver;";
+			"\t\t\t\t\tIsOnMobile = IsOnMobile == true;";
+			"\t\t\t\t\tIsOnPC = IsOnPC == true;";
+			"\t\t\t\t}";
+			"\t\t\t\tctx.notify = function(_, message, duration)";
+			"\t\t\t\t\tif type(notify) == \"function\" then return notify(message, duration) end";
+			"\t\t\t\t\tif type(DoNotif) == \"function\" then return DoNotif(message, duration) end";
+			"\t\t\t\tend";
+			"\t\t\t\tctx.run = function(_, ...)";
+			"\t\t\t\t\tif type(cmdRun) == \"function\" then return cmdRun(...) end";
+			"\t\t\t\t\tif type(RunCommand) == \"function\" then return RunCommand(...) end";
+			"\t\t\t\tend";
+			"\t\t\t\tctx.addUserButton = function(_, ...)";
+			"\t\t\t\t\tif type(addUserButton) == \"function\" then return addUserButton(...) end";
+			"\t\t\t\tend";
+			"\t\t\t\tctx.removeUserButton = function(_, ...)";
+			"\t\t\t\t\tif type(removeUserButton) == \"function\" then return removeUserButton(...) end";
+			"\t\t\t\tend";
+		}
+	end
+
+	NAmanage.PluginMaker_ActionLines = function(action, mode)
+		action = type(action) == "table" and action or {}
+		local kind = tostring(action.type or "notify")
+		local value = NAmanage.PluginMaker_Quote(action.value or "")
+		local extra = tostring(action.extra or "")
+		local out = {}
+		local native = mode == "na"
+		local fill = "__na_pm_fill("..value..", args, player)"
+		if kind == "notify" then
+			local seconds = math.clamp(tonumber(extra) or 3, 0.1, 30)
+			out[#out + 1] = native and ("\t\tctx:notify("..fill..", "..tostring(seconds)..")") or ("\t\tif type(notify) == \"function\" then notify("..fill..", "..tostring(seconds)..") elseif type(DoNotif) == \"function\" then DoNotif("..fill..", "..tostring(seconds)..") end")
+		elseif kind == "run" then
+			out[#out + 1] = native and ("\t\tctx:run("..fill..")") or ("\t\tif type(cmdRun) == \"function\" then cmdRun("..fill..") elseif type(RunCommand) == \"function\" then RunCommand("..fill..") end")
+		elseif kind == "load_url" then
+			out[#out + 1] = "\t\tlocal __na_pm_url = "..fill
+			out[#out + 1] = "\t\tlocal __na_pm_source = game:HttpGet(__na_pm_url)"
+			out[#out + 1] = "\t\tlocal __na_pm_loader = loadstring or load"
+			out[#out + 1] = "\t\tif type(__na_pm_loader) ~= \"function\" then error(\"loadstring/load unavailable\") end"
+			out[#out + 1] = "\t\tlocal __na_pm_chunk, __na_pm_error = __na_pm_loader(__na_pm_source)"
+			out[#out + 1] = "\t\tif not __na_pm_chunk then error(__na_pm_error or \"failed to compile remote source\") end"
+			out[#out + 1] = "\t\t__na_pm_chunk()"
+		elseif kind == "wait" then
+			local seconds = math.clamp(tonumber(action.value) or tonumber(extra) or 1, 0, 120)
+			out[#out + 1] = "\t\tif task and task.wait then task.wait("..tostring(seconds)..") elseif wait then wait("..tostring(seconds)..") end"
+		elseif kind == "print" then
+			out[#out + 1] = "\t\tprint("..fill..")"
+		elseif kind == "copy" then
+			out[#out + 1] = "\t\tif type(setclipboard) == \"function\" then setclipboard("..fill..") end"
+		elseif kind == "mobile_run" then
+			if native then
+				out[#out + 1] = "\t\tif ctx.IsOnMobile then ctx:run("..fill..") end"
+			else
+				out[#out + 1] = "\t\tif IsOnMobile and type(cmdRun) == \"function\" then cmdRun("..fill..") end"
+			end
+		elseif kind == "pc_run" then
+			if native then
+				out[#out + 1] = "\t\tif ctx.IsOnPC then ctx:run("..fill..") end"
+			else
+				out[#out + 1] = "\t\tif IsOnPC and type(cmdRun) == \"function\" then cmdRun("..fill..") end"
+			end
+		elseif kind == "mobile_notify" then
+			local seconds = math.clamp(tonumber(extra) or 3, 0.1, 30)
+			if native then
+				out[#out + 1] = "\t\tif ctx.IsOnMobile then ctx:notify("..fill..", "..tostring(seconds)..") end"
+			else
+				out[#out + 1] = "\t\tif IsOnMobile and type(notify) == \"function\" then notify("..fill..", "..tostring(seconds)..") end"
+			end
+		elseif kind == "pc_notify" then
+			local seconds = math.clamp(tonumber(extra) or 3, 0.1, 30)
+			if native then
+				out[#out + 1] = "\t\tif ctx.IsOnPC then ctx:notify("..fill..", "..tostring(seconds)..") end"
+			else
+				out[#out + 1] = "\t\tif IsOnPC and type(notify) == \"function\" then notify("..fill..", "..tostring(seconds)..") end"
+			end
+		elseif kind == "add_button" then
+			local label = NAmanage.PluginMaker_Quote(action.value or "Button")
+			local command = NAmanage.PluginMaker_Quote(extra ~= "" and extra or "")
+			if native then
+				out[#out + 1] = "\t\tctx:addUserButton({ Label = "..label..", Command = "..command..", SaveArgs = true })"
+			else
+				out[#out + 1] = "\t\tif type(addUserButton) == \"function\" then addUserButton({ Label = "..label..", Command = "..command..", SaveArgs = true }) end"
+			end
+		elseif kind == "remove_button" then
+			out[#out + 1] = native and ("\t\tctx:removeUserButton("..fill..")") or ("\t\tif type(removeUserButton) == \"function\" then removeUserButton("..fill..") end")
+		elseif kind == "stop" then
+			out[#out + 1] = "\t\treturn"
+		elseif kind == "custom" then
+			local raw = tostring(action.value or "")
+			if raw ~= "" then
+				for line in (raw.."\n"):gmatch("(.-)\n") do
+					out[#out + 1] = "\t\t"..line
+				end
+			end
+		end
+		return out
+	end
+
+	NAmanage.PluginMaker_GenerateNA = function()
+		local pm = NAStuff.PluginMaker
+		local lines = {
+			"local plugin = Plugin.new("..NAmanage.PluginMaker_Quote(pm.pluginName)..", "..NAmanage.PluginMaker_Quote(pm.description)..")";
+			"";
+			NAmanage.PluginMaker_ServicePrelude();
+			"";
+			NAmanage.PluginMaker_TemplateHelper();
+			"";
+		}
+		if NAmanage.PluginMaker_Trim(pm.startupCode) ~= "" then
+			lines[#lines + 1] = ""
+			NAmanage.PluginMaker_AppendRaw(lines, pm.startupCode, "")
+			lines[#lines + 1] = ""
+		end
+		for _, command in pm.commands or {} do
+			local name = NAmanage.PluginMaker_Trim(command.name)
+			if name ~= "" then
+				local aliases = NAmanage.PluginMaker_SplitAliases(command.aliases)
+				local call = "\nplugin:cmd("..NAmanage.PluginMaker_Quote(name)
+				for _, alias in aliases do
+					if alias:lower() ~= name:lower() then
+						call = call..", "..NAmanage.PluginMaker_Quote(alias)
+					end
+				end
+				call = call..")"
+				lines[#lines + 1] = call
+				if NAmanage.PluginMaker_Trim(command.argsHint) ~= "" then
+					lines[#lines + 1] = "\t:args("..NAmanage.PluginMaker_Quote(command.argsHint)..")"
+				end
+				lines[#lines + 1] = "\t:info("..NAmanage.PluginMaker_Quote(command.description)..")"
+				if command.requiresArgs == true then
+					lines[#lines + 1] = "\t:requiresArgs()"
+				end
+				if command.overrideAliases == true then
+					lines[#lines + 1] = "\t:OverrideAliases()"
+				end
+				if command.userButton == true then
+					local label = NAmanage.PluginMaker_Trim(command.userButtonLabel)
+					if label == "" then label = name end
+					lines[#lines + 1] = "\t:userButton({ Label = "..NAmanage.PluginMaker_Quote(label)..", SaveArgs = "..tostring(command.saveButtonArgs ~= false).." })"
+				end
+				lines[#lines + 1] = "\t:run(function(ctx, ...)"
+				lines[#lines + 1] = "\t\tlocal args = {...}"
+				lines[#lines + 1] = "\t\tlocal player = ctx.LocalPlayer"
+				for _, action in command.actions or {} do
+					for _, actionLine in NAmanage.PluginMaker_ActionLines(action, "na") do
+						lines[#lines + 1] = actionLine
+					end
+				end
+				if NAmanage.PluginMaker_Trim(command.customCode) ~= "" then
+					lines[#lines + 1] = "\t\t"
+					NAmanage.PluginMaker_AppendRaw(lines, command.customCode, "\t\t")
+				end
+				lines[#lines + 1] = "\tend)"
+			end
+		end
+		return table.concat(lines, "\n")
+	end
+
+	NAmanage.PluginMaker_GenerateIY = function()
+		local pm = NAStuff.PluginMaker
+		local lines = {
+			NAmanage.PluginMaker_ServicePrelude();
+			"";
+			NAmanage.PluginMaker_TemplateHelper();
+			"";
+		}
+		if NAmanage.PluginMaker_Trim(pm.startupCode) ~= "" then
+			NAmanage.PluginMaker_AppendRaw(lines, pm.startupCode, "")
+			lines[#lines + 1] = ""
+		end
+		for _, command in pm.commands or {} do
+			local name = NAmanage.PluginMaker_Trim(command.name)
+			if name ~= "" and command.userButton == true then
+				local label = NAmanage.PluginMaker_Trim(command.userButtonLabel)
+				if label == "" then label = name end
+				lines[#lines + 1] = "if type(addUserButton) == \"function\" then addUserButton({ Label = "..NAmanage.PluginMaker_Quote(label)..", Command = "..NAmanage.PluginMaker_Quote(name)..", SaveArgs = "..tostring(command.saveButtonArgs ~= false).." }) end"
+			end
+		end
+		if #lines > 2 then
+			lines[#lines + 1] = ""
+		end
+		lines[#lines + 1] = "return {"
+		lines[#lines + 1] = "\tPluginName = "..NAmanage.PluginMaker_Quote(pm.pluginName)..";"
+		lines[#lines + 1] = "\tPluginDescription = "..NAmanage.PluginMaker_Quote(pm.description)..";"
+		lines[#lines + 1] = "\tCommands = {"
+		for _, command in pm.commands or {} do
+			local name = NAmanage.PluginMaker_Trim(command.name)
+			if name ~= "" then
+				local aliases = NAmanage.PluginMaker_SplitAliases(command.aliases)
+				lines[#lines + 1] = "\t\t["..NAmanage.PluginMaker_Quote(name).."] = {"
+				lines[#lines + 1] = "\t\t\tListName = "..NAmanage.PluginMaker_Quote(name)..";"
+				if #aliases > 0 then
+					local aliasText = {}
+					for _, alias in aliases do
+						if alias:lower() ~= name:lower() then
+							aliasText[#aliasText + 1] = NAmanage.PluginMaker_Quote(alias)
+						end
+					end
+					if #aliasText > 0 then
+						lines[#lines + 1] = "\t\t\tAliases = {"..table.concat(aliasText, ", ").."};"
+					end
+				end
+				if NAmanage.PluginMaker_Trim(command.argsHint) ~= "" then
+					lines[#lines + 1] = "\t\t\tArgsHint = "..NAmanage.PluginMaker_Quote(command.argsHint)..";"
+				end
+				lines[#lines + 1] = "\t\t\tDescription = "..NAmanage.PluginMaker_Quote(command.description)..";"
+				if command.requiresArgs == true then
+					lines[#lines + 1] = "\t\t\tRequiresArguments = true;"
+				end
+				if command.overrideAliases == true then
+					lines[#lines + 1] = "\t\t\tOverrideAliases = true;"
+				end
+				lines[#lines + 1] = "\t\t\tFunction = function(args, speaker)"
+				lines[#lines + 1] = "\t\t\t\tlocal player = speaker"
+				for _, ctxLine in NAmanage.PluginMaker_IYContextLines() do
+					lines[#lines + 1] = ctxLine
+				end
+				for _, action in command.actions or {} do
+					for _, actionLine in NAmanage.PluginMaker_ActionLines(action, "iy") do
+						lines[#lines + 1] = actionLine:gsub("^\t\t", "\t\t\t\t")
+					end
+				end
+				if NAmanage.PluginMaker_Trim(command.customCode) ~= "" then
+					lines[#lines + 1] = "\t\t\t\t"
+					NAmanage.PluginMaker_AppendRaw(lines, command.customCode, "\t\t\t\t")
+				end
+				lines[#lines + 1] = "\t\t\tend;"
+				lines[#lines + 1] = "\t\t};"
+			end
+		end
+		lines[#lines + 1] = "\t};"
+		lines[#lines + 1] = "}"
+		return table.concat(lines, "\n")
+	end
+
+	NAmanage.PluginMaker_Generate = function()
+		local pm = NAStuff.PluginMaker
+		if type(pm.commands) ~= "table" or #pm.commands == 0 then
+			return nil, "Add at least one command"
+		end
+		if NAmanage.PluginMaker_Trim(pm.pluginName) == "" then
+			return nil, "Plugin name is required"
+		end
+		local valid = 0
+		local seen = {}
+		for _, command in pm.commands do
+			local name = NAmanage.PluginMaker_Trim(command.name)
+			if name ~= "" then
+				local key = name:lower()
+				if seen[key] then
+					return nil, "Duplicate command name: "..name
+				end
+				seen[key] = true
+				valid += 1
+			end
+		end
+		if valid == 0 then
+			return nil, "At least one command needs a name"
+		end
+		if pm.format == "iy" then
+			return NAmanage.PluginMaker_GenerateIY()
+		end
+		return NAmanage.PluginMaker_GenerateNA()
+	end
+
+	NAmanage.PluginMaker_CompileCheck = function(source)
+		if type(source) ~= "string" or source == "" then
+			return false, "Generated source is empty"
+		end
+		local loader = loadstring or load
+		if type(loader) ~= "function" then
+			return true, "Compile checker unavailable"
+		end
+		local ok, fn, err = pcall(loader, source, "@NAPluginMaker")
+		if not ok then
+			ok, fn, err = pcall(loader, source)
+		end
+		if not ok then
+			return false, tostring(fn)
+		end
+		if not fn then
+			return false, tostring(err or "Compile failed")
+		end
+		return true
+	end
+
+	NAmanage.PluginMaker_UniquePath = function(path)
+		if type(isfile) ~= "function" or not isfile(path) then
+			return path
+		end
+		local stem, ext = path:match("^(.*)(%.[^%.\\/]+)$")
+		stem = stem or path
+		ext = ext or ""
+		for i = 2, 999 do
+			local candidate = stem.."_"..tostring(i)..ext
+			if not isfile(candidate) then
+				return candidate
+			end
+		end
+		return stem.."_"..tostring(os.time and os.time() or math.random(1000, 9999))..ext
+	end
+
+	NAmanage.PluginMaker_Save = function(install, conflictPolicy)
+		local pm = NAStuff.PluginMaker
+		local source, genErr = NAmanage.PluginMaker_Generate()
+		if not source then
+			return false, genErr
+		end
+		local compileOk, compileErr = NAmanage.PluginMaker_CompileCheck(source)
+		if not compileOk then
+			return false, "Compile check failed: "..tostring(compileErr)
+		end
+		if type(writefile) ~= "function" then
+			return false, "writefile is unavailable"
+		end
+		local ext = pm.format == "iy" and ".iy" or ".na"
+		local fileName = NAmanage.PluginMaker_SafeFileName(pm.fileName ~= "" and pm.fileName or pm.pluginName)
+		fileName = fileName:gsub("%.[nN][aA]$", ""):gsub("%.[iI][yY]$", "")..ext
+		local path = fileName
+		if install == true then
+			local folder = pm.format == "iy" and NAfiles.NAIYPLUGINFILEPATH or NAfiles.NAPLUGINFILEPATH
+			if type(isfolder) == "function" and type(makefolder) == "function" and not isfolder(folder) then
+				local okFolder = pcall(makefolder, folder)
+				if not okFolder then
+					return false, "Could not create plugin folder"
+				end
+			end
+			path = folder.."/"..fileName
+		end
+		local exists = type(isfile) == "function" and isfile(path)
+		if exists and conflictPolicy == nil then
+			if type(NAmanage.PluginMaker_OpenSaveConflict) == "function" then
+				NAmanage.PluginMaker_OpenSaveConflict(install, path)
+				return nil, "conflict", path
+			end
+			path = NAmanage.PluginMaker_UniquePath(path)
+		elseif exists and conflictPolicy == "copy" then
+			path = NAmanage.PluginMaker_UniquePath(path)
+		elseif exists and conflictPolicy == "backup" then
+			if type(readfile) ~= "function" then
+				return false, "readfile is unavailable for backup"
+			end
+			local stem, oldExt = path:match("^(.*)(%.[^%.\\/]+)$")
+			stem = stem or path
+			oldExt = oldExt or ""
+			local backupPath = NAmanage.PluginMaker_UniquePath(stem.."_old"..oldExt)
+			local okRead, oldSource = pcall(readfile, path)
+			if not okRead then
+				return false, "Failed to read existing plugin: "..tostring(oldSource)
+			end
+			local okBackup, backupErr = pcall(writefile, backupPath, oldSource)
+			if not okBackup then
+				return false, "Failed to back up existing plugin: "..tostring(backupErr)
+			end
+		end
+		local okWrite, writeErr = pcall(writefile, path, source)
+		if not okWrite then
+			return false, tostring(writeErr)
+		end
+		if install == true and type(NAmanage.LoadPlugins) == "function" then
+			pcall(NAmanage.LoadPlugins, { silent = true })
+			if type(NAmanage.PluginsWindow_RequestRebuild) == "function" then
+				pcall(NAmanage.PluginsWindow_RequestRebuild)
+			end
+		end
+		pm.dirty = false
+		return true, path, source
+	end
+
+	NAmanage.PluginMaker_ListPluginFiles = function()
+		local out = {}
+		if type(listfiles) ~= "function" then
+			return out
+		end
+		local dirs = {
+			{ path = NAfiles and NAfiles.NAPLUGINFILEPATH; format = "na" };
+			{ path = NAfiles and NAfiles.NAIYPLUGINFILEPATH; format = "iy" };
+		}
+		for _, info in dirs do
+			if type(info.path) == "string" and info.path ~= "" and (type(isfolder) ~= "function" or isfolder(info.path)) then
+				local ok, items = pcall(listfiles, info.path)
+				if ok and type(items) == "table" then
+					for _, path in items do
+						if type(path) == "string" then
+							local low = path:lower()
+							local valid = info.format == "na" and low:match("%.na$") or info.format == "iy" and low:match("%.iy$")
+							if valid then
+								out[#out + 1] = {
+									path = path;
+									format = info.format;
+									name = path:match("[^\\/]+$") or path;
+								}
+							end
+						end
+					end
+				end
+			end
+		end
+		table.sort(out, function(a, b)
+			return tostring(a.name):lower() < tostring(b.name):lower()
+		end)
+		return out
+	end
+
+	NAmanage.PluginMaker_ReloadPlugins = function()
+		if type(NAmanage.LoadPlugins) == "function" then
+			pcall(NAmanage.LoadPlugins, { silent = true })
+		end
+		if type(NAmanage.PluginsWindow_RequestRebuild) == "function" then
+			pcall(NAmanage.PluginsWindow_RequestRebuild)
+		end
+	end
+
+	NAmanage.PluginMaker_OpenInstalledManager = function()
+		local pm = NAStuff.PluginMaker
+		if type(NAmanage.PluginsWindow_SetVisible) == "function" then
+			NAmanage.PluginsWindow_SetVisible(true)
+			return true
+		end
+		if type(NAmanage.PluginsWindow_Toggle) == "function" then
+			NAmanage.PluginsWindow_Toggle(true)
+			return true
+		end
+		NAmanage.PluginMaker_SetStatus("Plugins window is unavailable", "error")
+		return false
+	end
+
+	NAmanage.PluginMaker_EnsureSaveConflict = function()
+		local pm = NAStuff.PluginMaker
+		if pm.SaveConflictOverlay and pm.SaveConflictOverlay.Parent == pm.Frame then
+			return true
+		end
+		if not pm.Frame or not pm.Frame.Parent then
+			return false
+		end
+		pm.SaveConflictOverlay = NAmanage.PluginMaker_New("Frame", pm.Frame, {
+			Name = "SaveConflictOverlay";
+			BackgroundColor3 = Color3.fromRGB(4, 4, 7);
+			BackgroundTransparency = 0.2;
+			BorderSizePixel = 0;
+			Size = UDim2.new(1, 0, 1, 0);
+			Visible = false;
+			Active = true;
+			ZIndex = 160;
+		})
+		local card = NAmanage.PluginMaker_New("Frame", pm.SaveConflictOverlay, {
+			AnchorPoint = Vector2.new(0.5, 0.5);
+			Position = UDim2.new(0.5, 0, 0.5, 0);
+			Size = UDim2.new(0, 390, 0, 250);
+			BackgroundColor3 = Color3.fromRGB(19, 20, 27);
+			BorderSizePixel = 0;
+			ZIndex = 161;
+		})
+		NAmanage.PluginMaker_Corner(card, 9)
+		NAmanage.PluginMaker_Stroke(card, 0.35)
+		local constraint = NAmanage.PluginMaker_New("UISizeConstraint", card, {})
+		constraint.MinSize = Vector2.new(250, 230)
+		constraint.MaxSize = Vector2.new(430, 280)
+
+		local title = NAmanage.PluginMaker_Label(card, "Plugin File Already Exists", 14)
+		title.Position = UDim2.new(0, 12, 0, 10)
+		title.Size = UDim2.new(1, -24, 0, 24)
+		title.Font = Enum.Font.GothamBold
+		title.TextColor3 = Color3.fromRGB(255, 205, 135)
+		title.ZIndex = 162
+
+		pm.SaveConflictPath = NAmanage.PluginMaker_Label(card, "", 10)
+		pm.SaveConflictPath.Position = UDim2.new(0, 12, 0, 38)
+		pm.SaveConflictPath.Size = UDim2.new(1, -24, 0, 42)
+		pm.SaveConflictPath.TextColor3 = Color3.fromRGB(165, 168, 185)
+		pm.SaveConflictPath.TextYAlignment = Enum.TextYAlignment.Top
+		pm.SaveConflictPath.ZIndex = 162
+
+		local choices = NAmanage.PluginMaker_New("Frame", card, {
+			BackgroundTransparency = 1;
+			Position = UDim2.new(0, 12, 0, 86);
+			Size = UDim2.new(1, -24, 1, -98);
+			ZIndex = 162;
+		})
+		local layout = NAmanage.PluginMaker_New("UIListLayout", choices, {
+			Padding = UDim.new(0, 6);
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+
+		local function finish(policy)
+			local pending = pm.PendingSaveConflict
+			pm.SaveConflictOverlay.Visible = false
+			pm.PendingSaveConflict = nil
+			if not pending then
+				return
+			end
+			local ok, path = NAmanage.PluginMaker_Save(pending.install == true, policy)
+			if ok then
+				NAmanage.PluginMaker_SetStatus((pending.install and "Installed " or "Saved ")..tostring(path), "success")
+				DoNotif((pending.install and "Plugin Maker installed " or "Plugin Maker saved ")..tostring(path), 3)
+			elseif ok == false then
+				NAmanage.PluginMaker_SetStatus(tostring(path), "error")
+			end
+		end
+
+		local overwrite = NAmanage.PluginMaker_Button(choices, "Overwrite Existing", function()
+			finish("overwrite")
+		end)
+		overwrite.Size = UDim2.new(1, 0, 0, 31)
+		overwrite.BackgroundColor3 = Color3.fromRGB(105, 45, 55)
+
+		local copy = NAmanage.PluginMaker_Button(choices, "Save As Copy (_2, _3, ...)", function()
+			finish("copy")
+		end)
+		copy.Size = UDim2.new(1, 0, 0, 31)
+
+		local backup = NAmanage.PluginMaker_Button(choices, "Back Up Existing As _old, Then Replace", function()
+			finish("backup")
+		end)
+		backup.Size = UDim2.new(1, 0, 0, 31)
+		backup.BackgroundColor3 = Color3.fromRGB(75, 58, 105)
+
+		local cancel = NAmanage.PluginMaker_Button(choices, "Cancel", function()
+			pm.PendingSaveConflict = nil
+			pm.SaveConflictOverlay.Visible = false
+			NAmanage.PluginMaker_SetStatus("Save cancelled", "warn")
+		end)
+		cancel.Size = UDim2.new(1, 0, 0, 31)
+		return true
+	end
+
+	NAmanage.PluginMaker_OpenSaveConflict = function(install, path)
+		local pm = NAStuff.PluginMaker
+		if not NAmanage.PluginMaker_EnsureSaveConflict() then
+			return false
+		end
+		pm.PendingSaveConflict = {
+			install = install == true;
+			path = path;
+		}
+		pm.SaveConflictPath.Text = "A file already exists at:\n"..tostring(path)
+		pm.SaveConflictOverlay.Visible = true
+		NAmanage.PluginMaker_SetStatus("Choose how to handle the existing file", "warn")
+		return true
+	end
+
+	NAmanage.PluginMaker_EnsureFilePicker = function()
+		local pm = NAStuff.PluginMaker
+		if pm.FilePickerOverlay and pm.FilePickerOverlay.Parent == pm.Frame then
+			return true
+		end
+		if not pm.Frame or not pm.Frame.Parent then
+			return false
+		end
+
+		pm.FilePickerOverlay = NAmanage.PluginMaker_New("Frame", pm.Frame, {
+			Name = "PluginFilePicker";
+			BackgroundColor3 = Color3.fromRGB(4, 4, 7);
+			BackgroundTransparency = 0.22;
+			BorderSizePixel = 0;
+			Size = UDim2.new(1, 0, 1, 0);
+			Visible = false;
+			Active = true;
+			ZIndex = 150;
+		})
+		local card = NAmanage.PluginMaker_New("Frame", pm.FilePickerOverlay, {
+			AnchorPoint = Vector2.new(0.5, 0.5);
+			Position = UDim2.new(0.5, 0, 0.5, 0);
+			Size = UDim2.new(0.66, 0, 0.75, 0);
+			BackgroundColor3 = Color3.fromRGB(18, 19, 25);
+			BorderSizePixel = 0;
+			ZIndex = 151;
+		})
+		NAmanage.PluginMaker_Corner(card, 9)
+		NAmanage.PluginMaker_Stroke(card, 0.38)
+		local constraint = NAmanage.PluginMaker_New("UISizeConstraint", card, {})
+		constraint.MinSize = Vector2.new(260, 240)
+		constraint.MaxSize = Vector2.new(560, 480)
+
+		local title = NAmanage.PluginMaker_Label(card, "Edit Existing Plugin", 14)
+		title.Position = UDim2.new(0, 10, 0, 8)
+		title.Size = UDim2.new(1, -88, 0, 24)
+		title.Font = Enum.Font.GothamBold
+		title.ZIndex = 152
+
+		local close = NAmanage.PluginMaker_Button(card, "Close", function()
+			pm.FilePickerOverlay.Visible = false
+		end)
+		close.AnchorPoint = Vector2.new(1, 0)
+		close.Position = UDim2.new(1, -8, 0, 7)
+		close.Size = UDim2.new(0, 66, 0, 26)
+		close.ZIndex = 153
+
+		pm.FilePickerSearch = NAmanage.PluginMaker_Input(card, "Search installed .na / .iy plugins...", "", function()
+			if type(NAmanage.PluginMaker_RefreshFilePicker) == "function" then
+				NAmanage.PluginMaker_RefreshFilePicker()
+			end
+		end)
+		pm.FilePickerSearch.Position = UDim2.new(0, 10, 0, 38)
+		pm.FilePickerSearch.Size = UDim2.new(1, -20, 0, 30)
+		pm.FilePickerSearch.ZIndex = 152
+		pm.FilePickerSearch:GetPropertyChangedSignal("Text"):Connect(function()
+			if pm.FilePickerOverlay and pm.FilePickerOverlay.Visible then
+				NAmanage.PluginMaker_RefreshFilePicker()
+			end
+		end)
+
+		pm.FilePickerList = NAmanage.PluginMaker_New("ScrollingFrame", card, {
+			BackgroundColor3 = Color3.fromRGB(12, 13, 17);
+			BackgroundTransparency = 0.08;
+			BorderSizePixel = 0;
+			Position = UDim2.new(0, 10, 0, 76);
+			Size = UDim2.new(1, -20, 1, -86);
+			CanvasSize = UDim2.new();
+			ScrollBarThickness = 4;
+			ScrollingDirection = Enum.ScrollingDirection.Y;
+			ZIndex = 152;
+		})
+		NAmanage.PluginMaker_Corner(pm.FilePickerList, 7)
+		NAmanage.PluginMaker_Stroke(pm.FilePickerList, 0.8)
+		return true
+	end
+
+	NAmanage.PluginMaker_OpenExistingFile = function(entry)
+		local pm = NAStuff.PluginMaker
+		if type(entry) ~= "table" or type(entry.path) ~= "string" or type(readfile) ~= "function" then
+			return
+		end
+		local ok, source = pcall(readfile, entry.path)
+		if not ok then
+			NAmanage.PluginMaker_SetStatus("Failed to read "..tostring(entry.name)..": "..tostring(source), "error")
+			return
+		end
+		if not NAmanage.PluginMaker_EnsureCodeEditor() then
+			return
+		end
+		pm.FilePickerOverlay.Visible = false
+		pm.codeEditTarget = "file"
+		pm.codeEditPath = entry.path
+		pm.codeEditFormat = entry.format
+		pm.CodeTitle.Text = "Edit Existing - "..tostring(entry.name)
+		pm.CodeHint.Text = "Raw plugin source. Save Code compile-checks it, writes it back to the same file, then reloads NA plugins."
+		pm.CodeBox.Text = tostring(source or "")
+		pm.CodeOverlay.Visible = true
+	end
+
+	NAmanage.PluginMaker_RefreshFilePicker = function()
+		local pm = NAStuff.PluginMaker
+		local list = pm.FilePickerList
+		if not list or not list.Parent then
+			return
+		end
+		NAmanage.PluginMaker_ClearGui(list)
+		local layout = NAmanage.PluginMaker_New("UIListLayout", list, {
+			Padding = UDim.new(0, 5);
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+		local pad = NAmanage.PluginMaker_New("UIPadding", list, {})
+		pad.PaddingTop = UDim.new(0, 6)
+		pad.PaddingBottom = UDim.new(0, 6)
+		pad.PaddingLeft = UDim.new(0, 6)
+		pad.PaddingRight = UDim.new(0, 6)
+
+		local query = tostring(pm.FilePickerSearch and pm.FilePickerSearch.Text or ""):lower()
+		local count = 0
+		for _, entry in NAmanage.PluginMaker_ListPluginFiles() do
+			local hay = (tostring(entry.name).." "..tostring(entry.format).." "..tostring(entry.path)):lower()
+			if query == "" or hay:find(query, 1, true) then
+				count += 1
+				local row = NAmanage.PluginMaker_New("Frame", list, {
+					BackgroundColor3 = Color3.fromRGB(31, 32, 41);
+					BackgroundTransparency = 0.08;
+					BorderSizePixel = 0;
+					Size = UDim2.new(1, -2, 0, 40);
+				})
+				NAmanage.PluginMaker_Corner(row, 6)
+				NAmanage.PluginMaker_Stroke(row, 0.84)
+				local tag = NAmanage.PluginMaker_Label(row, entry.format == "iy" and "IY" or "NA", 10)
+				tag.Position = UDim2.new(0, 7, 0.5, -11)
+				tag.Size = UDim2.new(0, 28, 0, 22)
+				tag.TextXAlignment = Enum.TextXAlignment.Center
+				tag.BackgroundTransparency = 0
+				tag.BackgroundColor3 = entry.format == "iy" and Color3.fromRGB(57, 74, 102) or Color3.fromRGB(75, 58, 105)
+				NAmanage.PluginMaker_Corner(tag, 5)
+				local name = NAmanage.PluginMaker_Label(row, entry.name, 11)
+				name.Position = UDim2.new(0, 42, 0, 0)
+				name.Size = UDim2.new(1, -122, 1, 0)
+				name.TextTruncate = Enum.TextTruncate.AtEnd
+				local edit = NAmanage.PluginMaker_Button(row, "Edit", function()
+					NAmanage.PluginMaker_OpenExistingFile(entry)
+				end)
+				edit.AnchorPoint = Vector2.new(1, 0.5)
+				edit.Position = UDim2.new(1, -7, 0.5, 0)
+				edit.Size = UDim2.new(0, 64, 0, 26)
+				edit.BackgroundColor3 = Color3.fromRGB(75, 58, 105)
+			end
+		end
+		if count == 0 then
+			local empty = NAmanage.PluginMaker_Label(list, "No matching installed plugins.", 11)
+			empty.Size = UDim2.new(1, -2, 0, 42)
+			empty.TextXAlignment = Enum.TextXAlignment.Center
+			empty.TextColor3 = Color3.fromRGB(150, 153, 170)
+		end
+		layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+			if list and list.Parent then
+				list.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 12)
+			end
+		end)
+		list.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 12)
+	end
+
+	NAmanage.PluginMaker_OpenFilePicker = function()
+		local pm = NAStuff.PluginMaker
+		if not NAmanage.PluginMaker_EnsureFilePicker() then
+			return
+		end
+		pm.FilePickerOverlay.Visible = true
+		NAmanage.PluginMaker_RefreshFilePicker()
+	end
+
+	NAmanage.PluginMaker_ToggleMinimize = function()
+		local pm = NAStuff.PluginMaker
+		local frame = pm.Frame
+		if not frame or not frame.Parent then
+			return
+		end
+		pm.minimized = not (pm.minimized == true)
+		if pm.minimized then
+			pm.restoreSize = frame.Size
+			if pm.ResizeCleanup then
+				pcall(pm.ResizeCleanup)
+				pm.ResizeCleanup = nil
+			end
+			if pm.Meta then pm.Meta.Visible = false end
+			if pm.Workspace then pm.Workspace.Visible = false end
+			if pm.Footer then pm.Footer.Visible = false end
+			if pm.PreviewOverlay then pm.PreviewOverlay.Visible = false end
+			if pm.ActionPickerOverlay then pm.ActionPickerOverlay.Visible = false end
+			if pm.CodeOverlay then pm.CodeOverlay.Visible = false end
+			if pm.FilePickerOverlay then pm.FilePickerOverlay.Visible = false end
+			if pm.SaveConflictOverlay then pm.SaveConflictOverlay.Visible = false end
+			NAmanage.SetAttr(frame, "NAMenuMinimized", true)
+			frame.Size = UDim2.fromOffset(math.max(260, frame.Size.X.Offset), 44)
+			if pm.MinimizeButton then pm.MinimizeButton.Text = "+" end
+		else
+			NAmanage.SetAttr(frame, "NAMenuMinimized", false)
+			frame.Size = pm.restoreSize or UDim2.fromOffset(900, 620)
+			if pm.Meta then pm.Meta.Visible = true end
+			if pm.Workspace then pm.Workspace.Visible = true end
+			if pm.Footer then pm.Footer.Visible = true end
+			if pm.MinimizeButton then pm.MinimizeButton.Text = "-" end
+			NAmanage.PluginMaker_ApplyLayout()
+			NAmanage.PluginMaker_BindResize()
+		end
+	end
+
+	NAmanage.PluginMaker_ProbeService = function(name)
+		name = NAmanage.PluginMaker_Trim(name)
+		if name == "" then
+			return false, "empty service name"
+		end
+		if type(NAmanage.NA_getServiceRef) == "function" then
+			local ok, service = pcall(NAmanage.NA_getServiceRef, name)
+			if ok and typeof(service) == "Instance" then
+				return true, service
+			end
+		end
+		if type(NAmanage.NA_getServiceRaw) == "function" then
+			local ok, service = pcall(NAmanage.NA_getServiceRaw, name)
+			if ok and typeof(service) == "Instance" then
+				return true, service
+			end
+		end
+		return false, nil
+	end
+
+	NAmanage.PluginMaker_UpdateServiceButton = function()
+		local pm = NAStuff.PluginMaker
+		if pm.ServicesButton and pm.ServicesButton.Parent then
+			local count = #NAmanage.PluginMaker_GetSelectedServices()
+			pm.ServicesButton.Text = "Services ("..tostring(count)..")"
+			pm.ServicesButton.BackgroundColor3 = count > 0 and Color3.fromRGB(75, 58, 105) or Color3.fromRGB(42, 43, 54)
+		end
+	end
+
+	NAmanage.PluginMaker_SelectServicePreset = function(kind)
+		local pm = NAStuff.PluginMaker
+		pm.selectedServices = type(pm.selectedServices) == "table" and pm.selectedServices or {}
+		if kind == "clear" then
+			pm.selectedServices = {}
+		elseif kind == "common" then
+			pm.selectedServices = {
+				Players = true;
+				Workspace = true;
+				RunService = true;
+				TweenService = true;
+				UserInputService = true;
+				HttpService = true;
+				ReplicatedStorage = true;
+				Lighting = true;
+			}
+		elseif kind == "all" then
+			local selected = {}
+			for _, name in NAmanage.PluginMaker_GetServiceCatalog() do
+				selected[name] = true
+			end
+			pm.selectedServices = selected
+		end
+		pm.dirty = true
+		NAmanage.PluginMaker_UpdateServiceButton()
+		if type(NAmanage.PluginMaker_RefreshServicePicker) == "function" then
+			NAmanage.PluginMaker_RefreshServicePicker()
+		end
+	end
+
+	NAmanage.PluginMaker_EnsureServicePicker = function()
+		local pm = NAStuff.PluginMaker
+		if pm.ServiceOverlay and pm.ServiceOverlay.Parent == pm.Frame then
+			return true
+		end
+		if not pm.Frame or not pm.Frame.Parent then
+			return false
+		end
+
+		pm.ServiceOverlay = NAmanage.PluginMaker_New("Frame", pm.Frame, {
+			Name = "ServicePicker";
+			BackgroundColor3 = Color3.fromRGB(4, 4, 7);
+			BackgroundTransparency = 0.2;
+			BorderSizePixel = 0;
+			Size = UDim2.new(1, 0, 1, 0);
+			Visible = false;
+			Active = true;
+			ZIndex = 170;
+		})
+
+		local card = NAmanage.PluginMaker_New("Frame", pm.ServiceOverlay, {
+			AnchorPoint = Vector2.new(0.5, 0.5);
+			Position = UDim2.new(0.5, 0, 0.5, 0);
+			Size = UDim2.new(0.72, 0, 0.84, 0);
+			BackgroundColor3 = Color3.fromRGB(18, 19, 25);
+			BorderSizePixel = 0;
+			ZIndex = 171;
+		})
+		NAmanage.PluginMaker_Corner(card, 9)
+		NAmanage.PluginMaker_Stroke(card, 0.35)
+		local sizeConstraint = NAmanage.PluginMaker_New("UISizeConstraint", card, {})
+		sizeConstraint.MinSize = Vector2.new(280, 300)
+		sizeConstraint.MaxSize = Vector2.new(620, 560)
+
+		local title = NAmanage.PluginMaker_Label(card, "Services - NA ServiceResolver", 14)
+		title.Position = UDim2.new(0, 10, 0, 8)
+		title.Size = UDim2.new(1, -90, 0, 22)
+		title.Font = Enum.Font.GothamBold
+		title.ZIndex = 172
+
+		local close = NAmanage.PluginMaker_Button(card, "Done", function()
+			pm.ServiceOverlay.Visible = false
+			NAmanage.PluginMaker_UpdateServiceButton()
+			NAmanage.PluginMaker_RebuildEditor()
+		end)
+		close.AnchorPoint = Vector2.new(1, 0)
+		close.Position = UDim2.new(1, -8, 0, 7)
+		close.Size = UDim2.new(0, 68, 0, 26)
+		close.BackgroundColor3 = Color3.fromRGB(75, 58, 105)
+		close.ZIndex = 173
+
+		local info = NAmanage.PluginMaker_Label(card, "Pick only what the plugin needs. Catalog + live DataModel services + custom names; ServiceResolver is the only service resolution path.", 10)
+		info.Position = UDim2.new(0, 10, 0, 31)
+		info.Size = UDim2.new(1, -20, 0, 32)
+		info.TextColor3 = Color3.fromRGB(155, 158, 176)
+		info.TextYAlignment = Enum.TextYAlignment.Top
+		info.ZIndex = 172
+
+		pm.ServiceSearch = NAmanage.PluginMaker_Input(card, "Search services...", "", function()
+			NAmanage.PluginMaker_RefreshServicePicker()
+		end)
+		pm.ServiceSearch.Position = UDim2.new(0, 10, 0, 66)
+		pm.ServiceSearch.Size = UDim2.new(1, -20, 0, 30)
+		pm.ServiceSearch.ZIndex = 172
+		pm.ServiceSearch:GetPropertyChangedSignal("Text"):Connect(function()
+			if pm.ServiceOverlay and pm.ServiceOverlay.Visible then
+				NAmanage.PluginMaker_RefreshServicePicker()
+			end
+		end)
+
+		pm.ServiceList = NAmanage.PluginMaker_New("ScrollingFrame", card, {
+			BackgroundColor3 = Color3.fromRGB(12, 13, 17);
+			BackgroundTransparency = 0.06;
+			BorderSizePixel = 0;
+			Position = UDim2.new(0, 10, 0, 102);
+			Size = UDim2.new(1, -20, 1, -194);
+			CanvasSize = UDim2.new();
+			ScrollBarThickness = 4;
+			ScrollingDirection = Enum.ScrollingDirection.Y;
+			ZIndex = 172;
+		})
+		NAmanage.PluginMaker_Corner(pm.ServiceList, 7)
+		NAmanage.PluginMaker_Stroke(pm.ServiceList, 0.8)
+
+		local customRow = NAmanage.PluginMaker_New("Frame", card, {
+			BackgroundTransparency = 1;
+			Position = UDim2.new(0, 10, 1, -86);
+			Size = UDim2.new(1, -20, 0, 30);
+			ZIndex = 172;
+		})
+		pm.CustomServiceBox = NAmanage.PluginMaker_Input(customRow, "Custom service name...", "", nil)
+		pm.CustomServiceBox.Position = UDim2.new(0, 0, 0, 0)
+		pm.CustomServiceBox.Size = UDim2.new(1, -88, 1, 0)
+		local addCustom = NAmanage.PluginMaker_Button(customRow, "Add", function()
+			local name = NAmanage.PluginMaker_Trim(pm.CustomServiceBox and pm.CustomServiceBox.Text or "")
+			if not name:match("^[%a_][%w_]*$") then
+				NAmanage.PluginMaker_SetStatus("Invalid service name", "error")
+				return
+			end
+			pm.customServices = type(pm.customServices) == "table" and pm.customServices or {}
+			local exists = false
+			for _, current in pm.customServices do
+				if tostring(current):lower() == name:lower() then
+					exists = true
+					break
+				end
+			end
+			if not exists then
+				pm.customServices[#pm.customServices + 1] = name
+			end
+			pm.selectedServices[name] = true
+			pm.CustomServiceBox.Text = ""
+			pm.dirty = true
+			NAmanage.PluginMaker_UpdateServiceButton()
+			NAmanage.PluginMaker_RefreshServicePicker()
+		end)
+		addCustom.AnchorPoint = Vector2.new(1, 0)
+		addCustom.Position = UDim2.new(1, 0, 0, 0)
+		addCustom.Size = UDim2.new(0, 82, 1, 0)
+		addCustom.BackgroundColor3 = Color3.fromRGB(57, 74, 102)
+
+		pm.ServiceSelectedLabel = NAmanage.PluginMaker_Label(card, "", 10)
+		pm.ServiceSelectedLabel.Position = UDim2.new(0, 10, 1, -52)
+		pm.ServiceSelectedLabel.Size = UDim2.new(0.28, -5, 0, 26)
+		pm.ServiceSelectedLabel.TextColor3 = Color3.fromRGB(165, 168, 185)
+		pm.ServiceSelectedLabel.ZIndex = 172
+
+		local presetRow = NAmanage.PluginMaker_New("Frame", card, {
+			BackgroundTransparency = 1;
+			Position = UDim2.new(0.28, 5, 1, -52);
+			Size = UDim2.new(0.72, -15, 0, 26);
+			ZIndex = 172;
+		})
+		local grid = NAmanage.PluginMaker_New("UIGridLayout", presetRow, {
+			CellPadding = UDim2.new(0, 5, 0, 0);
+			CellSize = UDim2.new(0.333333, -4, 1, 0);
+			FillDirectionMaxCells = 3;
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+		NAmanage.PluginMaker_Button(presetRow, "Common", function()
+			NAmanage.PluginMaker_SelectServicePreset("common")
+		end)
+		NAmanage.PluginMaker_Button(presetRow, "All", function()
+			NAmanage.PluginMaker_SelectServicePreset("all")
+		end)
+		local clear = NAmanage.PluginMaker_Button(presetRow, "Clear", function()
+			NAmanage.PluginMaker_SelectServicePreset("clear")
+		end)
+		clear.TextColor3 = Color3.fromRGB(255, 165, 170)
+		return true
+	end
+
+	NAmanage.PluginMaker_RefreshServicePicker = function()
+		local pm = NAStuff.PluginMaker
+		local list = pm.ServiceList
+		if not list or not list.Parent then
+			return
+		end
+		NAmanage.PluginMaker_NormalizeServices()
+		NAmanage.PluginMaker_ClearGui(list)
+		local layout = NAmanage.PluginMaker_New("UIListLayout", list, {
+			Padding = UDim.new(0, 4);
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+		local padding = NAmanage.PluginMaker_New("UIPadding", list, {})
+		padding.PaddingTop = UDim.new(0, 5)
+		padding.PaddingBottom = UDim.new(0, 5)
+		padding.PaddingLeft = UDim.new(0, 5)
+		padding.PaddingRight = UDim.new(0, 5)
+
+		local query = tostring(pm.ServiceSearch and pm.ServiceSearch.Text or ""):lower()
+		local visibleCount = 0
+		for _, name in NAmanage.PluginMaker_GetServiceCatalog() do
+			if query == "" or name:lower():find(query, 1, true) then
+				visibleCount += 1
+				local selected = pm.selectedServices[name] == true
+				local button = NAmanage.PluginMaker_Button(list, (selected and "✓  " or "    ")..name, function()
+					local enable = not (pm.selectedServices[name] == true)
+					pm.selectedServices[name] = enable
+					pm.dirty = true
+					if enable then
+						local available = NAmanage.PluginMaker_ProbeService(name)
+						if available then
+							NAmanage.PluginMaker_SetStatus(name.." selected through ServiceResolver", "success")
+						else
+							NAmanage.PluginMaker_SetStatus(name.." selected; ServiceResolver may return nil in this client/context", "warn")
+						end
+					end
+					NAmanage.PluginMaker_UpdateServiceButton()
+					NAmanage.PluginMaker_RefreshServicePicker()
+				end)
+				button.Size = UDim2.new(1, -2, 0, 30)
+				button.TextXAlignment = Enum.TextXAlignment.Left
+				if selected then
+					button.BackgroundColor3 = Color3.fromRGB(75, 58, 105)
+					button.TextColor3 = Color3.fromRGB(255, 255, 255)
+				end
+				local pad = button:FindFirstChildOfClass("UIPadding")
+				if pad then pad.PaddingLeft = UDim.new(0, 9) end
+			end
+		end
+		if visibleCount == 0 then
+			local empty = NAmanage.PluginMaker_Label(list, "No matching services. Use Custom Service below.", 11)
+			empty.Size = UDim2.new(1, -2, 0, 40)
+			empty.TextXAlignment = Enum.TextXAlignment.Center
+			empty.TextColor3 = Color3.fromRGB(145, 148, 165)
+		end
+		if pm.ServiceSelectedLabel then
+			pm.ServiceSelectedLabel.Text = tostring(#NAmanage.PluginMaker_GetSelectedServices()).." selected"
+		end
+		layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+			if list and list.Parent then
+				list.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
+			end
+		end)
+		list.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 10)
+	end
+
+	NAmanage.PluginMaker_OpenServicePicker = function()
+		local pm = NAStuff.PluginMaker
+		if not NAmanage.PluginMaker_EnsureServicePicker() then
+			return
+		end
+		pm.ServiceOverlay.Visible = true
+		NAmanage.PluginMaker_RefreshServicePicker()
+	end
+
+	NAmanage.PluginMaker_SetStatus = function(text, kind)
+		local pm = NAStuff.PluginMaker
+		if pm.Status and pm.Status.Parent then
+			pm.Status.Text = tostring(text or "")
+			if kind == "error" then
+				pm.Status.TextColor3 = Color3.fromRGB(255, 125, 135)
+			elseif kind == "success" then
+				pm.Status.TextColor3 = Color3.fromRGB(135, 230, 160)
+			elseif kind == "warn" then
+				pm.Status.TextColor3 = Color3.fromRGB(245, 205, 125)
+			else
+				pm.Status.TextColor3 = Color3.fromRGB(175, 178, 195)
+			end
+		end
+	end
+
+	NAmanage.PluginMaker_New = function(className, parent, props)
+		local obj = InstanceNew(className)
+		local hasExplicitZ = type(props) == "table" and props.ZIndex ~= nil
+		if type(props) == "table" then
+			for key, value in props do
+				pcall(function()
+					obj[key] = value
+				end)
+			end
+		end
+		if not hasExplicitZ and obj:IsA("GuiObject") and typeof(parent) == "Instance" and parent:IsA("GuiObject") then
+			pcall(function()
+				obj.ZIndex = math.max(1, parent.ZIndex + 1)
+			end)
+		end
+		obj.Parent = parent
+		return obj
+	end
+
+	NAmanage.PluginMaker_SyncZIndex = function(root)
+		if typeof(root) ~= "Instance" then
+			return
+		end
+		local function sync(parent)
+			for _, child in parent:GetChildren() do
+				if child:IsA("GuiObject") then
+					if parent:IsA("GuiObject") and child.ZIndex <= parent.ZIndex then
+						child.ZIndex = parent.ZIndex + 1
+					end
+					sync(child)
+				end
+			end
+		end
+		sync(root)
+	end
+
+	NAmanage.PluginMaker_Corner = function(obj, radius)
+		local corner = NAmanage.PluginMaker_New("UICorner", obj, {})
+		corner.CornerRadius = UDim.new(0, radius or 6)
+		return corner
+	end
+
+	NAmanage.PluginMaker_Stroke = function(obj, transparency)
+		local stroke = NAmanage.PluginMaker_New("UIStroke", obj, {
+			Thickness = 1;
+			Color = NAUISTROKER or Color3.fromRGB(155, 100, 255);
+			Transparency = transparency == nil and 0.55 or transparency;
+			ApplyStrokeMode = Enum.ApplyStrokeMode.Border;
+		})
+		return stroke
+	end
+
+	NAmanage.PluginMaker_Button = function(parent, text, callback)
+		local button = NAmanage.PluginMaker_New("TextButton", parent, {
+			AutoButtonColor = false;
+			BackgroundColor3 = Color3.fromRGB(42, 43, 54);
+			BackgroundTransparency = 0.08;
+			BorderSizePixel = 0;
+			Font = Enum.Font.Gotham;
+			Text = tostring(text or "Button");
+			TextColor3 = Color3.fromRGB(238, 239, 245);
+			TextSize = 12;
+			TextWrapped = true;
+		})
+		NAmanage.PluginMaker_Corner(button, 6)
+		NAmanage.PluginMaker_Stroke(button, 0.72)
+		button.MouseButton1Click:Connect(function()
+			if type(callback) == "function" then
+				pcall(callback)
+			end
+		end)
+		return button
+	end
+
+	NAmanage.PluginMaker_Input = function(parent, placeholder, text, callback)
+		local box = NAmanage.PluginMaker_New("TextBox", parent, {
+			BackgroundColor3 = Color3.fromRGB(29, 30, 39);
+			BackgroundTransparency = 0.08;
+			BorderSizePixel = 0;
+			ClearTextOnFocus = false;
+			Font = Enum.Font.Gotham;
+			PlaceholderText = tostring(placeholder or "");
+			PlaceholderColor3 = Color3.fromRGB(135, 138, 155);
+			Text = tostring(text or "");
+			TextColor3 = Color3.fromRGB(238, 239, 245);
+			TextSize = 12;
+			TextXAlignment = Enum.TextXAlignment.Left;
+		})
+		NAmanage.PluginMaker_Corner(box, 6)
+		NAmanage.PluginMaker_Stroke(box, 0.76)
+		local pad = NAmanage.PluginMaker_New("UIPadding", box, {})
+		pad.PaddingLeft = UDim.new(0, 8)
+		pad.PaddingRight = UDim.new(0, 8)
+		box.FocusLost:Connect(function()
+			if type(callback) == "function" then
+				pcall(callback, box.Text)
+			end
+		end)
+		return box
+	end
+
+	NAmanage.PluginMaker_Label = function(parent, text, size)
+		return NAmanage.PluginMaker_New("TextLabel", parent, {
+			BackgroundTransparency = 1;
+			BorderSizePixel = 0;
+			Font = Enum.Font.Gotham;
+			Text = tostring(text or "");
+			TextColor3 = Color3.fromRGB(205, 207, 220);
+			TextSize = size or 12;
+			TextWrapped = true;
+			TextXAlignment = Enum.TextXAlignment.Left;
+			TextYAlignment = Enum.TextYAlignment.Center;
+		})
+	end
+
+	NAmanage.PluginMaker_ClearGui = function(parent)
+		if not parent then return end
+		for _, child in parent:GetChildren() do
+			child:Destroy()
+		end
+	end
+
+	NAmanage.PluginMaker_ActionName = function(kind)
+		local names = {
+			notify = "Notify";
+			run = "Run NA Command";
+			load_url = "Load URL / loadstring";
+			wait = "Wait";
+			print = "Print";
+			copy = "Copy Text";
+			mobile_run = "Run Command - Mobile Only";
+			pc_run = "Run Command - PC Only";
+			mobile_notify = "Notify - Mobile Only";
+			pc_notify = "Notify - PC Only";
+			add_button = "Add User Button";
+			remove_button = "Remove User Button";
+			stop = "Stop Command";
+			custom = "Custom Lua";
+		}
+		return names[tostring(kind or "")] or tostring(kind or "Action")
+	end
+
+	NAmanage.PluginMaker_ActionTypes = {
+		"notify";
+		"run";
+		"load_url";
+		"wait";
+		"print";
+		"copy";
+		"mobile_run";
+		"pc_run";
+		"mobile_notify";
+		"pc_notify";
+		"add_button";
+		"remove_button";
+		"stop";
+		"custom";
+	}
+
+	NAmanage.PluginMaker_RebuildCommandList = function()
+		local pm = NAStuff.PluginMaker
+		local list = pm.CommandList
+		if not list or not list.Parent then return end
+		NAmanage.PluginMaker_ClearGui(list)
+		local layout = NAmanage.PluginMaker_New("UIListLayout", list, {
+			Padding = UDim.new(0, 5);
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+		local pad = NAmanage.PluginMaker_New("UIPadding", list, {})
+		pad.PaddingTop = UDim.new(0, 6)
+		pad.PaddingBottom = UDim.new(0, 6)
+		pad.PaddingLeft = UDim.new(0, 6)
+		pad.PaddingRight = UDim.new(0, 6)
+		for index, command in pm.commands or {} do
+			local button = NAmanage.PluginMaker_Button(list, tostring(command.name ~= "" and command.name or ("Command "..index)), function()
+				pm.selectedCommand = index
+				NAmanage.PluginMaker_RebuildCommandList()
+				NAmanage.PluginMaker_RebuildEditor()
+			end)
+			button.Size = UDim2.new(1, -2, 0, 34)
+			if index == pm.selectedCommand then
+				button.BackgroundColor3 = Color3.fromRGB(75, 58, 105)
+				button.TextColor3 = Color3.fromRGB(255, 255, 255)
+			end
+		end
+		layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+			if list and list.Parent then
+				list.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 12)
+			end
+		end)
+		list.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 12)
+	end
+
+	NAmanage.PluginMaker_ActionExtraHint = function(kind)
+		if kind == "notify" or kind == "mobile_notify" or kind == "pc_notify" then
+			return "Duration seconds"
+		elseif kind == "add_button" then
+			return "Command to run"
+		elseif kind == "load_url" then
+			return "No extra value needed"
+		elseif kind == "wait" then
+			return "Optional seconds"
+		end
+		return "Extra value"
+	end
+
+	NAmanage.PluginMaker_ActionValueHint = function(kind)
+		if kind == "notify" or kind == "print" or kind == "copy" or kind == "mobile_notify" or kind == "pc_notify" then
+			return "Text; placeholders supported"
+		elseif kind == "run" or kind == "mobile_run" or kind == "pc_run" then
+			return "NA command, e.g. fly 50"
+		elseif kind == "load_url" then
+			return "Raw script URL, e.g. https://raw.githubusercontent.com/..."
+		elseif kind == "wait" then
+			return "Seconds"
+		elseif kind == "add_button" then
+			return "Button label"
+		elseif kind == "remove_button" then
+			return "Button label or id"
+		elseif kind == "custom" then
+			return "Lua/Luau code"
+		elseif kind == "stop" then
+			return "No value needed"
+		end
+		return "Value"
+	end
+
+	NAmanage.PluginMaker_EnsureActionPicker = function()
+		local pm = NAStuff.PluginMaker
+		if pm.ActionPickerOverlay and pm.ActionPickerOverlay.Parent == pm.Frame then
+			return true
+		end
+		if not pm.Frame or not pm.Frame.Parent then
+			return false
+		end
+
+		pm.ActionPickerOverlay = NAmanage.PluginMaker_New("Frame", pm.Frame, {
+			Name = "ActionPickerOverlay";
+			BackgroundTransparency = 1;
+			BorderSizePixel = 0;
+			Size = UDim2.new(1, 0, 1, 0);
+			Visible = false;
+			Active = true;
+			ZIndex = 130;
+		})
+
+		local card = NAmanage.PluginMaker_New("Frame", pm.ActionPickerOverlay, {
+			Name = "ActionPickerCard";
+			AnchorPoint = Vector2.new(0.5, 0.5);
+			Position = UDim2.new(0.5, 0, 0.5, 0);
+			Size = UDim2.new(0.55, 0, 0.72, 0);
+			BackgroundColor3 = Color3.fromRGB(20, 21, 28);
+			BackgroundTransparency = 0.02;
+			BorderSizePixel = 0;
+			ZIndex = 131;
+		})
+		NAmanage.PluginMaker_Corner(card, 9)
+		NAmanage.PluginMaker_Stroke(card, 0.35)
+
+		local sizeConstraint = NAmanage.PluginMaker_New("UISizeConstraint", card, {})
+		sizeConstraint.MinSize = Vector2.new(240, 220)
+		sizeConstraint.MaxSize = Vector2.new(420, 420)
+
+		local title = NAmanage.PluginMaker_Label(card, "Choose Action", 14)
+		title.Position = UDim2.new(0, 12, 0, 8)
+		title.Size = UDim2.new(1, -92, 0, 24)
+		title.Font = Enum.Font.GothamBold
+		title.TextColor3 = Color3.fromRGB(245, 246, 250)
+		title.ZIndex = 132
+
+		local close = NAmanage.PluginMaker_Button(card, "Close", function()
+			pm.ActionPickerOverlay.Visible = false
+		end)
+		close.AnchorPoint = Vector2.new(1, 0)
+		close.Position = UDim2.new(1, -8, 0, 7)
+		close.Size = UDim2.new(0, 66, 0, 26)
+		close.ZIndex = 133
+
+		local hint = NAmanage.PluginMaker_Label(card, "Select what the command should do. The picker closes after selection.", 10)
+		hint.Position = UDim2.new(0, 12, 0, 34)
+		hint.Size = UDim2.new(1, -24, 0, 30)
+		hint.TextColor3 = Color3.fromRGB(160, 163, 180)
+		hint.ZIndex = 132
+
+		local list = NAmanage.PluginMaker_New("ScrollingFrame", card, {
+			Name = "ActionPickerList";
+			BackgroundColor3 = Color3.fromRGB(15, 16, 21);
+			BackgroundTransparency = 0.08;
+			BorderSizePixel = 0;
+			Position = UDim2.new(0, 10, 0, 68);
+			Size = UDim2.new(1, -20, 1, -78);
+			CanvasSize = UDim2.new();
+			ScrollBarThickness = 4;
+			ScrollingDirection = Enum.ScrollingDirection.Y;
+			ZIndex = 132;
+		})
+		NAmanage.PluginMaker_Corner(list, 7)
+		NAmanage.PluginMaker_Stroke(list, 0.78)
+		local layout = NAmanage.PluginMaker_New("UIListLayout", list, {
+			Padding = UDim.new(0, 5);
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+		local padding = NAmanage.PluginMaker_New("UIPadding", list, {})
+		padding.PaddingTop = UDim.new(0, 6)
+		padding.PaddingBottom = UDim.new(0, 6)
+		padding.PaddingLeft = UDim.new(0, 6)
+		padding.PaddingRight = UDim.new(0, 6)
+
+		for _, kind in NAmanage.PluginMaker_ActionTypes do
+			local button = NAmanage.PluginMaker_Button(list, NAmanage.PluginMaker_ActionName(kind), function()
+				pm.actionType = kind
+				pm.ActionPickerOverlay.Visible = false
+				if pm.ActionTypeButton and pm.ActionTypeButton.Parent then
+					pm.ActionTypeButton.Text = NAmanage.PluginMaker_ActionName(kind).."  v"
+				end
+				if pm.ActionValueBox and pm.ActionValueBox.Parent then
+					pm.ActionValueBox.PlaceholderText = NAmanage.PluginMaker_ActionValueHint(kind)
+				end
+				if pm.ActionExtraBox and pm.ActionExtraBox.Parent then
+					pm.ActionExtraBox.PlaceholderText = NAmanage.PluginMaker_ActionExtraHint(kind)
+				end
+			end)
+			button.Size = UDim2.new(1, -2, 0, 34)
+			button.TextXAlignment = Enum.TextXAlignment.Left
+			button.ZIndex = 133
+		end
+
+		layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+			if list and list.Parent then
+				list.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 12)
+			end
+		end)
+		list.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 12)
+		return true
+	end
+
+	NAmanage.PluginMaker_OpenActionMenu = function()
+		local pm = NAStuff.PluginMaker
+		if not NAmanage.PluginMaker_EnsureActionPicker() then
+			return
+		end
+		pm.ActionPickerOverlay.Visible = true
+	end
+
+	NAmanage.PluginMaker_EnsureCodeEditor = function()
+		local pm = NAStuff.PluginMaker
+		if pm.CodeOverlay and pm.CodeOverlay.Parent == pm.Frame then
+			return true
+		end
+		if not pm.Frame or not pm.Frame.Parent then
+			return false
+		end
+
+		pm.CodeOverlay = NAmanage.PluginMaker_New("Frame", pm.Frame, {
+			Name = "CodeEditorOverlay";
+			BackgroundColor3 = Color3.fromRGB(4, 4, 7);
+			BackgroundTransparency = 0.25;
+			BorderSizePixel = 0;
+			Size = UDim2.new(1, 0, 1, 0);
+			Visible = false;
+			Active = true;
+			ZIndex = 140;
+		})
+
+		local card = NAmanage.PluginMaker_New("Frame", pm.CodeOverlay, {
+			Name = "CodeEditorCard";
+			AnchorPoint = Vector2.new(0.5, 0.5);
+			Position = UDim2.new(0.5, 0, 0.5, 0);
+			Size = UDim2.new(1, -30, 1, -30);
+			BackgroundColor3 = Color3.fromRGB(18, 19, 25);
+			BorderSizePixel = 0;
+			ZIndex = 141;
+		})
+		NAmanage.PluginMaker_Corner(card, 9)
+		NAmanage.PluginMaker_Stroke(card, 0.4)
+
+		pm.CodeTitle = NAmanage.PluginMaker_Label(card, "Code Editor", 14)
+		pm.CodeTitle.Position = UDim2.new(0, 10, 0, 7)
+		pm.CodeTitle.Size = UDim2.new(1, -20, 0, 22)
+		pm.CodeTitle.Font = Enum.Font.GothamBold
+		pm.CodeTitle.TextColor3 = Color3.fromRGB(245, 246, 250)
+		pm.CodeTitle.ZIndex = 142
+
+		pm.CodeHint = NAmanage.PluginMaker_Label(card, "", 10)
+		pm.CodeHint.Position = UDim2.new(0, 10, 0, 31)
+		pm.CodeHint.Size = UDim2.new(1, -20, 0, 34)
+		pm.CodeHint.TextColor3 = Color3.fromRGB(155, 158, 176)
+		pm.CodeHint.TextYAlignment = Enum.TextYAlignment.Top
+		pm.CodeHint.ZIndex = 142
+
+		pm.CodeBox = NAmanage.PluginMaker_New("TextBox", card, {
+			Name = "Code";
+			BackgroundColor3 = Color3.fromRGB(11, 12, 16);
+			BackgroundTransparency = 0.02;
+			BorderSizePixel = 0;
+			ClearTextOnFocus = false;
+			Font = Enum.Font.Code;
+			MultiLine = true;
+			Position = UDim2.new(0, 10, 0, 70);
+			Size = UDim2.new(1, -20, 1, -146);
+			Text = "";
+			TextColor3 = Color3.fromRGB(225, 227, 235);
+			TextSize = 12;
+			TextWrapped = false;
+			TextXAlignment = Enum.TextXAlignment.Left;
+			TextYAlignment = Enum.TextYAlignment.Top;
+			ZIndex = 142;
+		})
+		NAmanage.PluginMaker_Corner(pm.CodeBox, 6)
+		NAmanage.PluginMaker_Stroke(pm.CodeBox, 0.75)
+		local codePadding = NAmanage.PluginMaker_New("UIPadding", pm.CodeBox, {})
+		codePadding.PaddingTop = UDim.new(0, 7)
+		codePadding.PaddingBottom = UDim.new(0, 7)
+		codePadding.PaddingLeft = UDim.new(0, 7)
+		codePadding.PaddingRight = UDim.new(0, 7)
+
+		local buttons = NAmanage.PluginMaker_New("Frame", card, {
+			BackgroundTransparency = 1;
+			Position = UDim2.new(0, 10, 1, -68);
+			Size = UDim2.new(1, -20, 0, 58);
+			ZIndex = 142;
+		})
+		local grid = NAmanage.PluginMaker_New("UIGridLayout", buttons, {
+			CellPadding = UDim2.new(0, 5, 0, 4);
+			CellSize = UDim2.new(0.333333, -4, 0, 27);
+			FillDirectionMaxCells = 3;
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+
+		NAmanage.PluginMaker_Button(buttons, "Load URL Example", function()
+			local snippet = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/user/repo/refs/heads/main/script.lua"))()'
+			if pm.CodeBox.Text ~= "" and not pm.CodeBox.Text:match("\n$") then
+				pm.CodeBox.Text ..= "\n"
+			end
+			pm.CodeBox.Text ..= snippet
+		end)
+
+		NAmanage.PluginMaker_Button(buttons, "Service Example", function()
+			local selected = NAmanage.PluginMaker_GetSelectedServices()
+			local name = selected[1] or "CollectionService"
+			local varName = NAmanage.PluginMaker_ServiceVar(name) or "Service"
+			local snippet = 'local '..varName..' = Services['..NAmanage.PluginMaker_Quote(name)..']'
+			if pm.CodeBox.Text ~= "" and not pm.CodeBox.Text:match("\n$") then
+				pm.CodeBox.Text ..= "\n"
+			end
+			pm.CodeBox.Text ..= snippet
+		end)
+
+		NAmanage.PluginMaker_Button(buttons, "Copy", function()
+			if type(setclipboard) == "function" then
+				pcall(setclipboard, pm.CodeBox.Text)
+			end
+		end)
+
+		local save = NAmanage.PluginMaker_Button(buttons, "Save Code", function()
+			local value = tostring(pm.CodeBox.Text or "")
+			if pm.codeEditTarget == "file" then
+				if type(pm.codeEditPath) ~= "string" or type(writefile) ~= "function" then
+					NAmanage.PluginMaker_SetStatus("Existing plugin path or writefile is unavailable", "error")
+					return
+				end
+				local okCompile, compileErr = NAmanage.PluginMaker_CompileCheck(value)
+				if not okCompile then
+					NAmanage.PluginMaker_SetStatus("Compile error: "..tostring(compileErr), "error")
+					return
+				end
+				local okWrite, writeErr = pcall(writefile, pm.codeEditPath, value)
+				if not okWrite then
+					NAmanage.PluginMaker_SetStatus("Failed to update plugin: "..tostring(writeErr), "error")
+					return
+				end
+				NAmanage.PluginMaker_ReloadPlugins()
+				pm.CodeOverlay.Visible = false
+				NAmanage.PluginMaker_SetStatus("Updated "..tostring(pm.codeEditPath), "success")
+				DoNotif("Plugin updated and reloaded", 3)
+				return
+			end
+			if pm.codeEditTarget == "startup" then
+				pm.startupCode = value
+			elseif pm.codeEditTarget == "command" then
+				local command = pm.commands and pm.commands[pm.codeEditCommandIndex or pm.selectedCommand]
+				if command then
+					command.customCode = value
+				end
+			end
+			pm.dirty = true
+			pm.CodeOverlay.Visible = false
+			NAmanage.PluginMaker_RebuildEditor()
+			NAmanage.PluginMaker_SetStatus("Custom code updated", "success")
+		end)
+		save.BackgroundColor3 = Color3.fromRGB(75, 58, 105)
+
+		NAmanage.PluginMaker_Button(buttons, "Cancel", function()
+			pm.CodeOverlay.Visible = false
+		end)
+		return true
+	end
+
+	NAmanage.PluginMaker_OpenCodeEditor = function(target)
+		local pm = NAStuff.PluginMaker
+		if not NAmanage.PluginMaker_EnsureCodeEditor() then
+			return
+		end
+		pm.codeEditTarget = target
+		if target == "startup" then
+			pm.codeEditCommandIndex = nil
+			pm.CodeTitle.Text = "Plugin Startup Code"
+			pm.CodeHint.Text = "Runs when the plugin loads. Available: ServiceResolver, Services, and "..tostring(#NAmanage.PluginMaker_GetSelectedServices()).." selected service local(s)."
+			pm.CodeBox.Text = tostring(pm.startupCode or "")
+		else
+			local command, index = NAmanage.PluginMaker_GetSelectedCommand()
+			pm.codeEditCommandIndex = index
+			pm.CodeTitle.Text = "Command Code - "..tostring(command and command.name or "Command")
+			pm.CodeHint.Text = "Runs inside this command after its visual actions. Available: args, player, ctx, ctx.ServiceResolver, Services, and "..tostring(#NAmanage.PluginMaker_GetSelectedServices()).." selected service local(s)."
+			pm.CodeBox.Text = tostring(command and command.customCode or "")
+		end
+		pm.CodeOverlay.Visible = true
+	end
+
+	NAmanage.PluginMaker_RebuildEditor = function()
+		local pm = NAStuff.PluginMaker
+		local scroll = pm.Editor
+		if not scroll or not scroll.Parent then return end
+		NAmanage.PluginMaker_ClearGui(scroll)
+		local command = NAmanage.PluginMaker_GetSelectedCommand()
+		if not command then return end
+		local layout = NAmanage.PluginMaker_New("UIListLayout", scroll, {
+			Padding = UDim.new(0, 7);
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+		local padding = NAmanage.PluginMaker_New("UIPadding", scroll, {})
+		padding.PaddingTop = UDim.new(0, 8)
+		padding.PaddingBottom = UDim.new(0, 10)
+		padding.PaddingLeft = UDim.new(0, 8)
+		padding.PaddingRight = UDim.new(0, 8)
+
+		local function row(height)
+			return NAmanage.PluginMaker_New("Frame", scroll, {
+				BackgroundTransparency = 1;
+				BorderSizePixel = 0;
+				Size = UDim2.new(1, -2, 0, height or 34);
+			})
+		end
+
+		local function inputRow(labelText, value, placeholder, callback)
+			local holder = row(38)
+			local label = NAmanage.PluginMaker_Label(holder, labelText, 11)
+			label.Position = UDim2.new(0, 0, 0, 0)
+			label.Size = UDim2.new(0.31, -6, 1, 0)
+			local box = NAmanage.PluginMaker_Input(holder, placeholder, value, callback)
+			box.Position = UDim2.new(0.31, 0, 0, 2)
+			box.Size = UDim2.new(0.69, 0, 1, -4)
+			return box
+		end
+
+		inputRow("Command", command.name, "Command name", function(value)
+			command.name = NAmanage.PluginMaker_Trim(value)
+			pm.dirty = true
+			NAmanage.PluginMaker_RebuildCommandList()
+		end)
+		inputRow("Aliases", command.aliases, "alias1, alias2", function(value)
+			command.aliases = value
+			pm.dirty = true
+		end)
+		inputRow("Arguments", command.argsHint, "[player] [text]", function(value)
+			command.argsHint = value
+			pm.dirty = true
+		end)
+		inputRow("Description", command.description, "What this command does", function(value)
+			command.description = value
+			pm.dirty = true
+		end)
+
+		local toggleRow = row(34)
+		local toggleLayout = NAmanage.PluginMaker_New("UIGridLayout", toggleRow, {
+			CellPadding = UDim2.new(0, 5, 0, 0);
+			CellSize = UDim2.new(0.33, -4, 1, 0);
+			FillDirectionMaxCells = 3;
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+		local function toggleButton(text, key)
+			local button
+			local function paint()
+				button.Text = text..": "..(command[key] == true and "ON" or "OFF")
+				button.BackgroundColor3 = command[key] == true and Color3.fromRGB(75, 58, 105) or Color3.fromRGB(42, 43, 54)
+			end
+			button = NAmanage.PluginMaker_Button(toggleRow, "", function()
+				command[key] = not (command[key] == true)
+				pm.dirty = true
+				paint()
+				if key == "userButton" then
+					NAmanage.PluginMaker_RebuildEditor()
+				end
+			end)
+			paint()
+			return button
+		end
+		toggleButton("Requires Args", "requiresArgs")
+		toggleButton("Override Alias", "overrideAliases")
+		toggleButton("User Button", "userButton")
+
+		if command.userButton == true then
+			inputRow("Button Label", command.userButtonLabel, command.name ~= "" and command.name or "Button", function(value)
+				command.userButtonLabel = value
+				pm.dirty = true
+			end)
+			local saveArgsRow = row(32)
+			local saveArgs = NAmanage.PluginMaker_Button(saveArgsRow, "", function()
+				command.saveButtonArgs = not (command.saveButtonArgs ~= false)
+				pm.dirty = true
+				NAmanage.PluginMaker_RebuildEditor()
+			end)
+			saveArgs.Size = UDim2.new(1, 0, 1, 0)
+			saveArgs.Text = "User Button Saves Typed Args: "..(command.saveButtonArgs ~= false and "ON" or "OFF")
+			if command.saveButtonArgs ~= false then saveArgs.BackgroundColor3 = Color3.fromRGB(75, 58, 105) end
+		end
+
+		local hint = row(48)
+		local hintLabel = NAmanage.PluginMaker_Label(hint, "Placeholders: {1}, {2}, {args}, {user}, {display}, {placeid}, {jobid}", 11)
+		hintLabel.Size = UDim2.new(1, 0, 1, 0)
+		hintLabel.TextColor3 = Color3.fromRGB(165, 168, 185)
+
+		local codeRow = row(34)
+		local codeGrid = NAmanage.PluginMaker_New("UIGridLayout", codeRow, {
+			CellPadding = UDim2.new(0, 6, 0, 0);
+			CellSize = UDim2.new(0.5, -3, 1, 0);
+			FillDirectionMaxCells = 2;
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+		local startupCodeButton = NAmanage.PluginMaker_Button(codeRow, "Plugin Startup Code"..(NAmanage.PluginMaker_Trim(pm.startupCode) ~= "" and "  *" or ""), function()
+			NAmanage.PluginMaker_OpenCodeEditor("startup")
+		end)
+		local commandCodeButton = NAmanage.PluginMaker_Button(codeRow, "Command Code"..(NAmanage.PluginMaker_Trim(command.customCode) ~= "" and "  *" or ""), function()
+			NAmanage.PluginMaker_OpenCodeEditor("command")
+		end)
+		if NAmanage.PluginMaker_Trim(pm.startupCode) ~= "" then
+			startupCodeButton.BackgroundColor3 = Color3.fromRGB(57, 74, 102)
+		end
+		if NAmanage.PluginMaker_Trim(command.customCode) ~= "" then
+			commandCodeButton.BackgroundColor3 = Color3.fromRGB(75, 58, 105)
+		end
+
+		local actionHeader = row(24)
+		local actionTitle = NAmanage.PluginMaker_Label(actionHeader, "Actions", 13)
+		actionTitle.Size = UDim2.new(1, 0, 1, 0)
+		actionTitle.Font = Enum.Font.GothamBold
+
+		for index, action in command.actions or {} do
+			local actionRow = row(58)
+			actionRow.BackgroundColor3 = Color3.fromRGB(34, 35, 44)
+			actionRow.BackgroundTransparency = 0.12
+			NAmanage.PluginMaker_Corner(actionRow, 6)
+			NAmanage.PluginMaker_Stroke(actionRow, 0.82)
+			local title = NAmanage.PluginMaker_Label(actionRow, tostring(index)..". "..NAmanage.PluginMaker_ActionName(action.type), 11)
+			title.Position = UDim2.new(0, 8, 0, 4)
+			title.Size = UDim2.new(1, -104, 0, 18)
+			title.Font = Enum.Font.GothamBold
+			local summary = NAmanage.PluginMaker_Label(actionRow, tostring(action.value or "")..((action.extra and action.extra ~= "") and ("  |  "..tostring(action.extra)) or ""), 10)
+			summary.Position = UDim2.new(0, 8, 0, 24)
+			summary.Size = UDim2.new(1, -104, 0, 26)
+			summary.TextColor3 = Color3.fromRGB(170, 173, 190)
+			summary.TextTruncate = Enum.TextTruncate.AtEnd
+			local up = NAmanage.PluginMaker_Button(actionRow, "^", function()
+				if index > 1 then
+					command.actions[index], command.actions[index - 1] = command.actions[index - 1], command.actions[index]
+					pm.dirty = true
+					NAmanage.PluginMaker_RebuildEditor()
+				end
+			end)
+			up.Position = UDim2.new(1, -92, 0, 14)
+			up.Size = UDim2.new(0, 26, 0, 28)
+			local down = NAmanage.PluginMaker_Button(actionRow, "v", function()
+				if index < #command.actions then
+					command.actions[index], command.actions[index + 1] = command.actions[index + 1], command.actions[index]
+					pm.dirty = true
+					NAmanage.PluginMaker_RebuildEditor()
+				end
+			end)
+			down.Position = UDim2.new(1, -62, 0, 14)
+			down.Size = UDim2.new(0, 26, 0, 28)
+			local remove = NAmanage.PluginMaker_Button(actionRow, "x", function()
+				table.remove(command.actions, index)
+				pm.dirty = true
+				NAmanage.PluginMaker_RebuildEditor()
+			end)
+			remove.Position = UDim2.new(1, -32, 0, 14)
+			remove.Size = UDim2.new(0, 26, 0, 28)
+			remove.TextColor3 = Color3.fromRGB(255, 160, 168)
+		end
+
+		local addAction = row(112)
+		addAction.BackgroundColor3 = Color3.fromRGB(31, 32, 40)
+		addAction.BackgroundTransparency = 0.08
+		NAmanage.PluginMaker_Corner(addAction, 7)
+		NAmanage.PluginMaker_Stroke(addAction, 0.78)
+
+		pm.ActionTypeButton = NAmanage.PluginMaker_Button(addAction, NAmanage.PluginMaker_ActionName(pm.actionType).."  v", function()
+			NAmanage.PluginMaker_OpenActionMenu()
+		end)
+		pm.ActionTypeButton.Position = UDim2.new(0, 6, 0, 6)
+		pm.ActionTypeButton.Size = UDim2.new(0.38, -9, 0, 30)
+
+		pm.ActionValueBox = NAmanage.PluginMaker_Input(addAction, NAmanage.PluginMaker_ActionValueHint(pm.actionType), pm.actionValue or "", function(value)
+			pm.actionValue = value
+		end)
+		pm.ActionValueBox.Position = UDim2.new(0.38, 3, 0, 6)
+		pm.ActionValueBox.Size = UDim2.new(0.62, -9, 0, 30)
+
+		pm.ActionExtraBox = NAmanage.PluginMaker_Input(addAction, NAmanage.PluginMaker_ActionExtraHint(pm.actionType), pm.actionExtra or "", function(value)
+			pm.actionExtra = value
+		end)
+		pm.ActionExtraBox.Position = UDim2.new(0, 6, 0, 42)
+		pm.ActionExtraBox.Size = UDim2.new(0.62, -9, 0, 30)
+
+		local addButton = NAmanage.PluginMaker_Button(addAction, "Add Action", function()
+			if pm.ActionValueBox then pm.actionValue = pm.ActionValueBox.Text end
+			if pm.ActionExtraBox then pm.actionExtra = pm.ActionExtraBox.Text end
+			command.actions = command.actions or {}
+			command.actions[#command.actions + 1] = {
+				type = pm.actionType or "notify";
+				value = pm.actionValue or "";
+				extra = pm.actionExtra or "";
+			}
+			pm.actionValue = ""
+			if pm.actionType ~= "notify" and pm.actionType ~= "mobile_notify" and pm.actionType ~= "pc_notify" then
+				pm.actionExtra = ""
+			end
+			pm.dirty = true
+			NAmanage.PluginMaker_RebuildEditor()
+		end)
+		addButton.Position = UDim2.new(0.62, 3, 0, 42)
+		addButton.Size = UDim2.new(0.38, -9, 0, 30)
+		addButton.BackgroundColor3 = Color3.fromRGB(75, 58, 105)
+
+		layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+			if scroll and scroll.Parent then
+				scroll.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 18)
+			end
+		end)
+		scroll.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 18)
+	end
+
+	NAmanage.PluginMaker_OpenPreview = function()
+		local pm = NAStuff.PluginMaker
+		local source, err = NAmanage.PluginMaker_Generate()
+		if not source then
+			NAmanage.PluginMaker_SetStatus(err, "error")
+			return
+		end
+		local okCompile, compileErr = NAmanage.PluginMaker_CompileCheck(source)
+		if not okCompile then
+			NAmanage.PluginMaker_SetStatus("Compile error: "..tostring(compileErr), "error")
+			return
+		end
+		if not pm.PreviewOverlay or not pm.PreviewOverlay.Parent then return end
+		pm.PreviewBox.Text = source
+		pm.PreviewOverlay.Visible = true
+		NAmanage.PluginMaker_SetStatus("Generated "..tostring(pm.format == "iy" and ".iy" or ".na").." source successfully", "success")
+	end
+
+	NAmanage.PluginMaker_ApplyLayout = function()
+		local pm = NAStuff.PluginMaker
+		local frame = pm.Frame
+		if not frame or not frame.Parent then return end
+		local size = frame.AbsoluteSize
+		local width = math.max(1, tonumber(size.X) or 1)
+		local compactTop = width < 520
+		if pm.FormatButton then
+			pm.FormatButton.Size = UDim2.new(0, compactTop and 42 or 54, 0, 28)
+			pm.FormatButton.Position = UDim2.new(1, compactTop and -154 or -200, 0.5, 0)
+		end
+		if pm.EditExistingButton then
+			pm.EditExistingButton.Text = compactTop and "E" or "Edit"
+			pm.EditExistingButton.Size = UDim2.new(0, compactTop and 30 or 48, 0, 28)
+			pm.EditExistingButton.Position = UDim2.new(1, compactTop and -106 or -146, 0.5, 0)
+		end
+		if pm.ManageButton then
+			pm.ManageButton.Text = compactTop and "P" or "Plugins"
+			pm.ManageButton.Size = UDim2.new(0, compactTop and 30 or 58, 0, 28)
+			pm.ManageButton.Position = UDim2.new(1, compactTop and -70 or -82, 0.5, 0)
+		end
+		if pm.Topbar then
+			local title = pm.Topbar:FindFirstChildWhichIsA("TextLabel")
+			if title then
+				title.Size = UDim2.new(1, compactTop and -170 or -250, 0, 20)
+			end
+		end
+		if pm.CommandPanel then
+			local leftWidth
+			if width < 500 then
+				leftWidth = math.clamp(math.floor(width * 0.28), 104, 132)
+			else
+				leftWidth = math.clamp(math.floor(width * 0.25), 132, 210)
+			end
+			pm.CommandPanel.Size = UDim2.new(0, leftWidth, 1, 0)
+			if pm.EditorPanel then
+				pm.EditorPanel.Position = UDim2.new(0, leftWidth + 8, 0, 0)
+				pm.EditorPanel.Size = UDim2.new(1, -(leftWidth + 8), 1, 0)
+			end
+		end
+	end
+
+	NAmanage.PluginMaker_Resize = function(initial)
+		local pm = NAStuff.PluginMaker
+		local frame = pm.Frame
+		if not frame or not frame.Parent then return end
+		if initial == true then
+			local camera = Services.Workspace and Services.Workspace.CurrentCamera
+			local vp = camera and camera.ViewportSize or Vector2.new(900, 600)
+			local width = math.max(300, math.min(900, vp.X - 18))
+			local height = math.max(280, math.min(620, vp.Y - 28))
+			if NAmanage.ExecutorWindowSizing and type(NAmanage.ExecutorWindowSizing.GetSize) == "function" then
+				local okMetrics, metrics = pcall(NAmanage.ExecutorWindowSizing.GetSize, 900, 620, {
+					minWidth = 520;
+					minHeight = 360;
+					mobileMinWidth = 300;
+					mobileMinHeight = 260;
+				})
+				if okMetrics and type(metrics) == "table" then
+					width = math.min(tonumber(metrics.width) or width, math.max(300, vp.X - 18))
+					height = math.min(tonumber(metrics.height) or height, math.max(280, vp.Y - 28))
+				end
+			end
+			frame.Size = UDim2.fromOffset(width, height)
+		end
+		NAmanage.PluginMaker_ApplyLayout()
+		if initial == true and type(NAmanage.centerFrame) == "function" then
+			pcall(NAmanage.centerFrame, frame)
+		end
+	end
+
+	NAmanage.PluginMaker_BindResize = function()
+		local pm = NAStuff.PluginMaker
+		local frame = pm.Frame
+		if not frame or not frame.Parent then
+			return
+		end
+		if pm.ResizeCleanup then
+			pcall(pm.ResizeCleanup)
+			pm.ResizeCleanup = nil
+		end
+		if NAgui and type(NAgui.resizeable) == "function" then
+			local minSize = IsOnMobile and Vector2.new(300, 260) or Vector2.new(520, 360)
+			pm.ResizeCleanup = NAgui.resizeable(frame, minSize, Vector2.new(5000, 5000))
+		end
+		if pm.LayoutConnection then
+			pcall(function() pm.LayoutConnection:Disconnect() end)
+			pm.LayoutConnection = nil
+		end
+		pm.LayoutConnection = frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			NAmanage.PluginMaker_ApplyLayout()
+		end)
+	end
+
+	NAmanage.PluginMaker_BindDrag = function()
+		local pm = NAStuff.PluginMaker
+		local frame = pm.Frame
+		local topbar = pm.Topbar
+		if not frame or not topbar or not Services.UserInputService then return end
+		pm.dragging = false
+		topbar.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				pm.dragging = true
+				pm.dragStart = input.Position
+				pm.dragPos = frame.Position
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then
+						pm.dragging = false
+					end
+				end)
+			end
+		end)
+		Services.UserInputService.InputChanged:Connect(function(input)
+			if not pm.dragging or not pm.dragStart or not pm.dragPos then return end
+			if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+			local delta = input.Position - pm.dragStart
+			frame.Position = UDim2.new(pm.dragPos.X.Scale, pm.dragPos.X.Offset + delta.X, pm.dragPos.Y.Scale, pm.dragPos.Y.Offset + delta.Y)
+		end)
+	end
+
+	NAmanage.PluginMaker_BuildUI = function()
+		local pm = NAStuff.PluginMaker
+		local root = NAmanage.getUI and NAmanage.getUI() or (NAStuff and NAStuff.NASCREENGUI)
+		if not root then
+			return false, "NA UI root unavailable"
+		end
+		if pm.Frame and pm.Frame.Parent then
+			pm.Frame:Destroy()
+		end
+
+		pm.Frame = NAmanage.PluginMaker_New("Frame", root, {
+			Name = "PluginMaker";
+			AnchorPoint = Vector2.new(0, 0);
+			Position = UDim2.fromOffset(0, 0);
+			BackgroundColor3 = Color3.fromRGB(15, 16, 21);
+			BackgroundTransparency = 0.04;
+			BorderSizePixel = 0;
+			ClipsDescendants = true;
+			Visible = true;
+			ZIndex = 70;
+		})
+		NAmanage.PluginMaker_Corner(pm.Frame, 10)
+		NAmanage.PluginMaker_Stroke(pm.Frame, 0.38)
+
+		pm.Topbar = NAmanage.PluginMaker_New("Frame", pm.Frame, {
+			BackgroundColor3 = Color3.fromRGB(21, 22, 29);
+			BackgroundTransparency = 0.06;
+			BorderSizePixel = 0;
+			Position = UDim2.new(0, 0, 0, 0);
+			Size = UDim2.new(1, 0, 0, 44);
+			ZIndex = 72;
+		})
+		local title = NAmanage.PluginMaker_Label(pm.Topbar, "Plugin Maker", 16)
+		title.Position = UDim2.new(0, 12, 0, 4)
+		title.Size = UDim2.new(1, -250, 0, 20)
+		title.Font = Enum.Font.GothamBold
+		title.TextColor3 = Color3.fromRGB(245, 246, 250)
+		title.ZIndex = 73
+		local subtitle = NAmanage.PluginMaker_Label(pm.Topbar, "Build .na / .iy plugins without writing code", 10)
+		subtitle.Position = UDim2.new(0, 12, 0, 23)
+		subtitle.Size = UDim2.new(1, -250, 0, 15)
+		subtitle.TextColor3 = Color3.fromRGB(160, 163, 180)
+		subtitle.ZIndex = 73
+
+		local close = NAmanage.PluginMaker_Button(pm.Topbar, "X", function()
+			pm.Frame.Visible = false
+		end)
+		close.AnchorPoint = Vector2.new(1, 0.5)
+		close.Position = UDim2.new(1, -10, 0.5, 0)
+		close.Size = UDim2.new(0, 30, 0, 28)
+		close.TextColor3 = Color3.fromRGB(255, 170, 176)
+		close.ZIndex = 74
+
+		pm.MinimizeButton = NAmanage.PluginMaker_Button(pm.Topbar, "-", function()
+			NAmanage.PluginMaker_ToggleMinimize()
+		end)
+		pm.MinimizeButton.AnchorPoint = Vector2.new(1, 0.5)
+		pm.MinimizeButton.Position = UDim2.new(1, -46, 0.5, 0)
+		pm.MinimizeButton.Size = UDim2.new(0, 30, 0, 28)
+		pm.MinimizeButton.ZIndex = 74
+
+		pm.ManageButton = NAmanage.PluginMaker_Button(pm.Topbar, "Plugins", function()
+			NAmanage.PluginMaker_OpenInstalledManager()
+		end)
+		pm.ManageButton.AnchorPoint = Vector2.new(1, 0.5)
+		pm.ManageButton.Position = UDim2.new(1, -82, 0.5, 0)
+		pm.ManageButton.Size = UDim2.new(0, 58, 0, 28)
+		pm.ManageButton.ZIndex = 74
+
+		pm.EditExistingButton = NAmanage.PluginMaker_Button(pm.Topbar, "Edit", function()
+			NAmanage.PluginMaker_OpenFilePicker()
+		end)
+		pm.EditExistingButton.AnchorPoint = Vector2.new(1, 0.5)
+		pm.EditExistingButton.Position = UDim2.new(1, -146, 0.5, 0)
+		pm.EditExistingButton.Size = UDim2.new(0, 48, 0, 28)
+		pm.EditExistingButton.BackgroundColor3 = Color3.fromRGB(57, 74, 102)
+		pm.EditExistingButton.ZIndex = 74
+
+		pm.FormatButton = NAmanage.PluginMaker_Button(pm.Topbar, ".NA", function()
+			pm.format = pm.format == "na" and "iy" or "na"
+			pm.FormatButton.Text = pm.format == "iy" and ".IY" or ".NA"
+			pm.FormatButton.BackgroundColor3 = pm.format == "iy" and Color3.fromRGB(57, 74, 102) or Color3.fromRGB(75, 58, 105)
+			pm.dirty = true
+			NAmanage.PluginMaker_RebuildEditor()
+			NAmanage.PluginMaker_SetStatus("Output format: "..(pm.format == "iy" and "Infinite Yield .iy" or "Native NA .na"), "warn")
+		end)
+		pm.FormatButton.AnchorPoint = Vector2.new(1, 0.5)
+		pm.FormatButton.Position = UDim2.new(1, -200, 0.5, 0)
+		pm.FormatButton.Size = UDim2.new(0, 54, 0, 28)
+		pm.FormatButton.BackgroundColor3 = Color3.fromRGB(75, 58, 105)
+		pm.FormatButton.ZIndex = 74
+
+		pm.Meta = NAmanage.PluginMaker_New("Frame", pm.Frame, {
+			BackgroundTransparency = 1;
+			BorderSizePixel = 0;
+			Position = UDim2.new(0, 10, 0, 52);
+			Size = UDim2.new(1, -20, 0, 82);
+			ZIndex = 71;
+		})
+
+		local pluginNameLabel = NAmanage.PluginMaker_Label(pm.Meta, "Plugin Name", 10)
+		pluginNameLabel.Position = UDim2.new(0, 0, 0, 0)
+		pluginNameLabel.Size = UDim2.new(0.5, -5, 0, 16)
+		local fileNameLabel = NAmanage.PluginMaker_Label(pm.Meta, "File Name", 10)
+		fileNameLabel.Position = UDim2.new(0.5, 5, 0, 0)
+		fileNameLabel.Size = UDim2.new(0.5, -5, 0, 16)
+		pm.PluginNameBox = NAmanage.PluginMaker_Input(pm.Meta, "My Plugin", pm.pluginName, function(value)
+			pm.pluginName = NAmanage.PluginMaker_Trim(value)
+			if pm.fileName == "" or pm.fileName == "MyPlugin" then
+				pm.fileName = NAmanage.PluginMaker_SafeFileName(pm.pluginName)
+				if pm.FileNameBox then pm.FileNameBox.Text = pm.fileName end
+			end
+			pm.dirty = true
+		end)
+		pm.PluginNameBox.Position = UDim2.new(0, 0, 0, 18)
+		pm.PluginNameBox.Size = UDim2.new(0.5, -5, 0, 28)
+		pm.FileNameBox = NAmanage.PluginMaker_Input(pm.Meta, "MyPlugin", pm.fileName, function(value)
+			pm.fileName = NAmanage.PluginMaker_SafeFileName(value)
+			pm.dirty = true
+		end)
+		pm.FileNameBox.Position = UDim2.new(0.5, 5, 0, 18)
+		pm.FileNameBox.Size = UDim2.new(0.5, -5, 0, 28)
+		pm.DescriptionBox = NAmanage.PluginMaker_Input(pm.Meta, "Plugin description", pm.description, function(value)
+			pm.description = value
+			pm.dirty = true
+		end)
+		pm.DescriptionBox.Position = UDim2.new(0, 0, 0, 52)
+		pm.DescriptionBox.Size = UDim2.new(0.68, -5, 0, 28)
+		pm.ServicesButton = NAmanage.PluginMaker_Button(pm.Meta, "Services (0)", function()
+			NAmanage.PluginMaker_OpenServicePicker()
+		end)
+		pm.ServicesButton.Position = UDim2.new(0.68, 5, 0, 52)
+		pm.ServicesButton.Size = UDim2.new(0.32, -5, 0, 28)
+		pm.ServicesButton.BackgroundColor3 = Color3.fromRGB(42, 43, 54)
+
+		pm.Workspace = NAmanage.PluginMaker_New("Frame", pm.Frame, {
+			BackgroundTransparency = 1;
+			BorderSizePixel = 0;
+			Position = UDim2.new(0, 10, 0, 142);
+			Size = UDim2.new(1, -20, 1, -202);
+			ZIndex = 71;
+		})
+
+		pm.CommandPanel = NAmanage.PluginMaker_New("Frame", pm.Workspace, {
+			BackgroundColor3 = Color3.fromRGB(24, 25, 32);
+			BackgroundTransparency = 0.08;
+			BorderSizePixel = 0;
+			Position = UDim2.new(0, 0, 0, 0);
+			Size = UDim2.new(0, 190, 1, 0);
+			ZIndex = 72;
+		})
+		NAmanage.PluginMaker_Corner(pm.CommandPanel, 7)
+		NAmanage.PluginMaker_Stroke(pm.CommandPanel, 0.76)
+		local commandsTitle = NAmanage.PluginMaker_Label(pm.CommandPanel, "Commands", 12)
+		commandsTitle.Position = UDim2.new(0, 8, 0, 4)
+		commandsTitle.Size = UDim2.new(1, -16, 0, 22)
+		commandsTitle.Font = Enum.Font.GothamBold
+		pm.CommandList = NAmanage.PluginMaker_New("ScrollingFrame", pm.CommandPanel, {
+			BackgroundTransparency = 1;
+			BorderSizePixel = 0;
+			Position = UDim2.new(0, 4, 0, 30);
+			Size = UDim2.new(1, -8, 1, -72);
+			CanvasSize = UDim2.new();
+			ScrollBarThickness = 3;
+			ZIndex = 73;
+		})
+		local commandButtons = NAmanage.PluginMaker_New("Frame", pm.CommandPanel, {
+			BackgroundTransparency = 1;
+			Position = UDim2.new(0, 6, 1, -38);
+			Size = UDim2.new(1, -12, 0, 32);
+			ZIndex = 74;
+		})
+		local commandGrid = NAmanage.PluginMaker_New("UIGridLayout", commandButtons, {
+			CellPadding = UDim2.new(0, 4, 0, 0);
+			CellSize = UDim2.new(0.333, -3, 1, 0);
+			FillDirectionMaxCells = 3;
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+		local addCommand = NAmanage.PluginMaker_Button(commandButtons, "+", function()
+			pm.commands[#pm.commands + 1] = NAmanage.PluginMaker_DefaultCommand(#pm.commands + 1)
+			pm.selectedCommand = #pm.commands
+			pm.dirty = true
+			NAmanage.PluginMaker_RebuildCommandList()
+			NAmanage.PluginMaker_RebuildEditor()
+		end)
+		local duplicateCommand = NAmanage.PluginMaker_Button(commandButtons, "Copy", function()
+			local command = NAmanage.PluginMaker_GetSelectedCommand()
+			if not command then return end
+			local copy = {}
+			for key, value in command do
+				if key == "actions" then
+					copy.actions = {}
+					for _, action in value or {} do
+						copy.actions[#copy.actions + 1] = { type = action.type; value = action.value; extra = action.extra }
+					end
+				else
+					copy[key] = value
+				end
+			end
+			copy.name = tostring(copy.name or "command").."_copy"
+			pm.commands[#pm.commands + 1] = copy
+			pm.selectedCommand = #pm.commands
+			pm.dirty = true
+			NAmanage.PluginMaker_RebuildCommandList()
+			NAmanage.PluginMaker_RebuildEditor()
+		end)
+		local deleteCommand = NAmanage.PluginMaker_Button(commandButtons, "Del", function()
+			if #pm.commands <= 1 then
+				NAmanage.PluginMaker_SetStatus("A plugin needs at least one command", "warn")
+				return
+			end
+			table.remove(pm.commands, pm.selectedCommand)
+			pm.selectedCommand = math.clamp(pm.selectedCommand, 1, #pm.commands)
+			pm.dirty = true
+			NAmanage.PluginMaker_RebuildCommandList()
+			NAmanage.PluginMaker_RebuildEditor()
+		end)
+		deleteCommand.TextColor3 = Color3.fromRGB(255, 160, 168)
+
+		pm.EditorPanel = NAmanage.PluginMaker_New("Frame", pm.Workspace, {
+			BackgroundColor3 = Color3.fromRGB(24, 25, 32);
+			BackgroundTransparency = 0.08;
+			BorderSizePixel = 0;
+			Position = UDim2.new(0, 198, 0, 0);
+			Size = UDim2.new(1, -198, 1, 0);
+			ZIndex = 72;
+		})
+		NAmanage.PluginMaker_Corner(pm.EditorPanel, 7)
+		NAmanage.PluginMaker_Stroke(pm.EditorPanel, 0.76)
+		pm.Editor = NAmanage.PluginMaker_New("ScrollingFrame", pm.EditorPanel, {
+			BackgroundTransparency = 1;
+			BorderSizePixel = 0;
+			Position = UDim2.new(0, 4, 0, 4);
+			Size = UDim2.new(1, -8, 1, -8);
+			CanvasSize = UDim2.new();
+			ScrollBarThickness = 4;
+			ZIndex = 73;
+		})
+
+		pm.Footer = NAmanage.PluginMaker_New("Frame", pm.Frame, {
+			BackgroundTransparency = 1;
+			BorderSizePixel = 0;
+			Position = UDim2.new(0, 10, 1, -52);
+			Size = UDim2.new(1, -20, 0, 42);
+			ZIndex = 72;
+		})
+		pm.Status = NAmanage.PluginMaker_Label(pm.Footer, "Ready", 10)
+		pm.Status.Position = UDim2.new(0, 0, 0, 0)
+		pm.Status.Size = UDim2.new(1, 0, 0, 12)
+		local footerButtons = NAmanage.PluginMaker_New("Frame", pm.Footer, {
+			BackgroundTransparency = 1;
+			Position = UDim2.new(0, 0, 0, 14);
+			Size = UDim2.new(1, 0, 0, 28);
+			ZIndex = 73;
+		})
+		local footerGrid = NAmanage.PluginMaker_New("UIGridLayout", footerButtons, {
+			CellPadding = UDim2.new(0, 5, 0, 0);
+			CellSize = UDim2.new(0.2, -4, 1, 0);
+			FillDirectionMaxCells = 5;
+			SortOrder = Enum.SortOrder.LayoutOrder;
+		})
+		NAmanage.PluginMaker_Button(footerButtons, "Preview", function()
+			NAmanage.PluginMaker_OpenPreview()
+		end)
+		NAmanage.PluginMaker_Button(footerButtons, "Copy Source", function()
+			local source, err = NAmanage.PluginMaker_Generate()
+			if not source then
+				NAmanage.PluginMaker_SetStatus(err, "error")
+				return
+			end
+			local okCompile, compileErr = NAmanage.PluginMaker_CompileCheck(source)
+			if not okCompile then
+				NAmanage.PluginMaker_SetStatus("Compile error: "..tostring(compileErr), "error")
+				return
+			end
+			if type(setclipboard) ~= "function" then
+				NAmanage.PluginMaker_SetStatus("Clipboard unavailable", "error")
+				return
+			end
+			local ok = pcall(setclipboard, source)
+			NAmanage.PluginMaker_SetStatus(ok and "Plugin source copied" or "Copy failed", ok and "success" or "error")
+		end)
+		NAmanage.PluginMaker_Button(footerButtons, "Save File", function()
+			local ok, path = NAmanage.PluginMaker_Save(false)
+			if ok == true then
+				NAmanage.PluginMaker_SetStatus("Saved "..tostring(path), "success")
+				DoNotif("Plugin Maker saved "..tostring(path), 3)
+			elseif ok == false then
+				NAmanage.PluginMaker_SetStatus(tostring(path), "error")
+			end
+		end)
+		local installButton = NAmanage.PluginMaker_Button(footerButtons, "Save + Install", function()
+			local ok, path = NAmanage.PluginMaker_Save(true)
+			if ok == true then
+				NAmanage.PluginMaker_SetStatus("Installed "..tostring(path), "success")
+				DoNotif("Plugin Maker installed "..tostring(path), 3)
+			elseif ok == false then
+				NAmanage.PluginMaker_SetStatus(tostring(path), "error")
+			end
+		end)
+		installButton.BackgroundColor3 = Color3.fromRGB(75, 58, 105)
+		NAmanage.PluginMaker_Button(footerButtons, "Reset", function()
+			NAmanage.PluginMaker_ResetState()
+			pm = NAStuff.PluginMaker
+			if pm.Frame and pm.Frame.Parent then pm.Frame:Destroy() end
+			NAmanage.PluginMaker_BuildUI()
+		end)
+
+		pm.PreviewOverlay = NAmanage.PluginMaker_New("Frame", pm.Frame, {
+			BackgroundColor3 = Color3.fromRGB(5, 5, 8);
+			BackgroundTransparency = 0.16;
+			BorderSizePixel = 0;
+			Size = UDim2.new(1, 0, 1, 0);
+			Visible = false;
+			ZIndex = 100;
+		})
+		local previewCard = NAmanage.PluginMaker_New("Frame", pm.PreviewOverlay, {
+			AnchorPoint = Vector2.new(0.5, 0.5);
+			Position = UDim2.new(0.5, 0, 0.5, 0);
+			Size = UDim2.new(1, -30, 1, -30);
+			BackgroundColor3 = Color3.fromRGB(18, 19, 25);
+			BorderSizePixel = 0;
+			ZIndex = 101;
+		})
+		NAmanage.PluginMaker_Corner(previewCard, 8)
+		NAmanage.PluginMaker_Stroke(previewCard, 0.45)
+		local previewTitle = NAmanage.PluginMaker_Label(previewCard, "Generated Plugin Source", 14)
+		previewTitle.Position = UDim2.new(0, 10, 0, 6)
+		previewTitle.Size = UDim2.new(1, -92, 0, 26)
+		previewTitle.Font = Enum.Font.GothamBold
+		previewTitle.ZIndex = 102
+		local previewClose = NAmanage.PluginMaker_Button(previewCard, "Close", function()
+			pm.PreviewOverlay.Visible = false
+		end)
+		previewClose.AnchorPoint = Vector2.new(1, 0)
+		previewClose.Position = UDim2.new(1, -8, 0, 6)
+		previewClose.Size = UDim2.new(0, 68, 0, 26)
+		previewClose.ZIndex = 103
+		pm.PreviewBox = NAmanage.PluginMaker_New("TextBox", previewCard, {
+			BackgroundColor3 = Color3.fromRGB(12, 13, 17);
+			BackgroundTransparency = 0.04;
+			BorderSizePixel = 0;
+			ClearTextOnFocus = false;
+			Font = Enum.Font.Code;
+			MultiLine = true;
+			Position = UDim2.new(0, 8, 0, 38);
+			Size = UDim2.new(1, -16, 1, -76);
+			Text = "";
+			TextColor3 = Color3.fromRGB(225, 227, 235);
+			TextSize = 12;
+			TextWrapped = false;
+			TextXAlignment = Enum.TextXAlignment.Left;
+			TextYAlignment = Enum.TextYAlignment.Top;
+			ZIndex = 102;
+		})
+		NAmanage.PluginMaker_Corner(pm.PreviewBox, 6)
+		NAmanage.PluginMaker_Stroke(pm.PreviewBox, 0.78)
+		local previewCopy = NAmanage.PluginMaker_Button(previewCard, "Copy Source", function()
+			if type(setclipboard) == "function" then
+				local ok = pcall(setclipboard, pm.PreviewBox.Text)
+				NAmanage.PluginMaker_SetStatus(ok and "Plugin source copied" or "Copy failed", ok and "success" or "error")
+			end
+		end)
+		previewCopy.Position = UDim2.new(0, 8, 1, -32)
+		previewCopy.Size = UDim2.new(0, 110, 0, 26)
+		previewCopy.ZIndex = 103
+
+		NAmanage.PluginMaker_Resize(true)
+		NAmanage.PluginMaker_RebuildCommandList()
+		NAmanage.PluginMaker_RebuildEditor()
+		NAmanage.PluginMaker_UpdateServiceButton()
+		NAmanage.PluginMaker_SyncZIndex(pm.Frame)
+		NAmanage.PluginMaker_BindResize()
+		NAmanage.PluginMaker_BindDrag()
+
+		if Services.Workspace and Services.Workspace.CurrentCamera then
+			Services.Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+				if pm.Frame and pm.Frame.Parent then
+					NAmanage.PluginMaker_Resize(false)
+					if type(NAmanage.centerFrame) == "function" then
+						pcall(NAmanage.centerFrame, pm.Frame)
+					end
+				end
+			end)
+		end
+		return true
+	end
+
+	NAmanage.PluginMaker_Open = function()
+		local pm = NAStuff.PluginMaker
+		if type(pm.commands) ~= "table" or #pm.commands == 0 then
+			NAmanage.PluginMaker_ResetState()
+			pm = NAStuff.PluginMaker
+		end
+		if pm.Frame and pm.Frame.Parent then
+			pm.Frame.Visible = true
+			if pm.minimized == true then
+				NAmanage.PluginMaker_ToggleMinimize()
+			end
+			NAmanage.PluginMaker_Resize(false)
+			if type(NAmanage.centerFrame) == "function" then
+				pcall(NAmanage.centerFrame, pm.Frame)
+			end
+			NAmanage.PluginMaker_RebuildCommandList()
+			NAmanage.PluginMaker_RebuildEditor()
+			NAmanage.PluginMaker_UpdateServiceButton()
+			NAmanage.PluginMaker_SyncZIndex(pm.Frame)
+			if not pm.ResizeCleanup then
+				NAmanage.PluginMaker_BindResize()
+			end
+			return true
+		end
+		return NAmanage.PluginMaker_BuildUI()
+	end
+
+	cmd.add(
+		{"pluginmaker","makeplugin","pluginbuilder","plugmaker","pmaker"},
+		{"pluginmaker","Open the no-code .na/.iy plugin builder"},
+		function()
+			local ok, err = NAmanage.PluginMaker_Open()
+			if not ok then
+				DoNotif("Plugin Maker failed: "..tostring(err or "unknown error"), 3)
+			end
+		end
+	)
+
+	cmd.add(
+		{"addallplugins","addplugins","aap","aaplugs"},
+		{"addallplugins","Move all .na to Nameless-Admin/Plugins and all .iy to Nameless-Admin/PluginsIY, then load them"},
+		function()
+			mk(plugsDirNA)
+			mk(plugsDirIY)
+			const ws = root()
+			const found = scan(ws)
+			local moved, errs = {}, 0
+			for _, src in found do
+				if isIgnoredIY(src) then
+					continue
+				end
+				local okR, data = pcall(readfile, src)
+				if okR and data then
+					const isIY = lp(src):match("%.iy$") ~= nil
+					const dstDir = isIY and plugsDirIY or plugsDirNA
+					const dst = uniq(dstDir, bn(src))
+					const okW = pcall(writefile, dst, data)
+					if okW and delfile and pcall(delfile, src) then
+						Insert(moved, bn(dst))
+					else
+						errs += 1
+					end
+				else
+					errs += 1
+				end
+			end
+			if #moved > 0 then
+				DoNotif("Moved "..#moved.." plugin file(s):\n\n"..Concat(moved, "\n"), 4.5)
+				deferPluginReload()
+			else
+				DoNotif((errs>0) and ("No plugins moved ("..errs.." error(s))") or "No .na/.iy files found outside Plugins/PluginsIY", 3)
+			end
+		end
+	)
+
+	cmd.add(
+		{"addplugin","addplug","ap","aplug"},
+		{"addplugin","Move one .na to Plugins or one .iy to PluginsIY, then load it"},
+		function(...)
+			mk(plugsDirNA)
+			mk(plugsDirIY)
+			const query = tostring((...) or ""):lower()
+			const ws = root()
+			const all = scan(ws) -- already excludes anything under Plugins
+			if #all == 0 then DoNotif("No .na/.iy files found outside Plugins/PluginsIY",3); return end
+
+			const function moveOne(path)
+				if isIgnoredIY(path) then
+					DoNotif("Skipping IY_FE.iy (Infinite Yield settings file)", 3)
+					return
+				end
+				const file = bn(path)
+				local okR, data = pcall(readfile, path)
+				if not okR or not data then DoNotif("Failed to read "..file,3); return end
+				const isIY = lp(path):match("%.iy$") ~= nil
+				const dstDir = isIY and plugsDirIY or plugsDirNA
+				const dst = uniq(dstDir, file)
+				const okW = pcall(writefile, dst, data)
+				if not okW then DoNotif("Failed to write "..file,3); return end
+				if not (delfile and pcall(delfile, path)) then DoNotif("Wrote but couldn't delete source "..file,3); return end
+				DoNotif("Moved plugin "..file,3)
+				deferPluginReload()
+			end
+
+			if #query > 0 then
+				const hits = {}
+				for _, p in all do
+					const base = bn(p):lower()
+					if base == query or base:find(query, 1, true) then Insert(hits, p) end
+				end
+				if #hits == 1 then moveOne(hits[1]); return end
+				if #hits == 0 then DoNotif("No match for '"..query.."'",3); return end
+				const btns = {}
+				for _, p in hits do
+					const file = bn(p)
+					Insert(btns, { Text = file, Callback = function() moveOne(p) end })
+				end
+				const show = Window or DoWindow
+				if show then show({Title = "Select Plugin", Buttons = btns}) else DoNotif("Multiple matches; refine name",3) end
+				return
+			end
+
+			const btns = {}
+			for _, p in all do
+				const file = bn(p)
+				Insert(btns, { Text = file, Callback = function() moveOne(p) end })
+			end
+			const show = Window or DoWindow
+			if show then show({Title = "Add Plugin", Buttons = btns}) else DoNotif("UI not available",3) end
+		end
+	)
+
+	cmd.add(
+		{"reloadplugin","relplug","rp"},
+		{"reloadplugin [name]","Reload plugin files (reloads all if no name provided)"},
+		function(...)
+			if not CustomFunctionSupport or not (NAmanage and NAmanage.LoadPlugins) then
+				DoNotif("Plugin loader unavailable",3)
+				return
+			end
+			const query = tostring((...) or ""):lower()
+			if query ~= "" then
+				local matched = false
+				for _, dir in {plugsDirNA, plugsDirIY} do
+					if isfolder and isfolder(dir) then
+						local ok, items = pcall(listfiles, dir)
+						if ok and type(items) == "table" then
+							for _, path in items do
+								if isPluginFile(path) then
+									const name = path:match("[^\\/]+$") or path
+									if name and name:lower():find(query, 1, true) then
+										matched = true
+										break
+									end
+								end
+							end
+						end
+					end
+					if matched then break end
+				end
+				if not matched then
+					DoNotif("No plugin matched '"..query.."'",3)
+					return
+				end
+			end
+			deferPluginReload({ forceNotify = true }, function(ok)
+				if not ok then
+					DoNotif("Failed to reload plugins",3)
+				elseif NAgui and NAgui.loadCMDS then
+					pcall(NAgui.loadCMDS, { force = true })
+				end
+			end)
+		end
+	)
+
+	cmd.add(
+		{"removeplugin","rmplugin","delplugin","rmp"},
+		{"removeplugin","Move a plugin file from Nameless-Admin/Plugins or Nameless-Admin/PluginsIY back to workspace"},
+		function()
+			if not (isfolder(plugsDirNA) or isfolder(plugsDirIY)) then DoNotif("Plugins folder not found",3); return end
+			const btns = {}
+			const function addButtons(dir, prefix, extPat)
+				if not isfolder(dir) then return end
+				local ok, items = pcall(listfiles, dir)
+				if not ok or type(items) ~= "table" then return end
+				for _, p in items do
+					if isIgnoredIY(p) then
+						continue
+					end
+					if type(p) == "string" and lp(p):match(extPat) then
+						const file = bn(p)
+						Insert(btns, {
+							Text = prefix..file,
+							Callback = function()
+								local okR, data = pcall(readfile, p)
+								if not okR or not data then DoNotif("Failed to read "..file,3); return end
+								const dst = uniq("", file)
+								const okW = pcall(writefile, dst, data)
+								if okW and delfile and pcall(delfile, p) then
+									DoNotif("Moved "..file.." to workspace",3)
+									if NAmanage and NAmanage.LoadPlugins then
+										deferPluginReload({ silent = true })
+									elseif NAgui and NAgui.loadCMDS then
+										pcall(NAgui.loadCMDS, { force = true })
+									end
+								else
+									DoNotif("Failed to move "..file,3)
+								end
+							end
+						})
+					end
+				end
+			end
+			addButtons(plugsDirNA, "[NA] ", "%.na$")
+			addButtons(plugsDirIY, "[IY] ", "%.iy$")
+			if #btns == 0 then DoNotif("No plugins found in Plugins/PluginsIY folders",3); return end
+			const show = Window or DoWindow
+			if show then show({Title = "Move Plugin to Workspace", Buttons = btns}) else DoNotif("Window UI not available",3) end
+		end
+	)
+
+	cmd.add(
+		{"removeallplugins","rmaplugins","clearplugins","rmap","rmaplugs"},
+		{"removeallplugins","Move all plugins from Nameless-Admin/Plugins and Nameless-Admin/PluginsIY back to workspace"},
+		function()
+			if not (isfolder(plugsDirNA) or isfolder(plugsDirIY)) then DoNotif("Plugins folder not found",3); return end
+			local moved, errs = {}, 0
+			const function moveAll(dir, extPat)
+				if not isfolder(dir) then return end
+				local ok, items = pcall(listfiles, dir)
+				if not ok or type(items) ~= "table" then errs += 1; return end
+				for _, p in items do
+					if isIgnoredIY(p) then
+						continue
+					end
+					if type(p) == "string" and lp(p):match(extPat) then
+						const file = bn(p)
+						local okR, data = pcall(readfile, p)
+						if okR and data then
+							const dst = uniq("", file)
+							const okW = pcall(writefile, dst, data)
+							if okW and delfile and pcall(delfile, p) then
+								Insert(moved, file)
+							else
+								errs += 1
+							end
+						else
+							errs += 1
+						end
+					end
+				end
+			end
+			moveAll(plugsDirNA, "%.na$")
+			moveAll(plugsDirIY, "%.iy$")
+			if #moved > 0 then
+				DoNotif("Moved "..#moved.." plugin file(s) to workspace:\n\n"..Concat(moved, "\n"), 4.5)
+			else
+				DoNotif((errs>0) and ("No plugin files moved ("..errs.." error(s))") or "No plugins found",3)
+			end
+			deferPluginReload()
+		end
+	)
+end
 
 NAmanage.SaveWaypoints = function()
 	if not FileSupport then return end
@@ -104647,6 +109144,2322 @@ NAUIMANAGER = {
 	SubplaceViewerFrame = NAStuff.NASCREENGUI:FindFirstChild("SubplaceViewer"),
 	SubplaceViewerContainer = NAStuff.NASCREENGUI:FindFirstChild("SubplaceViewer") and (NAStuff.NASCREENGUI:FindFirstChild("SubplaceViewer")):FindFirstChild("Container")
 };
+NAmanage.ScriptHub = type(NAmanage.ScriptHub) == "table" and NAmanage.ScriptHub or {}
+NAmanage.ScriptHub.engines = { "RScripts", "RobloxScripts", "HaxHell", "ScriptBlox" }
+NAmanage.ScriptHub.filterModes = { "all", "keyless", "key" }
+NAmanage.ScriptHub.catalogModes = { "all", "games", "other" }
+NAmanage.ScriptHub.tabModes = { "public", "supported", "saved" }
+NAmanage.ScriptHub.tabMode = table.find(NAmanage.ScriptHub.tabModes, NAmanage.ScriptHub.tabMode) and NAmanage.ScriptHub.tabMode or "public"
+NAmanage.ScriptHub.engine = table.find(NAmanage.ScriptHub.engines, NAmanage.ScriptHub.engine) and NAmanage.ScriptHub.engine or "RScripts"
+NAmanage.ScriptHub.filterMode = table.find(NAmanage.ScriptHub.filterModes, NAmanage.ScriptHub.filterMode) and NAmanage.ScriptHub.filterMode or "all"
+NAmanage.ScriptHub.catalogMode = table.find(NAmanage.ScriptHub.catalogModes, NAmanage.ScriptHub.catalogMode) and NAmanage.ScriptHub.catalogMode or "all"
+NAmanage.ScriptHub.page = math.max(tonumber(NAmanage.ScriptHub.page) or 1, 1)
+NAmanage.ScriptHub.totalPages = math.max(tonumber(NAmanage.ScriptHub.totalPages) or 1, 1)
+NAmanage.ScriptHub.query = tostring(NAmanage.ScriptHub.query or "")
+NAmanage.ScriptHub.entries = type(NAmanage.ScriptHub.entries) == "table" and NAmanage.ScriptHub.entries or {}
+NAmanage.ScriptHub.searching = false
+NAmanage.ScriptHub.fetchToken = tonumber(NAmanage.ScriptHub.fetchToken) or 0
+NAmanage.ScriptHub.imageCacheDir = NAfiles.NASCRIPTIMAGEPATH or "Nameless-Admin/ScriptImages"
+NAmanage.ScriptHub.imageAssets = type(NAmanage.ScriptHub.imageAssets) == "table" and NAmanage.ScriptHub.imageAssets or {}
+NAmanage.ScriptHub.imagePending = type(NAmanage.ScriptHub.imagePending) == "table" and NAmanage.ScriptHub.imagePending or {}
+NAmanage.ScriptHub.imageGeneration = tonumber(NAmanage.ScriptHub.imageGeneration) or 0
+NAmanage.ScriptHub.placeIdCache = type(NAmanage.ScriptHub.placeIdCache) == "table" and NAmanage.ScriptHub.placeIdCache or {}
+NAmanage.ScriptHub.tabStates = type(NAmanage.ScriptHub.tabStates) == "table" and NAmanage.ScriptHub.tabStates or {}
+NAmanage.ScriptHub.tabStates.public = type(NAmanage.ScriptHub.tabStates.public) == "table" and NAmanage.ScriptHub.tabStates.public or {
+	entries = NAmanage.ScriptHub.tabMode == "public" and NAmanage.ScriptHub.entries or {};
+	query = NAmanage.ScriptHub.tabMode == "public" and NAmanage.ScriptHub.query or "";
+	page = NAmanage.ScriptHub.tabMode == "public" and NAmanage.ScriptHub.page or 1;
+	totalPages = NAmanage.ScriptHub.tabMode == "public" and NAmanage.ScriptHub.totalPages or 1;
+}
+NAmanage.ScriptHub.tabStates.supported = type(NAmanage.ScriptHub.tabStates.supported) == "table" and NAmanage.ScriptHub.tabStates.supported or {
+	entries = NAmanage.ScriptHub.tabMode == "supported" and NAmanage.ScriptHub.entries or {};
+	query = NAmanage.ScriptHub.tabMode == "supported" and NAmanage.ScriptHub.query or "";
+	page = NAmanage.ScriptHub.tabMode == "supported" and NAmanage.ScriptHub.page or 1;
+	totalPages = NAmanage.ScriptHub.tabMode == "supported" and NAmanage.ScriptHub.totalPages or 1;
+}
+NAmanage.ScriptHub.tabStates.saved = type(NAmanage.ScriptHub.tabStates.saved) == "table" and NAmanage.ScriptHub.tabStates.saved or {
+	entries = NAmanage.ScriptHub.tabMode == "saved" and NAmanage.ScriptHub.entries or {};
+	query = NAmanage.ScriptHub.tabMode == "saved" and NAmanage.ScriptHub.query or "";
+	page = NAmanage.ScriptHub.tabMode == "saved" and NAmanage.ScriptHub.page or 1;
+	totalPages = NAmanage.ScriptHub.tabMode == "saved" and NAmanage.ScriptHub.totalPages or 1;
+}
+NAmanage.ScriptHub.supportedPageSize = 16
+NAmanage.ScriptHub.savedPageSize = 16
+
+NAmanage.ExecutorWindowSizing = type(NAmanage.ExecutorWindowSizing) == "table" and NAmanage.ExecutorWindowSizing or {}
+NAmanage.ExecutorWindowSizing.GetScale = function()
+	local scale = (NAUIMANAGER and NAUIMANAGER.AUTOSCALER and tonumber(NAUIMANAGER.AUTOSCALER.Scale)) or tonumber(NAUIScale) or 1
+	if not scale or scale <= 0 then
+		scale = 1
+	end
+	return scale
+end
+NAmanage.ExecutorWindowSizing.GetViewport = function()
+	const screenGui = NAStuff and NAStuff.NASCREENGUI
+	if screenGui and screenGui.AbsoluteSize and screenGui.AbsoluteSize.X > 0 and screenGui.AbsoluteSize.Y > 0 then
+		return screenGui.AbsoluteSize
+	end
+	const cam = Services.Workspace and Services.Workspace.CurrentCamera
+	if cam and cam.ViewportSize and cam.ViewportSize.X > 0 and cam.ViewportSize.Y > 0 then
+		return cam.ViewportSize
+	end
+	return Vector2.new(1280, 720)
+end
+NAmanage.ExecutorWindowSizing.GetLogicalViewport = function()
+	const viewport = NAmanage.ExecutorWindowSizing.GetViewport()
+	const scale = NAmanage.ExecutorWindowSizing.GetScale()
+	return Vector2.new(
+		math.max(1, viewport.X / scale),
+		math.max(1, viewport.Y / scale)
+	)
+end
+NAmanage.ExecutorWindowSizing.GetSafePad = function()
+	const scale = NAmanage.ExecutorWindowSizing.GetScale()
+	local x = IsOnMobile and 8 or 12
+	local y = IsOnMobile and 8 or 12
+	if Services.GuiService and Services.GuiService.GetGuiInset then
+		local ok, a, b = pcall(function()
+			return Services.GuiService:GetGuiInset()
+		end)
+		if ok and typeof(a) == "Vector2" and typeof(b) == "Vector2" then
+			x += math.max(a.X, b.X) / scale
+			y += math.max(a.Y, b.Y) / scale
+		end
+	end
+	return x, y
+end
+NAmanage.ExecutorWindowSizing.IsTouchCompact = function(vp)
+	const touch = Services.UserInputService and Services.UserInputService.TouchEnabled
+	const mouse = Services.UserInputService and Services.UserInputService.MouseEnabled
+	const key = Services.UserInputService and Services.UserInputService.KeyboardEnabled
+	return IsOnMobile or vp.Y < 620 or vp.X < 900 or (touch and not (mouse or key))
+end
+NAmanage.ExecutorWindowSizing.GetSize = function(baseWidth, baseHeight, config)
+	config = type(config) == "table" and config or {}
+	const vp = NAmanage.ExecutorWindowSizing.GetLogicalViewport()
+	local padX, padY = NAmanage.ExecutorWindowSizing.GetSafePad()
+	const maxW = math.max(1, math.floor(vp.X - padX * 2 + 0.5))
+	const maxH = math.max(1, math.floor(vp.Y - padY * 2 + 0.5))
+	const mobile = NAmanage.ExecutorWindowSizing.IsTouchCompact(vp)
+	const baseW = math.max(1, tonumber(baseWidth) or 920)
+	const baseH = math.max(1, tonumber(baseHeight) or 540)
+	const viewportRatio = math.clamp(tonumber(config.viewportRatio) or 0.90, 0.60, 1)
+	local capW = mobile and math.floor(maxW * viewportRatio + 0.5) or math.min(baseW, maxW)
+	local capH = mobile and math.floor(maxH * viewportRatio + 0.5) or math.min(baseH, maxH)
+	capW = math.max(1, capW)
+	capH = math.max(1, capH)
+	local factor = math.min(capW / baseW, capH / baseH, 1)
+	if not factor or factor <= 0 then
+		factor = 1
+	end
+	local width = math.floor(baseW * factor + 0.5)
+	local height = math.floor(baseH * factor + 0.5)
+	const mobileMinW = tonumber(config.mobileMinWidth) or math.min(baseW * 0.45, 340)
+	const mobileMinH = tonumber(config.mobileMinHeight) or math.min(baseH * 0.52, 280)
+	const desktopMinW = tonumber(config.minWidth) or math.min(baseW * 0.72, 680)
+	const desktopMinH = tonumber(config.minHeight) or math.min(baseH * 0.76, 420)
+	const minW = math.min(mobile and mobileMinW or desktopMinW, capW)
+	const minH = math.min(mobile and mobileMinH or desktopMinH, capH)
+	width = math.clamp(width, minW, capW)
+	height = math.clamp(height, minH, capH)
+	return {
+		viewport = vp;
+		width = width;
+		height = height;
+		capWidth = capW;
+		capHeight = capH;
+		minWidth = minW;
+		minHeight = minH;
+		mobile = mobile;
+		scale = NAmanage.ExecutorWindowSizing.GetScale();
+	}
+end
+NAmanage.ExecutorWindowSizing.Save = function(frame, sizeXAttr, sizeYAttr)
+	if not (frame and frame.Parent and frame.SetAttribute) then
+		return
+	end
+	if frame.GetAttribute and NAmanage.GetAttr(frame, "NAMenuMinimized") == true then
+		return
+	end
+	const width = tonumber(frame.Size.X.Offset) or 0
+	const height = tonumber(frame.Size.Y.Offset) or 0
+	if width > 0 and height > 0 then
+		NAmanage.SetAttr(frame, sizeXAttr, math.floor(width + 0.5))
+		NAmanage.SetAttr(frame, sizeYAttr, math.floor(height + 0.5))
+	end
+end
+NAmanage.ExecutorWindowSizing.GetSaved = function(frame, sizeXAttr, sizeYAttr)
+	if frame and frame.GetAttribute then
+		const width = tonumber(NAmanage.GetAttr(frame, sizeXAttr))
+		const height = tonumber(NAmanage.GetAttr(frame, sizeYAttr))
+		if width and height and width > 0 and height > 0 then
+			return width, height
+		end
+	end
+	return nil
+end
+NAmanage.ExecutorWindowSizing.Apply = function(frame, config)
+	if not (frame and frame.Parent) then
+		return false
+	end
+	if frame.GetAttribute and NAmanage.GetAttr(frame, "NAMenuMinimized") == true then
+		return false
+	end
+	config = type(config) == "table" and config or {}
+	const key = tostring(config.key or frame.Name or "Window")
+	const sizeXAttr = "NA"..key.."SavedSizeX"
+	const sizeYAttr = "NA"..key.."SavedSizeY"
+	const initializedAttr = "NA"..key.."DefaultSized"
+	const metrics = NAmanage.ExecutorWindowSizing.GetSize(config.baseWidth, config.baseHeight, config)
+	const initialized = frame.GetAttribute and NAmanage.GetAttr(frame, initializedAttr) == true
+	const currentWidth = tonumber(frame.Size.X.Offset) or 0
+	const currentHeight = tonumber(frame.Size.Y.Offset) or 0
+	local savedWidth, savedHeight = NAmanage.ExecutorWindowSizing.GetSaved(frame, sizeXAttr, sizeYAttr)
+	local targetWidth = metrics.width
+	local targetHeight = metrics.height
+	if savedWidth and savedHeight then
+		targetWidth = math.clamp(math.floor(savedWidth + 0.5), metrics.minWidth, metrics.capWidth)
+		targetHeight = math.clamp(math.floor(savedHeight + 0.5), metrics.minHeight, metrics.capHeight)
+	elseif initialized and currentWidth > 0 and currentHeight > 0 then
+		targetWidth = math.clamp(math.floor(currentWidth + 0.5), metrics.minWidth, metrics.capWidth)
+		targetHeight = math.clamp(math.floor(currentHeight + 0.5), metrics.minHeight, metrics.capHeight)
+		if metrics.mobile and (targetWidth >= metrics.capWidth * 0.96 or targetWidth / math.max(targetHeight, 1) > 1.95 or targetHeight < metrics.height * 0.82) then
+			targetWidth = metrics.width
+			targetHeight = metrics.height
+		end
+	end
+	frame.AnchorPoint = Vector2.new(0, 0)
+	if frame.AbsoluteSize.X ~= math.floor(targetWidth * metrics.scale + 0.5) or frame.AbsoluteSize.Y ~= math.floor(targetHeight * metrics.scale + 0.5) then
+		frame.Size = UDim2.fromOffset(targetWidth, targetHeight)
+	end
+	if frame.SetAttribute then
+		NAmanage.SetAttr(frame, initializedAttr, true)
+	end
+	NAmanage.ExecutorWindowSizing.Save(frame, sizeXAttr, sizeYAttr)
+	if config.center == true and NAmanage.centerFrame then
+		pcall(NAmanage.centerFrame, frame)
+	end
+	return true, metrics, targetWidth, targetHeight
+end
+
+NAmanage.ScriptHub_UpdateResponsiveLayout = function()
+	const hub = NAmanage.ScriptHub
+	const ui = hub.ui or NAmanage.ScriptHub_GetUI()
+	if not (ui and ui.frame) then
+		return false
+	end
+	const width = math.max(1, ui.frame.AbsoluteSize.X)
+	const previousCompact = hub.compact == true
+	const previousPhone = hub.phone == true
+	hub.compact = IsOnMobile == true or width < 690
+	hub.phone = width < 500
+	return previousCompact ~= hub.compact or previousPhone ~= hub.phone
+end
+
+NAmanage.ScriptHub_ApplyResponsive = function(center)
+	const hub = NAmanage.ScriptHub
+	const ui = hub.ui or NAmanage.ScriptHub_GetUI()
+	const frame = ui and ui.frame
+	if not frame then
+		return false
+	end
+	const ok = NAmanage.ExecutorWindowSizing.Apply(frame, {
+		key = "ScriptHub";
+		baseWidth = 760;
+		baseHeight = 520;
+		minWidth = 560;
+		minHeight = 360;
+		mobileMinWidth = 320;
+		mobileMinHeight = 300;
+		center = center == true;
+	})
+	if not ok then
+		return false
+	end
+	const changed = NAmanage.ScriptHub_UpdateResponsiveLayout()
+	if changed and #hub.entries > 0 and hub.rendering ~= true then
+		Defer(NAmanage.ScriptHub_Render)
+	end
+	return true
+end
+
+NAmanage.ScriptHub_GetUI = function()
+	const hub = NAmanage.ScriptHub
+	const frame = NAUIMANAGER and NAUIMANAGER.ScriptHubFrame
+	const container = frame and frame:FindFirstChild("Container")
+	const controls = container and container:FindFirstChild("Controls")
+	const topbar = frame and frame:FindFirstChild("Topbar")
+	hub.ui = {
+		frame = frame;
+		container = container;
+		topbar = topbar;
+		title = topbar and topbar:FindFirstChild("Title");
+		publicTab = topbar and topbar:FindFirstChild("PublicTab");
+		supportedTab = topbar and topbar:FindFirstChild("SupportedTab");
+		savedTab = topbar and topbar:FindFirstChild("SavedTab");
+		engine = topbar and topbar:FindFirstChild("Engine");
+		searchRow = container and container:FindFirstChild("SearchRow");
+		searchBox = container and container:FindFirstChild("SearchBox", true);
+		search = container and container:FindFirstChild("Search", true);
+		controls = controls;
+		first = controls and controls:FindFirstChild("First");
+		prev = controls and controls:FindFirstChild("Prev");
+		pageInfo = controls and controls:FindFirstChild("PageInfo");
+		next = controls and controls:FindFirstChild("Next");
+		last = controls and controls:FindFirstChild("Last");
+		filter = controls and controls:FindFirstChild("Filter");
+		results = container and container:FindFirstChild("Results");
+	}
+	return hub.ui
+end
+
+NAmanage.ScriptHub_SetButtonEnabled = function(button, enabled)
+	if not (button and button:IsA("GuiButton")) then
+		return
+	end
+	button.Active = enabled == true
+	button.AutoButtonColor = false
+	button.TextTransparency = enabled and 0 or 0.45
+	button.BackgroundTransparency = enabled and 0.2 or 0.55
+end
+
+NAmanage.ScriptHub_UpdateTabButton = function(button, selected)
+	if not (button and button:IsA("GuiButton")) then
+		return
+	end
+	button.Active = true
+	button.AutoButtonColor = true
+	button.TextTransparency = 0
+	button.BackgroundTransparency = selected and 0.04 or 0.28
+	button.BackgroundColor3 = selected and Color3.fromRGB(72, 54, 104) or Color3.fromRGB(29, 30, 40)
+	const stroke = button:FindFirstChild("UIStroker")
+	if stroke and stroke:IsA("UIStroke") then
+		stroke.Transparency = selected and 0.08 or 0.5
+	end
+end
+
+NAmanage.ScriptHub_UpdateControls = function()
+	const hub = NAmanage.ScriptHub
+	const ui = hub.ui or NAmanage.ScriptHub_GetUI()
+	if not ui then
+		return
+	end
+	const page = math.max(tonumber(hub.page) or 1, 1)
+	const total = math.max(tonumber(hub.totalPages) or 1, 1)
+	if ui.pageInfo then
+		ui.pageInfo.Text = Format("Page %d / %d", page, total)
+	end
+	if ui.filter then
+		if hub.tabMode == "supported" then
+			ui.filter.Text = hub.catalogMode == "games" and "Catalog: Games" or hub.catalogMode == "other" and "Catalog: Other" or "Catalog: All"
+		elseif hub.tabMode == "saved" then
+			ui.filter.Text = "Saved: Local"
+		else
+			ui.filter.Text = hub.filterMode == "keyless" and "Filter: Keyless" or hub.filterMode == "key" and "Filter: Key Req" or "Filter: All"
+		end
+	end
+	const ready = hub.searching ~= true
+	NAmanage.ScriptHub_SetButtonEnabled(ui.first, ready and page > 1)
+	NAmanage.ScriptHub_SetButtonEnabled(ui.prev, ready and page > 1)
+	NAmanage.ScriptHub_SetButtonEnabled(ui.next, ready and page < total)
+	NAmanage.ScriptHub_SetButtonEnabled(ui.last, ready and page < total)
+	NAmanage.ScriptHub_SetButtonEnabled(ui.filter, ready and (hub.tabMode == "supported" or hub.tabMode == "public" and #hub.entries > 0))
+	NAmanage.ScriptHub_SetButtonEnabled(ui.engine, ready and hub.tabMode == "public")
+	NAmanage.ScriptHub_SetButtonEnabled(ui.search, ready)
+	NAmanage.ScriptHub_UpdateTabButton(ui.publicTab, hub.tabMode == "public")
+	NAmanage.ScriptHub_UpdateTabButton(ui.supportedTab, hub.tabMode == "supported")
+	NAmanage.ScriptHub_UpdateTabButton(ui.savedTab, hub.tabMode == "saved")
+	if ui.search then
+		ui.search.Text = hub.searching and (hub.tabMode == "supported" and "Loading..." or "Searching...") or "Search"
+	end
+end
+NAmanage.ScriptHub_UpdateHeader = function()
+	const hub = NAmanage.ScriptHub
+	const ui = hub.ui or NAmanage.ScriptHub_GetUI()
+	if not ui then
+		return
+	end
+	if ui.engine then
+		ui.engine.Text = hub.tabMode == "supported" and "Catalog: GitHub" or hub.tabMode == "saved" and "Storage: Local" or hub.phone and hub.engine or "Engine: "..hub.engine
+	end
+	if ui.title then
+		ui.title.Text = hub.tabMode == "supported" and "Script Hub - NA Scripts" or hub.tabMode == "saved" and "Script Hub - Saved Scripts" or "Script Hub"
+	end
+	if ui.supportedTab then
+		ui.supportedTab.Text = "NA Scripts"
+	end
+	if ui.savedTab then
+		ui.savedTab.Text = hub.phone and "Saved" or "Saved Scripts"
+	end
+	if ui.searchBox then
+		if hub.tabMode == "supported" then
+			ui.searchBox.PlaceholderText = "Search NA scripts"
+		elseif hub.tabMode == "saved" then
+			ui.searchBox.PlaceholderText = "Search saved scripts"
+		elseif hub.engine == "RScripts" then
+			ui.searchBox.PlaceholderText = "Search for scripts (rscripts.net)"
+		elseif hub.engine == "RobloxScripts" then
+			ui.searchBox.PlaceholderText = "Search for scripts (robloxscripts.com)"
+		elseif hub.engine == "HaxHell" then
+			ui.searchBox.PlaceholderText = "Search for scripts (haxhell.com)"
+		else
+			ui.searchBox.PlaceholderText = "Search for scripts (scriptblox.com)"
+		end
+	end
+	NAmanage.ScriptHub_UpdateControls()
+end
+
+NAmanage.ScriptHub_SaveTabState = function()
+	const hub = NAmanage.ScriptHub
+	const state = type(hub.tabStates[hub.tabMode]) == "table" and hub.tabStates[hub.tabMode] or {}
+	state.entries = hub.entries
+	state.query = hub.query
+	state.page = hub.page
+	state.totalPages = hub.totalPages
+	hub.tabStates[hub.tabMode] = state
+end
+
+NAmanage.ScriptHub_RestoreTabState = function(tabMode)
+	const hub = NAmanage.ScriptHub
+	const state = type(hub.tabStates[tabMode]) == "table" and hub.tabStates[tabMode] or {}
+	hub.entries = type(state.entries) == "table" and state.entries or {}
+	hub.query = tostring(state.query or "")
+	hub.page = math.max(math.floor(tonumber(state.page) or 1), 1)
+	hub.totalPages = math.max(math.floor(tonumber(state.totalPages) or 1), 1)
+	const ui = hub.ui or NAmanage.ScriptHub_GetUI()
+	if ui and ui.searchBox then
+		ui.searchBox.Text = hub.query
+	end
+end
+
+NAmanage.ScriptHub_SetTab = function(tabMode)
+	const hub = NAmanage.ScriptHub
+	if not table.find(hub.tabModes, tabMode) or tabMode == hub.tabMode then
+		return false
+	end
+	NAmanage.ScriptHub_SaveTabState()
+	hub.fetchToken += 1
+	hub.searching = false
+	hub.tabMode = tabMode
+	NAmanage.ScriptHub_RestoreTabState(tabMode)
+	NAmanage.ScriptHub_ClearImageCache()
+	NAmanage.ScriptHub_UpdateHeader()
+	if #hub.entries > 0 then
+		NAmanage.ScriptHub_Render()
+	elseif tabMode == "supported" then
+		NAmanage.ScriptHub_LoadSupported(hub.query, hub.page)
+	elseif tabMode == "saved" then
+		NAmanage.ScriptHub_LoadSaved(hub.query, hub.page)
+	else
+		NAmanage.ScriptHub_Fetch(hub.query, hub.page)
+	end
+	return true
+end
+
+NAmanage.ScriptHub_ClearResults = function()
+	NAlib.disconnect("NAScriptHubCards")
+	const hub = NAmanage.ScriptHub
+	const ui = hub.ui or NAmanage.ScriptHub_GetUI()
+	const results = ui and ui.results
+	if not results then
+		return
+	end
+	for _, child in results:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	results.CanvasPosition = Vector2.new(0, 0)
+end
+
+NAmanage.ScriptHub_Message = function(text, color)
+	const hub = NAmanage.ScriptHub
+	const ui = hub.ui or NAmanage.ScriptHub_GetUI()
+	const results = ui and ui.results
+	if not results then
+		return
+	end
+	NAmanage.ScriptHub_ClearResults()
+	const message = InstanceNew("TextLabel", results)
+	message.Name = "ScriptHubMessage"
+	message.BorderSizePixel = 0
+	message.BackgroundColor3 = color or Color3.fromRGB(55, 55, 65)
+	message.BackgroundTransparency = 0.2
+	message.Size = UDim2.new(1, -4, 0, 54)
+	message.Text = tostring(text or "")
+	message.TextWrapped = true
+	message.TextColor3 = Color3.fromRGB(240, 240, 248)
+	message.TextSize = 14
+	message.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+	const corner = InstanceNew("UICorner", message)
+	corner.CornerRadius = UDim.new(0, 6)
+	const stroke = InstanceNew("UIStroke", message)
+	stroke.Name = "UIStroker"
+	stroke.Thickness = 1.25
+	stroke.Color = NAUISTROKER or Color3.fromRGB(155, 100, 255)
+	stroke.Transparency = 0.35
+end
+
+NAmanage.ScriptHub_RequiresKey = function(data)
+	const hub = NAmanage.ScriptHub
+	if type(data) == "table" and data.naSaved == true then
+		return data.requiresKey == true
+	end
+	if type(data) == "table" and data.naCatalog == true then
+		return false
+	end
+	local value
+	if hub.engine == "RScripts" then
+		value = data.keySystem
+	elseif hub.engine == "HaxHell" then
+		const flags = type(data.flags) == "table" and data.flags or {}
+		value = flags.keySystem
+	else
+		value = data.key
+	end
+	if value == nil and type(data.accessType) == "string" then
+		value = Lower(data.accessType) == "key"
+	end
+	if type(value) == "boolean" then
+		return value
+	elseif type(value) == "number" then
+		return value ~= 0
+	elseif type(value) == "string" then
+		const normalized = Lower(value)
+		if normalized == "" or normalized == "false" or normalized == "0" or normalized == "none" or normalized == "n/a" then
+			return false
+		end
+		if Find(normalized, "no key", 1, true) or Find(normalized, "keyless", 1, true) then
+			return false
+		end
+		return true
+	end
+	return value ~= nil and value ~= false
+end
+
+NAmanage.ScriptHub_PassesFilter = function(data)
+	if type(data) == "table" and (data.naCatalog == true or data.naSaved == true) then
+		return true
+	end
+	const mode = NAmanage.ScriptHub.filterMode
+	const requiresKey = NAmanage.ScriptHub_RequiresKey(data)
+	if mode == "keyless" then
+		return not requiresKey
+	elseif mode == "key" then
+		return requiresKey
+	end
+	return true
+end
+
+NAmanage.ScriptHub_GetSourceInfo = function(data)
+	const hub = NAmanage.ScriptHub
+	local source
+	if type(data) == "table" and data.naSaved == true then
+		if type(readfile) ~= "function" or type(data.savedPath) ~= "string" or data.savedPath == "" then
+			return "", false
+		end
+		local okRead, savedSource = pcall(readfile, data.savedPath)
+		source = okRead and type(savedSource) == "string" and savedSource or ""
+	elseif type(data) == "table" and data.naCatalog == true then
+		source = data.scriptUrl
+	elseif hub.engine == "RScripts" then
+		source = data.rawScript or data.scriptLink or data.raw or data.script
+	elseif hub.engine == "HaxHell" then
+		const links = type(data.links) == "table" and data.links or {}
+		const sourceData = type(data.source) == "table" and data.source or {}
+		source = links.raw or sourceData.rawUrl or sourceData.code or data.rawScriptUrl or data.script
+	else
+		source = data.script or data.rawScriptUrl or data.scriptLink or data.raw or data.rawScript
+	end
+	source = type(source) == "string" and source or ""
+	return source, source:match("^https?://") ~= nil
+end
+
+NAmanage.ScriptHub_ResolveSource = function(data)
+	local source, isUrl = NAmanage.ScriptHub_GetSourceInfo(data)
+	if source == "" then
+		return false, nil, "script source unavailable"
+	end
+	if isUrl then
+		local ok, body, err = NAmanage.HttpGet(source, { timeout = 12; maxAttempts = 3; Headers = { Accept = "text/plain,*/*" } })
+		if not ok or type(body) ~= "string" or body == "" then
+			return false, nil, tostring(err or "failed to download script")
+		end
+		source = body
+	end
+	return true, source
+end
+
+NAmanage.ScriptHub_SafeRunEntry = function(data)
+	local source, isUrl = NAmanage.ScriptHub_GetSourceInfo(data)
+	if source == "" then
+		DoNotif("Script source unavailable.", 3, "Script Hub")
+		return false
+	end
+	const chunkName = "@NA-ScriptHub/"..tostring(data.title or data.name or "Script")
+	if isUrl then
+		local okRun, runErr = NAmanage.RunURL(source, false, chunkName)
+		if okRun ~= true then
+			DoNotif("Safe execution failed: "..tostring(runErr or "unable to queue URL"), 4, "Script Hub")
+			return false
+		end
+	else
+		local okRun, runErr = NAmanage.RunSourceInEnv(source, chunkName)
+		if okRun ~= true then
+			DoNotif("Safe execution failed: "..tostring(runErr or "unable to queue source"), 4, "Script Hub")
+			return false
+		end
+	end
+	DoNotif("Safe Execute queued "..tostring(data.title or data.name or "script"), 2, "Script Hub")
+	return true
+end
+
+NAmanage.ScriptHub_RunEntry = function(data)
+	SpawnCall(function()
+		local source, isUrl = NAmanage.ScriptHub_GetSourceInfo(data)
+		if source == "" then
+			DoNotif("Script source unavailable.", 3, "Script Hub")
+			return
+		end
+		local body = source
+		if isUrl then
+			body = game:HttpGet(source)
+		end
+		const chunkName = "@NA-ScriptHub/"..tostring(data.title or data.name or "Script")
+		local fn, loadErr = NAmanage.RawCompile(body, chunkName)
+		if not fn then
+			error(tostring(loadErr or "compile error"), 0)
+		end
+		fn()
+		DoNotif("Executed "..tostring(data.title or data.name or "script"), 2, "Script Hub")
+	end)
+end
+
+NAmanage.ScriptHub_CopyEntry = function(data)
+	if type(setclipboard) ~= "function" then
+		DoNotif("Clipboard API unavailable.", 3, "Script Hub")
+		return
+	end
+	SpawnCall(function()
+		local okSource, source, sourceErr = NAmanage.ScriptHub_ResolveSource(data)
+		if not okSource then
+			DoNotif(tostring(sourceErr or "Script source unavailable."), 3, "Script Hub")
+			return
+		end
+		local okCopy = pcall(setclipboard, source)
+		DoNotif(okCopy and "Script copied." or "Failed to copy script.", 2, "Script Hub")
+	end)
+end
+
+NAmanage.ScriptHub_JoinEntry = function(data)
+	const hub = NAmanage.ScriptHub
+	const placeId = tonumber(NAmanage.ScriptHub_GetPlaceId(data))
+	if not placeId or placeId <= 0 then
+		DoNotif("This catalog entry does not have a valid place ID.", 3, "Script Hub")
+		return false
+	end
+	if tonumber((game and game.PlaceId) or PlaceId) == placeId then
+		DoNotif("You are already in "..tostring(data.gameName or data.name or "this game")..".", 3, "Script Hub")
+		return false
+	end
+	const now = os.clock()
+	if hub.joiningPlaceId == placeId and now - (tonumber(hub.joiningStartedAt) or 0) < 3 then
+		DoNotif("A teleport to this game is already being attempted.", 3, "Script Hub")
+		return false
+	end
+	hub.joiningPlaceId = placeId
+	hub.joiningStartedAt = now
+	if not (cmd and type(cmd.run) == "function") then
+		hub.joiningPlaceId = nil
+		DoNotif("The teleporttoplace command is unavailable.", 3, "Script Hub")
+		return false
+	end
+	local okRun, runErr = pcall(cmd.run, { "teleporttoplace", tostring(placeId) })
+	if not okRun then
+		hub.joiningPlaceId = nil
+		DoNotif("Could not run teleporttoplace: "..tostring(runErr), 4, "Script Hub")
+		return false
+	end
+	task.delay(3, function()
+		if hub.joiningPlaceId == placeId then
+			hub.joiningPlaceId = nil
+		end
+	end)
+	return true
+end
+
+NAmanage.ScriptHub_IsUniversal = function(data)
+	if type(data) ~= "table" then
+		return false
+	end
+	return data.isUniversal == true or data.universal == true or Lower(tostring(data.type or "")) == "universal"
+end
+
+NAmanage.ScriptHub_NormalizeGameName = function(value)
+	return GSub(Lower(tostring(value or "")), "[^%w]", "")
+end
+
+NAmanage.ScriptHub_GetPlaceId = function(data)
+	if type(data) ~= "table" or NAmanage.ScriptHub_IsUniversal(data) then
+		return nil
+	end
+	const gameData = type(data.game) == "table" and data.game or {}
+	const candidates = {
+		data.naResolvedPlaceId,
+		type(data.placeIds) == "table" and data.placeIds[1],
+		data.placeId,
+		data.rootPlaceId,
+		data.gameId,
+		gameData.placeId,
+		gameData.rootPlaceId,
+		gameData.gameId,
+		gameData.id,
+	}
+	for _, candidate in candidates do
+		const text = tostring(candidate or "")
+		if Match(text, "^%d+$") and tonumber(text) and tonumber(text) > 0 then
+			return tonumber(text)
+		end
+	end
+	for _, value in {
+		data.gameLink,
+		data.gameUrl,
+		data.url,
+		gameData.gameLink,
+		gameData.gameUrl,
+		gameData.url,
+	} do
+		if type(value) == "string" then
+			const placeId = Match(value, "roblox%.com/games/(%d+)") or Match(value, "/games/(%d+)")
+			if placeId and tonumber(placeId) then
+				return tonumber(placeId)
+			end
+		end
+	end
+	return nil
+end
+
+NAmanage.ScriptHub_SanitizeImageName = function(value)
+	return GSub(tostring(value or "image"), "[^%w%._%-]", "_")
+end
+
+NAmanage.ScriptHub_HashImageURL = function(value)
+	value = tostring(value or "")
+	local hash = 0
+	for index = 1, #value do
+		hash = (hash * 31 + string.byte(value, index)) % 4294967296
+	end
+	return Format("%08x", hash)
+end
+
+NAmanage.ScriptHub_NormalizeImageURL = function(value, base)
+	if type(value) ~= "string" then
+		return nil
+	end
+	const trimmed = Match(value, "^%s*(.-)%s*$") or ""
+	if trimmed == "" then
+		return nil
+	end
+	if Match(trimmed, "^rbxassetid://") or Match(trimmed, "^rbxthumb://") then
+		return trimmed
+	end
+	if Match(trimmed, "^https?://") then
+		return trimmed
+	end
+	if Sub(trimmed, 1, 2) == "//" then
+		return "https:"..trimmed
+	end
+	if type(base) ~= "string" or base == "" then
+		return trimmed
+	end
+	if Sub(trimmed, 1, 1) == "/" then
+		return base..trimmed
+	end
+	return base.."/"..trimmed
+end
+
+NAmanage.ScriptHub_IsMeaningfulImageURL = function(value)
+	if type(value) ~= "string" or value == "" then
+		return false
+	end
+	return not Find(Lower(value), "no-script", 1, true)
+end
+
+NAmanage.ScriptHub_PickImageURL = function(values, base)
+	for _, value in values do
+		const normalized = NAmanage.ScriptHub_NormalizeImageURL(value, base)
+		if normalized and NAmanage.ScriptHub_IsMeaningfulImageURL(normalized) then
+			return normalized
+		end
+	end
+	return nil
+end
+
+NAmanage.ScriptHub_ResolveImageURL = function(data)
+	const hub = NAmanage.ScriptHub
+	if type(data) ~= "table" then
+		return nil
+	end
+	if data.naSaved == true then
+		return NAmanage.ScriptHub_PickImageURL({ data.imageUrl, data.image }, "")
+	end
+	if data.naCatalog == true then
+		return NAmanage.ScriptHub_PickImageURL({ data.imageUrl, data.image }, "")
+	end
+	const gameData = type(data.game) == "table" and data.game or {}
+	if hub.engine == "RScripts" then
+		return NAmanage.ScriptHub_PickImageURL({
+			data.image,
+			data.imageUrl,
+			data.thumbnail,
+			data.cover,
+			data.banner,
+			data.img,
+			gameData.imgurl,
+			gameData.imageUrl,
+			gameData.image,
+			gameData.thumbnail,
+			gameData.cover,
+			gameData.banner,
+			gameData.gameLogo,
+		}, "https://rscripts.net")
+	elseif hub.engine == "RobloxScripts" then
+		return NAmanage.ScriptHub_PickImageURL({
+			data.image,
+			data.imageUrl,
+			data.thumbnail,
+			gameData.iconUrl,
+			gameData.image,
+		}, "https://robloxscripts.com")
+	elseif hub.engine == "HaxHell" then
+		const media = type(data.media) == "table" and data.media or {}
+		return NAmanage.ScriptHub_PickImageURL({
+			media.thumbnailUrl,
+			data.image,
+			data.imageUrl,
+			data.thumbnail,
+			gameData.thumbnailUrl,
+			gameData.iconUrl,
+			gameData.imageUrl,
+			gameData.image,
+		}, "https://haxhell.com")
+	end
+	return NAmanage.ScriptHub_PickImageURL({
+		data.image,
+		data.imageUrl,
+		data.thumbnail,
+		data.coverImage,
+		data.icon,
+		gameData.imageUrl,
+		gameData.thumbnail,
+		gameData.image,
+		gameData.coverImage,
+		gameData.icon,
+	}, "https://scriptblox.com")
+end
+
+NAmanage.ScriptHub_BuildPlaceThumbnail = function(placeId)
+	const id = tostring(placeId or "")
+	if id == "" or id == "0" then
+		return nil
+	end
+	return "https://www.roblox.com/Thumbs/PlaceThumbnail.ashx?width=420&height=270&format=png&placeId="..id
+end
+
+NAmanage.ScriptHub_BuildGameIcon = function(universeId, placeId)
+	return NAmanage.ScriptHub_BuildPlaceThumbnail(placeId)
+end
+
+NAmanage.ScriptHub_GetSavedPaths = function()
+	local base, scriptsDir = NAmanage.ExecutorScriptsBase()
+	return base, scriptsDir, base.."/script-hub-saved.json"
+end
+
+NAmanage.ScriptHub_EnsureSavedStorage = function()
+	if type(writefile) ~= "function" then
+		return false
+	end
+	const base, scriptsDir = NAmanage.ScriptHub_GetSavedPaths()
+	if type(NAmanage.safeMakeFolder) == "function" then
+		return NAmanage.safeMakeFolder(base) == true and NAmanage.safeMakeFolder(scriptsDir) == true
+	end
+	if type(isfolder) ~= "function" or type(makefolder) ~= "function" then
+		return false
+	end
+	for _, path in { base, scriptsDir } do
+		local okFolder, exists = pcall(isfolder, path)
+		if not okFolder or not exists and not pcall(makefolder, path) then
+			return false
+		end
+	end
+	return true
+end
+
+NAmanage.ScriptHub_ReadSavedRecords = function()
+	const records = {}
+	local _, scriptsDir, indexPath = NAmanage.ScriptHub_GetSavedPaths()
+	if type(isfile) ~= "function" or type(readfile) ~= "function" or not isfile(indexPath) then
+		return records
+	end
+	local okRead, raw = pcall(readfile, indexPath)
+	if not okRead or type(raw) ~= "string" or raw == "" then
+		return records
+	end
+	local okDecode, decoded = pcall(Services.HttpService.JSONDecode, Services.HttpService, raw)
+	if not okDecode or type(decoded) ~= "table" then
+		return records
+	end
+	const sourceRecords = type(decoded.entries) == "table" and decoded.entries or decoded
+	for _, record in sourceRecords do
+		if type(record) == "table" and type(record.savedId) == "string" and type(record.title) == "string" and type(record.fileName) == "string" then
+			const path = scriptsDir.."/"..record.fileName
+			if isfile(path) then
+				record.savedPath = path
+				Insert(records, record)
+			end
+		end
+	end
+	return records
+end
+
+NAmanage.ScriptHub_WriteSavedRecords = function(records)
+	if not NAmanage.ScriptHub_EnsureSavedStorage() then
+		return false, "saved scripts storage unavailable"
+	end
+	local _, _, indexPath = NAmanage.ScriptHub_GetSavedPaths()
+	const serializable = {}
+	for _, record in records do
+		if type(record) == "table" then
+			Insert(serializable, {
+				savedId = record.savedId;
+				title = record.title;
+				fileName = record.fileName;
+				engine = record.engine;
+				imageUrl = record.imageUrl;
+				gameName = record.gameName;
+				placeId = record.placeId;
+				isUniversal = record.isUniversal == true;
+				requiresKey = record.requiresKey == true;
+				verified = record.verified == true;
+				description = record.description;
+				savedAt = record.savedAt;
+			})
+		end
+	end
+	local okEncode, encoded = pcall(Services.HttpService.JSONEncode, Services.HttpService, { version = 1; entries = serializable })
+	if not okEncode then
+		return false, encoded
+	end
+	if type(NAmanage.safeWriteFile) == "function" then
+		return NAmanage.safeWriteFile(indexPath, encoded) == true
+	end
+	local okWrite, writeErr = pcall(writefile, indexPath, encoded)
+	return okWrite, writeErr
+end
+
+NAmanage.ScriptHub_DeleteSavedEntry = function(data, button)
+	const hub = NAmanage.ScriptHub
+	if hub.tabMode ~= "saved" or type(data) ~= "table" or data.naSaved ~= true or type(data.savedId) ~= "string" then
+		return false
+	end
+	const now = os.clock()
+	if not data._deleteConfirmUntil or now > data._deleteConfirmUntil then
+		data._deleteConfirmUntil = now + 3
+		if button and button.Parent then
+			button.Text = "Confirm?"
+		end
+		const confirmUntil = data._deleteConfirmUntil
+		task.delay(3, function()
+			if data._deleteConfirmUntil == confirmUntil then
+				data._deleteConfirmUntil = nil
+				if button and button.Parent then
+					button.Text = "Delete"
+				end
+			end
+		end)
+		return false
+	end
+	data._deleteConfirmUntil = nil
+	if type(delfile) ~= "function" then
+		DoNotif("Filesystem delete access is unavailable.", 4, "Script Hub")
+		if button and button.Parent then
+			button.Text = "Delete"
+		end
+		return false
+	end
+	const records = NAmanage.ScriptHub_ReadSavedRecords()
+	const remaining = {}
+	local target
+	for _, record in records do
+		if record.savedId == data.savedId then
+			target = record
+		else
+			Insert(remaining, record)
+		end
+	end
+	if not target then
+		DoNotif("This saved script no longer exists.", 3, "Script Hub")
+		hub.tabStates.saved.entries = {}
+		NAmanage.ScriptHub_LoadSaved(hub.query, hub.page)
+		return false
+	end
+	const fileName = tostring(target.fileName or "")
+	if fileName == "" or Match(fileName, "[/\\]") then
+		DoNotif("The saved script path is invalid.", 4, "Script Hub")
+		if button and button.Parent then
+			button.Text = "Delete"
+		end
+		return false
+	end
+	local _, scriptsDir = NAmanage.ScriptHub_GetSavedPaths()
+	const path = scriptsDir.."/"..fileName
+	local okDelete = true
+	if type(isfile) == "function" and isfile(path) then
+		okDelete = pcall(delfile, path)
+	end
+	if not okDelete then
+		DoNotif("Could not delete the saved script file.", 4, "Script Hub")
+		if button and button.Parent then
+			button.Text = "Delete"
+		end
+		return false
+	end
+	local okIndex, indexErr = NAmanage.ScriptHub_WriteSavedRecords(remaining)
+	if not okIndex then
+		DoNotif("Deleted the script file, but could not update Saved Scripts: "..tostring(indexErr or "index write failed"), 5, "Script Hub")
+	else
+		DoNotif("Deleted "..tostring(target.title or data.name or "saved script")..".", 3, "Script Hub")
+	end
+	hub.tabStates.saved.entries = {}
+	NAmanage.ScriptHub_LoadSaved(hub.query, hub.page)
+	return okIndex == true
+end
+
+NAmanage.ScriptHub_GetSaveId = function(data, engine)
+	const identity = type(data) == "table" and (data._id or data.id or data.slug or data.rawScriptUrl or data.scriptLink or data.title or data.name) or "script"
+	return tostring(engine or "ScriptHub")..":"..tostring(identity or "script")
+end
+
+NAmanage.ScriptHub_SaveEntry = function(data, button)
+	const hub = NAmanage.ScriptHub
+	if hub.tabMode ~= "public" or type(data) ~= "table" or data.naCatalog == true or data.naSaved == true then
+		return false
+	end
+	if not NAmanage.ScriptHub_EnsureSavedStorage() then
+		DoNotif("Filesystem access is required to save scripts.", 4, "Script Hub")
+		return false
+	end
+	const engine = hub.engine
+	const savedId = NAmanage.ScriptHub_GetSaveId(data, engine)
+	const records = NAmanage.ScriptHub_ReadSavedRecords()
+	for _, record in records do
+		if record.savedId == savedId then
+			DoNotif("This script is already saved.", 3, "Script Hub")
+			if button and button.Parent then
+				NAmanage.ScriptHub_SetActionText(button, "Saved", "floppy-disk")
+			end
+			return false
+		end
+	end
+	if button and button.Parent then
+		button.Text = "Saving..."
+		button.Active = false
+	end
+	const title = tostring(data.title or data.name or "Saved Script")
+	const imageUrl = NAmanage.ScriptHub_ResolveImageURL(data)
+	const placeId = NAmanage.ScriptHub_GetPlaceId(data)
+	const gameData = type(data.game) == "table" and data.game or {}
+	const gameName = tostring(gameData.name or gameData.title or "")
+	const requiresKey = NAmanage.ScriptHub_RequiresKey(data)
+	const universal = NAmanage.ScriptHub_IsUniversal(data)
+	const flags = type(data.flags) == "table" and data.flags or {}
+	const verified = data.verified == true or flags.verified == true or type(data.author) == "table" and (data.author.verified == true or data.author.isScripterVerified == true)
+	local description = type(data.description) == "string" and GSub(data.description, "%c", " ") or ""
+	if #description > 500 then
+		description = Sub(description, 1, 497).."..."
+	end
+	SpawnCall(function()
+		local okSource, source, sourceErr = NAmanage.ScriptHub_ResolveSource(data)
+		if not okSource then
+			if button and button.Parent then
+				NAmanage.ScriptHub_SetActionText(button, "Save", "floppy-disk")
+				button.Active = true
+			end
+			DoNotif("Could not save script: "..tostring(sourceErr or "source unavailable"), 4, "Script Hub")
+			return
+		end
+		local _, scriptsDir = NAmanage.ScriptHub_GetSavedPaths()
+		local fileName = NAmanage.ExecutorScriptsSanitizeName(title)
+		fileName = NAmanage.ExecutorScriptsStripExt(fileName).."_"..NAmanage.ScriptHub_HashImageURL(savedId)..".luau"
+		const path = scriptsDir.."/"..fileName
+		local okWrite
+		if type(NAmanage.safeWriteFile) == "function" then
+			okWrite = NAmanage.safeWriteFile(path, source)
+		else
+			okWrite = pcall(writefile, path, source)
+		end
+		if okWrite ~= true then
+			if button and button.Parent then
+				NAmanage.ScriptHub_SetActionText(button, "Save", "floppy-disk")
+				button.Active = true
+			end
+			DoNotif("Could not write the saved script file.", 4, "Script Hub")
+			return
+		end
+		Insert(records, {
+			savedId = savedId;
+			title = title;
+			fileName = fileName;
+			engine = engine;
+			imageUrl = imageUrl;
+			gameName = gameName;
+			placeId = placeId;
+			isUniversal = universal;
+			requiresKey = requiresKey;
+			verified = verified;
+			description = description;
+			savedAt = os.time();
+		})
+		local okIndex, indexErr = NAmanage.ScriptHub_WriteSavedRecords(records)
+		if not okIndex then
+			if button and button.Parent then
+				NAmanage.ScriptHub_SetActionText(button, "Save", "floppy-disk")
+				button.Active = true
+			end
+			DoNotif("Saved the script file, but could not update Saved Scripts: "..tostring(indexErr or "index write failed"), 5, "Script Hub")
+			return
+		end
+		hub.tabStates.saved.entries = {}
+		if button and button.Parent then
+			NAmanage.ScriptHub_SetActionText(button, "Saved", "floppy-disk")
+		end
+		DoNotif("Saved "..title..".", 3, "Script Hub")
+	end)
+	return true
+end
+
+NAmanage.ScriptHub_LoadSaved = function(query, page)
+	const hub = NAmanage.ScriptHub
+	if hub.searching or hub.tabMode ~= "saved" then
+		return false
+	end
+	query = GSub(GSub(tostring(query or ""), "^%s+", ""), "%s+$", "")
+	page = math.max(math.floor(tonumber(page) or 1), 1)
+	hub.query = query
+	hub.page = page
+	hub.searching = true
+	NAmanage.ScriptHub_Message("Loading saved scripts...", Color3.fromRGB(65, 62, 82))
+	NAmanage.ScriptHub_UpdateControls()
+	SpawnCall(function()
+		const normalizedQuery = Lower(query)
+		const matches = {}
+		for _, record in NAmanage.ScriptHub_ReadSavedRecords() do
+			const searchable = Lower(tostring(record.title or "").." "..tostring(record.gameName or "").." "..tostring(record.engine or ""))
+			if normalizedQuery == "" or Find(searchable, normalizedQuery, 1, true) then
+				Insert(matches, {
+					naSaved = true;
+					savedId = record.savedId;
+					savedPath = record.savedPath;
+					name = record.title;
+					title = record.title;
+					savedEngine = record.engine;
+					imageUrl = record.imageUrl;
+					gameName = record.gameName;
+					game = record.gameName ~= "" and { name = record.gameName; placeId = record.placeId } or nil;
+					naResolvedPlaceId = record.placeId;
+					isUniversal = record.isUniversal == true;
+					requiresKey = record.requiresKey == true;
+					verified = record.verified == true;
+					description = record.description;
+					savedAt = tonumber(record.savedAt) or 0;
+				})
+			end
+		end
+		table.sort(matches, function(a, b)
+			if a.savedAt ~= b.savedAt then
+				return a.savedAt > b.savedAt
+			end
+			return Lower(a.name) < Lower(b.name)
+		end)
+		const pageSize = math.max(math.floor(tonumber(hub.savedPageSize) or 16), 1)
+		const totalPages = math.max(math.ceil(#matches / pageSize), 1)
+		page = math.clamp(page, 1, totalPages)
+		const firstIndex = (page - 1) * pageSize + 1
+		const pageEntries = {}
+		for index = firstIndex, math.min(firstIndex + pageSize - 1, #matches) do
+			Insert(pageEntries, matches[index])
+		end
+		hub.entries = pageEntries
+		hub.totalPages = totalPages
+		hub.page = page
+		hub.searching = false
+		NAmanage.ScriptHub_Render()
+	end)
+	return true
+end
+
+NAmanage.ScriptHub_GetImageTargets = function(url)
+	local subdomain, path = Match(tostring(url), "^https?://([%w%-]+)%.roblox%.com(/.*)$")
+	if not subdomain then
+		subdomain, path = Match(tostring(url), "^https?://([%w%-]+)%.roproxy%.com(/.*)$")
+	end
+	if not subdomain then
+		subdomain, path = Match(tostring(url), "^https?://([%w%-]+)%.rotunnel%.com(/.*)$")
+	end
+	if not subdomain or not path then
+		return { url }
+	end
+	return {
+		"https://"..subdomain..".roproxy.com"..path,
+		"https://"..subdomain..".rotunnel.com"..path,
+		"https://"..subdomain..".roblox.com"..path,
+	}
+end
+
+NAmanage.ScriptHub_GetImageHeaders = function(url)
+	const host = Match(tostring(url), "^https?://([^/]+)") or ""
+	const headers = {
+		Accept = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+	}
+	if Find(host, "rscripts.net", 1, true) then
+		headers.Referer = "https://rscripts.net"
+	elseif Find(host, "robloxscripts.com", 1, true) then
+		headers.Referer = "https://robloxscripts.com"
+	elseif Find(host, "rbxcdn.com", 1, true) or Find(host, "roblox.com", 1, true) or Find(host, "roproxy.com", 1, true) or Find(host, "rotunnel.com", 1, true) then
+		headers.Referer = "https://www.roblox.com/"
+	end
+	return headers
+end
+
+NAmanage.ScriptHub_EnsureImageFolder = function()
+	const hub = NAmanage.ScriptHub
+	if type(getcustomasset) ~= "function" or type(writefile) ~= "function" then
+		return false
+	end
+	if type(NAmanage.safeMakeFolder) == "function" then
+		NAmanage.safeMakeFolder(NAfiles.NAFILEPATH)
+		const ok = NAmanage.safeMakeFolder(hub.imageCacheDir)
+		return ok == true
+	end
+	if type(isfolder) ~= "function" or type(makefolder) ~= "function" then
+		return false
+	end
+	local okRoot, rootExists = pcall(isfolder, NAfiles.NAFILEPATH)
+	if not okRoot then
+		return false
+	end
+	if not rootExists and not pcall(makefolder, NAfiles.NAFILEPATH) then
+		return false
+	end
+	local okFolder, folderExists = pcall(isfolder, hub.imageCacheDir)
+	if not okFolder then
+		return false
+	end
+	return folderExists or pcall(makefolder, hub.imageCacheDir)
+end
+
+NAmanage.ScriptHub_ClearImageCache = function()
+	const hub = NAmanage.ScriptHub
+	hub.imageGeneration = (tonumber(hub.imageGeneration) or 0) + 1
+	hub.imageAssets = {}
+	hub.imagePending = {}
+	if type(listfiles) ~= "function" or type(delfile) ~= "function" then
+		return false
+	end
+	local folderExists = false
+	if type(NAmanage.safeIsFolder) == "function" then
+		folderExists = NAmanage.safeIsFolder(hub.imageCacheDir)
+	elseif type(isfolder) == "function" then
+		local okFolder, value = pcall(isfolder, hub.imageCacheDir)
+		folderExists = okFolder and value == true
+	end
+	if not folderExists then
+		return true
+	end
+	local okList, paths = pcall(listfiles, hub.imageCacheDir)
+	if not okList or type(paths) ~= "table" then
+		return false
+	end
+	for _, path in paths do
+		if type(path) == "string" and path ~= "" then
+			local fileExists = true
+			if type(NAmanage.safeIsFile) == "function" then
+				fileExists = NAmanage.safeIsFile(path)
+			elseif type(isfile) == "function" then
+				local okFile, value = pcall(isfile, path)
+				fileExists = okFile and value == true
+			end
+			if fileExists then
+				if type(NAmanage.safeDeleteFile) == "function" then
+					NAmanage.safeDeleteFile(path)
+				else
+					pcall(delfile, path)
+				end
+			end
+		end
+	end
+	return true
+end
+
+NAmanage.ScriptHub_ClearImageCache()
+
+NAmanage.ScriptHub_GetImagePath = function(url, generation)
+	const hub = NAmanage.ScriptHub
+	local fileName = Match(tostring(url), "/([^/%?#]+)") or "image"
+	fileName = Match(fileName, "([^?#]+)") or fileName
+	fileName = Match(fileName, "(.+)%.") or fileName
+	fileName = NAmanage.ScriptHub_SanitizeImageName(fileName)
+	return hub.imageCacheDir.."/"..(fileName ~= "" and fileName or "image").."_"..NAmanage.ScriptHub_HashImageURL(url).."_"..tostring(tonumber(generation) or hub.imageGeneration)..".txt"
+end
+
+NAmanage.ScriptHub_DownloadImage = function(url, generation)
+	const hub = NAmanage.ScriptHub
+	generation = tonumber(generation) or hub.imageGeneration
+	if generation ~= hub.imageGeneration or type(url) ~= "string" or url == "" then
+		return nil
+	end
+	if Match(url, "^rbxassetid://") or Match(url, "^rbxthumb://") then
+		return url
+	end
+	const cached = hub.imageAssets[url]
+	if type(cached) == "string" and cached ~= "" then
+		return cached
+	end
+	if generation ~= hub.imageGeneration then
+		return nil
+	end
+	if not NAmanage.ScriptHub_EnsureImageFolder() then
+		return url
+	end
+	const path = NAmanage.ScriptHub_GetImagePath(url, generation)
+	local exists = false
+	if type(NAmanage.safeIsFile) == "function" then
+		exists = NAmanage.safeIsFile(path)
+	elseif type(isfile) == "function" then
+		local okExists, value = pcall(isfile, path)
+		exists = okExists and value == true
+	end
+	if not exists then
+		local body
+		for _, targetUrl in NAmanage.ScriptHub_GetImageTargets(url) do
+			if generation ~= hub.imageGeneration then
+				return nil
+			end
+			local okGet, result = NAmanage.HttpGet(targetUrl, {
+				timeout = 12;
+				maxAttempts = 2;
+				Headers = NAmanage.ScriptHub_GetImageHeaders(targetUrl);
+			})
+			if generation ~= hub.imageGeneration then
+				return nil
+			end
+			if okGet and type(result) == "string" and result ~= "" then
+				body = result
+				break
+			end
+		end
+		if generation ~= hub.imageGeneration then
+			return nil
+		end
+		if type(body) ~= "string" or body == "" then
+			return url
+		end
+		local okWrite
+		if type(NAmanage.safeWriteFile) == "function" then
+			okWrite = NAmanage.safeWriteFile(path, body)
+		else
+			okWrite = pcall(writefile, path, body)
+		end
+		if generation ~= hub.imageGeneration then
+			if okWrite == true then
+				if type(NAmanage.safeDeleteFile) == "function" then
+					NAmanage.safeDeleteFile(path)
+				elseif type(delfile) == "function" then
+					pcall(delfile, path)
+				end
+			end
+			return nil
+		end
+		if okWrite ~= true then
+			return url
+		end
+	end
+	if generation ~= hub.imageGeneration then
+		return nil
+	end
+	local okAsset, asset = pcall(getcustomasset, path)
+	if generation ~= hub.imageGeneration then
+		return nil
+	end
+	if okAsset and type(asset) == "string" and asset ~= "" then
+		hub.imageAssets[url] = asset
+		return asset
+	end
+	return url
+end
+
+NAmanage.ScriptHub_ApplyImage = function(imageLabel, asset)
+	if not (imageLabel and imageLabel:IsA("ImageLabel") and type(asset) == "string" and asset ~= "") then
+		return
+	end
+	imageLabel.Image = asset
+	imageLabel.ImageTransparency = math.clamp(tonumber(imageLabel:GetAttribute("NAScriptHubLoadedTransparency")) or 0, 0, 1)
+end
+
+NAmanage.ScriptHub_LoadImage = function(imageLabel, url)
+	const hub = NAmanage.ScriptHub
+	if not (imageLabel and imageLabel:IsA("ImageLabel") and type(url) == "string" and url ~= "") then
+		return
+	end
+	if Match(url, "^rbxassetid://") or Match(url, "^rbxthumb://") then
+		NAmanage.ScriptHub_ApplyImage(imageLabel, url)
+		return
+	end
+	const cached = hub.imageAssets[url]
+	if type(cached) == "string" and cached ~= "" then
+		NAmanage.ScriptHub_ApplyImage(imageLabel, cached)
+		return
+	end
+	const generation = hub.imageGeneration
+	const pendingKey = tostring(generation).."|"..url
+	if type(hub.imagePending[pendingKey]) == "table" then
+		hub.imagePending[pendingKey][#hub.imagePending[pendingKey] + 1] = imageLabel
+		return
+	end
+	hub.imagePending[pendingKey] = { imageLabel }
+	SpawnCall(function()
+		const asset = NAmanage.ScriptHub_DownloadImage(url, generation)
+		const waiting = hub.imagePending[pendingKey] or {}
+		hub.imagePending[pendingKey] = nil
+		if generation ~= hub.imageGeneration or type(asset) ~= "string" or asset == "" then
+			return
+		end
+		for _, target in waiting do
+			if target and target.Parent then
+				NAmanage.ScriptHub_ApplyImage(target, asset)
+			end
+		end
+	end)
+end
+
+NAmanage.ScriptHub_SetActionText = function(button, text, iconName)
+	if not button then
+		return
+	end
+	if type(iconName) == "string" and iconName ~= "" then
+		const iconFont = BUILDER_ICON_FONT_PATH or "rbxasset://LuaPackages/Packages/_Index/BuilderIcons/BuilderIcons/BuilderIcons.json"
+		button.RichText = true
+		button.Text = Format('<font family="%s">%s</font>  %s', iconFont, iconName, tostring(text or ""))
+	else
+		button.RichText = false
+		button.Text = tostring(text or "")
+	end
+end
+
+NAmanage.ScriptHub_CreateActionButton = function(parent, text, width, background, iconName)
+	const button = InstanceNew("TextButton", parent)
+	button.Name = text
+	button.BorderSizePixel = 0
+	button.AutoButtonColor = false
+	button.BackgroundColor3 = background
+	button.BackgroundTransparency = 0.12
+	button.Size = UDim2.new(0, width, 0, 28)
+	NAmanage.ScriptHub_SetActionText(button, text, iconName)
+	button.TextColor3 = Color3.fromRGB(245, 245, 250)
+	button.TextSize = 13
+	button.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.SemiBold, Enum.FontStyle.Normal)
+	const corner = InstanceNew("UICorner", button)
+	corner.CornerRadius = UDim.new(0, 6)
+	const stroke = InstanceNew("UIStroke", button)
+	stroke.Name = "UIStroker"
+	stroke.Thickness = 1.25
+	stroke.Color = NAUISTROKER or Color3.fromRGB(155, 100, 255)
+	stroke.Transparency = 0.25
+	return button
+end
+
+NAmanage.ScriptHub_CreateCard = function(data, order)
+	const hub = NAmanage.ScriptHub
+	const ui = hub.ui or NAmanage.ScriptHub_GetUI()
+	const results = ui and ui.results
+	if not results then
+		return
+	end
+	const titleText = tostring(data.title or data.name or "Untitled Script")
+	const requiresKey = NAmanage.ScriptHub_RequiresKey(data)
+	const stats = type(data.stats) == "table" and data.stats or {}
+	const flags = type(data.flags) == "table" and data.flags or {}
+	const views = tostring(data.views or data.viewCount or stats.views or 0)
+	const likes = tostring(data.likes or data.likeCount or stats.likes or 0)
+	const verified = data.verified == true or flags.verified == true or type(data.author) == "table" and (data.author.verified == true or data.author.isScripterVerified == true)
+	const universal = NAmanage.ScriptHub_IsUniversal(data)
+	const catalogEntry = data.naCatalog == true
+	const savedEntry = data.naSaved == true
+	const gameData = type(data.game) == "table" and data.game or nil
+	local gameName = (catalogEntry or savedEntry) and tostring(data.gameName or "") or gameData and tostring(gameData.name or gameData.title or "") or ""
+	const placeId = NAmanage.ScriptHub_GetPlaceId(data)
+	local imageUrl = NAmanage.ScriptHub_ResolveImageURL(data)
+	if not imageUrl and placeId then
+		imageUrl = NAmanage.ScriptHub_BuildPlaceThumbnail(placeId)
+	end
+	local status = savedEntry and "Saved" or catalogEntry and "Supported" or hub.engine == "RobloxScripts" and "Published" or (data.isPatched == true or flags.patched == true) and "Patched" or "Working"
+	local description = type(data.description) == "string" and GSub(data.description, "%c", " ") or ""
+	const descriptionLimit = hub.phone and 105 or hub.compact and 130 or 150
+	if #description > descriptionLimit then
+		description = Sub(description, 1, descriptionLimit - 3).."..."
+	end
+	const lines = {}
+	if savedEntry then
+		lines[#lines + 1] = universal and "Scope: Universal" or gameName ~= "" and "Game: "..gameName or "Saved game script"
+		lines[#lines + 1] = "Saved from: "..tostring(data.savedEngine or "Script Hub").." | Key: "..(requiresKey and "Required" or "No Key")
+		if tonumber(data.savedAt) and data.savedAt > 0 then
+			lines[#lines + 1] = "Saved: "..os.date("%Y-%m-%d %H:%M", data.savedAt)
+		end
+	elseif catalogEntry then
+		if data.catalogGameLinked == true then
+			lines[#lines + 1] = data.currentGame == true and "Available for the current game" or "Supported game script"
+		else
+			lines[#lines + 1] = "General / universal catalog script"
+		end
+		if gameName ~= "" then
+			lines[#lines + 1] = "Game: "..gameName
+		end
+		if placeId then
+			lines[#lines + 1] = "Place ID: "..tostring(placeId)
+		end
+		lines[#lines + 1] = "Status: Supported | Source: Nameless Admin catalog"
+	elseif universal then
+		lines[#lines + 1] = "Scope: Universal"
+	elseif gameName ~= "" then
+		lines[#lines + 1] = placeId and Format("Game: %s (ID %s)", gameName, tostring(placeId)) or "Game: "..gameName
+	end
+	if not catalogEntry and not savedEntry then
+		lines[#lines + 1] = Format("Status: %s | Key: %s | %s", status, requiresKey and "Required" or "No Key", verified and "Verified" or "Unverified")
+		lines[#lines + 1] = Format("Views: %s | Likes: %s", views, likes)
+		if hub.engine == "RScripts" then
+			lines[#lines + 1] = data.mobileReady == true and "Platform: Mobile Ready" or data.mobileReady == false and "Platform: PC Only" or "Platform: Unknown"
+		elseif hub.engine == "HaxHell" then
+			lines[#lines + 1] = flags.mobileSupported == true and "Platform: Mobile Supported" or flags.mobileSupported == false and "Platform: PC / Unknown" or "Platform: Unknown"
+		end
+	end
+	if description ~= "" then
+		lines[#lines + 1] = description
+	end
+
+	const coverHeight = imageUrl and (hub.phone and 82 or hub.compact and 96 or 108) or 0
+	const bodyOffset = imageUrl and coverHeight + 8 or 0
+	const cardHeight = (hub.phone and (description ~= "" and 188 or 168) or hub.compact and (description ~= "" and 180 or 160) or (description ~= "" and 174 or 154)) + bodyOffset
+	const card = InstanceNew("Frame", results)
+	card.Name = "ScriptHubCard"
+	card.LayoutOrder = order
+	card.BorderSizePixel = 0
+	card.BackgroundColor3 = Color3.fromRGB(42, 42, 49)
+	card.BackgroundTransparency = 0.12
+	card.Size = UDim2.new(1, -4, 0, cardHeight)
+	card.ClipsDescendants = true
+	const corner = InstanceNew("UICorner", card)
+	corner.CornerRadius = UDim.new(0, 6)
+	const stroke = InstanceNew("UIStroke", card)
+	stroke.Name = "UIStroker"
+	stroke.Thickness = 1.25
+	stroke.Color = NAUISTROKER or Color3.fromRGB(155, 100, 255)
+	stroke.Transparency = 0.35
+
+	if imageUrl then
+		const cover = InstanceNew("ImageLabel", card)
+		cover.Name = "Cover"
+		cover.BorderSizePixel = 0
+		cover.BackgroundColor3 = Color3.fromRGB(25, 25, 31)
+		cover.BackgroundTransparency = 0.08
+		cover.Position = UDim2.new(0, 0, 0, 0)
+		cover.Size = UDim2.new(1, 0, 0, coverHeight)
+		cover.Image = ""
+		cover.ImageTransparency = 1
+		cover.ScaleType = Enum.ScaleType.Crop
+		cover.ClipsDescendants = true
+		const coverCorner = InstanceNew("UICorner", cover)
+		coverCorner.CornerRadius = UDim.new(0, 6)
+		const overlay = InstanceNew("Frame", cover)
+		overlay.Name = "Overlay"
+		overlay.BorderSizePixel = 0
+		overlay.BackgroundColor3 = Color3.new(0, 0, 0)
+		overlay.BackgroundTransparency = 0.55
+		overlay.Size = UDim2.new(1, 0, 1, 0)
+		const overlayGradient = InstanceNew("UIGradient", overlay)
+		overlayGradient.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.85),
+			NumberSequenceKeypoint.new(1, 0.15),
+		})
+		overlayGradient.Rotation = 90
+		if not universal and gameName ~= "" then
+			const gameLabel = InstanceNew("TextLabel", cover)
+			gameLabel.Name = "Game"
+			gameLabel.BorderSizePixel = 0
+			gameLabel.BackgroundTransparency = 1
+			gameLabel.Position = UDim2.new(0, 10, 1, -28)
+			gameLabel.Size = UDim2.new(1, -20, 0, 22)
+			gameLabel.TextXAlignment = Enum.TextXAlignment.Left
+			gameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+			gameLabel.Text = gameName
+			gameLabel.TextColor3 = Color3.fromRGB(245, 245, 250)
+			gameLabel.TextSize = 13
+			gameLabel.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.SemiBold, Enum.FontStyle.Normal)
+		end
+		NAmanage.ScriptHub_LoadImage(cover, imageUrl)
+	end
+
+	const title = InstanceNew("TextLabel", card)
+	title.Name = "Title"
+	title.BorderSizePixel = 0
+	title.BackgroundTransparency = 1
+	title.Position = UDim2.new(0, 10, 0, bodyOffset + 8)
+	title.Size = UDim2.new(1, -20, 0, 24)
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextTruncate = Enum.TextTruncate.AtEnd
+	title.Text = titleText
+	title.TextColor3 = Color3.fromRGB(245, 245, 250)
+	title.TextSize = hub.phone and 14 or 15
+	title.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.SemiBold, Enum.FontStyle.Normal)
+
+	const info = InstanceNew("TextLabel", card)
+	info.Name = "Info"
+	info.BorderSizePixel = 0
+	info.BackgroundTransparency = 1
+	info.Position = UDim2.new(0, 10, 0, bodyOffset + 34)
+	info.Size = UDim2.new(1, -20, 1, -(bodyOffset + 78))
+	info.TextXAlignment = Enum.TextXAlignment.Left
+	info.TextYAlignment = Enum.TextYAlignment.Top
+	info.TextWrapped = true
+	info.Text = Concat(lines, "\n")
+	info.TextColor3 = Color3.fromRGB(205, 205, 218)
+	info.TextSize = hub.phone and 11 or 12
+	info.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+
+	const actions = InstanceNew("ScrollingFrame", card)
+	actions.Name = "Actions"
+	actions.BorderSizePixel = 0
+	actions.BackgroundTransparency = 1
+	actions.Position = UDim2.new(0, 10, 1, -36)
+	actions.Size = UDim2.new(1, -20, 0, 28)
+	actions.AutomaticCanvasSize = Enum.AutomaticSize.X
+	actions.CanvasSize = UDim2.new()
+	actions.ScrollingDirection = Enum.ScrollingDirection.X
+	actions.ScrollBarThickness = 0
+	const layout = InstanceNew("UIListLayout", actions)
+	layout.FillDirection = Enum.FillDirection.Horizontal
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.Padding = UDim.new(0, 7)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+
+	const safeExecute = NAmanage.ScriptHub_CreateActionButton(actions, "Safe Execute", 116, Color3.fromRGB(56, 103, 154), "shield-check")
+	NAlib.connect("NAScriptHubCards", safeExecute.MouseButton1Click:Connect(function()
+		NAmanage.ScriptHub_SafeRunEntry(data)
+	end))
+	const execute = NAmanage.ScriptHub_CreateActionButton(actions, "Execute", 98, Color3.fromRGB(45, 125, 88), "bullet-flying")
+	NAlib.connect("NAScriptHubCards", execute.MouseButton1Click:Connect(function()
+		NAmanage.ScriptHub_RunEntry(data)
+	end))
+	if not universal and placeId then
+		const join = NAmanage.ScriptHub_CreateActionButton(actions, "Join", 84, Color3.fromRGB(48, 91, 158), "person-teleport")
+		join.LayoutOrder = -1
+		NAlib.connect("NAScriptHubCards", join.MouseButton1Click:Connect(function()
+			NAmanage.ScriptHub_JoinEntry(data)
+		end))
+	end
+	if type(setclipboard) == "function" then
+		const copy = NAmanage.ScriptHub_CreateActionButton(actions, "Copy", 84, Color3.fromRGB(65, 68, 82), "chain-link")
+		NAlib.connect("NAScriptHubCards", copy.MouseButton1Click:Connect(function()
+			NAmanage.ScriptHub_CopyEntry(data)
+		end))
+	end
+	if hub.tabMode == "public" and not catalogEntry and not savedEntry then
+		const save = NAmanage.ScriptHub_CreateActionButton(actions, "Save", 84, Color3.fromRGB(118, 82, 42), "floppy-disk")
+		NAlib.connect("NAScriptHubCards", save.MouseButton1Click:Connect(function()
+			NAmanage.ScriptHub_SaveEntry(data, save)
+		end))
+	end
+	if savedEntry then
+		const delete = NAmanage.ScriptHub_CreateActionButton(actions, "Delete", 84, Color3.fromRGB(132, 50, 57))
+		NAlib.connect("NAScriptHubCards", delete.MouseButton1Click:Connect(function()
+			NAmanage.ScriptHub_DeleteSavedEntry(data, delete)
+		end))
+	end
+	if type(data.discord) == "string" and data.discord ~= "" and type(setclipboard) == "function" then
+		const discord = NAmanage.ScriptHub_CreateActionButton(actions, "Discord", 84, Color3.fromRGB(52, 90, 155), "discord")
+		NAlib.connect("NAScriptHubCards", discord.MouseButton1Click:Connect(function()
+			local okCopy = pcall(setclipboard, data.discord)
+			DoNotif(okCopy and "Discord link copied." or "Failed to copy Discord link.", 2, "Script Hub")
+		end))
+	end
+end
+
+NAmanage.ScriptHub_Render = function()
+	const hub = NAmanage.ScriptHub
+	hub.rendering = true
+	NAlib.disconnect("NAScriptHubCards")
+	NAmanage.ScriptHub_ClearResults()
+	local shown = 0
+	for _, data in hub.entries do
+		if type(data) == "table" and NAmanage.ScriptHub_PassesFilter(data) then
+			shown += 1
+			NAmanage.ScriptHub_CreateCard(data, shown)
+		end
+	end
+	if shown == 0 then
+		local text = hub.tabMode == "supported" and "No catalog scripts found" or hub.tabMode == "saved" and (hub.query ~= "" and "No saved scripts found" or "No saved scripts yet") or "No scripts found"
+		if hub.tabMode == "public" and hub.filterMode == "keyless" then
+			text = "No keyless scripts found on this page"
+		elseif hub.tabMode == "public" and hub.filterMode == "key" then
+			text = "No key-required scripts found on this page"
+		end
+		NAmanage.ScriptHub_Message(text, Color3.fromRGB(105, 78, 42))
+	end
+	NAmanage.ScriptHub_UpdateControls()
+	hub.rendering = false
+	Defer(function()
+		const ui = hub.ui or NAmanage.ScriptHub_GetUI()
+		const results = ui and ui.results
+		if results and results.Parent then
+			pcall(updateCanvasSize, results, NAUIMANAGER and NAUIMANAGER.AUTOSCALER and NAUIMANAGER.AUTOSCALER.Scale or nil)
+			if NAmanage.ScriptHubScroll and NAmanage.ScriptHubScroll.setTarget then
+				pcall(NAmanage.ScriptHubScroll.setTarget, results)
+			end
+			if NAmanage.ScriptHubScroll and NAmanage.ScriptHubScroll.scheduleRefresh then
+				pcall(NAmanage.ScriptHubScroll.scheduleRefresh)
+			end
+		end
+	end)
+end
+
+NAmanage.ScriptHub_FetchCatalogGameIcons = function(entries)
+	const placeIds = {}
+	const seen = {}
+	for _, entry in entries do
+		if type(entry) == "table" and type(entry.placeIds) == "table" then
+			for _, rawId in entry.placeIds do
+				const id = tostring(rawId or "")
+				if id ~= "" and not seen[id] then
+					seen[id] = true
+					Insert(placeIds, id)
+				end
+			end
+		end
+	end
+	if #placeIds == 0 then
+		return {}
+	end
+
+	const query = "placeIds="..Services.HttpService:UrlEncode(Concat(placeIds, ",")).."&returnPolicy=PlaceHolder&size=256x256&format=Png&isCircular=false"
+	local decoded
+	for _, host in { "thumbnails.roproxy.com", "thumbnails.rotunnel.com", "thumbnails.roblox.com" } do
+		local okFetch, body = NAmanage.HttpGet("https://"..host.."/v1/places/gameicons?"..query, {
+			timeout = 8;
+			maxAttempts = 2;
+			Headers = { Accept = "application/json" };
+		})
+		if okFetch and type(body) == "string" and body ~= "" then
+			local okDecode, payload = pcall(Services.HttpService.JSONDecode, Services.HttpService, body)
+			if okDecode and type(payload) == "table" and type(payload.data) == "table" then
+				decoded = payload
+				break
+			end
+		end
+	end
+
+	const icons = {}
+	for _, item in type(decoded) == "table" and decoded.data or {} do
+		const id = tostring(type(item) == "table" and item.targetId or "")
+		const imageUrl = type(item) == "table" and item.imageUrl or nil
+		if id ~= "" and type(imageUrl) == "string" and imageUrl ~= "" then
+			icons[id] = imageUrl
+		end
+	end
+	return icons
+end
+
+NAmanage.ScriptHub_FetchCatalogGameNames = function(entries)
+	const universeIds = {}
+	const seen = {}
+	for _, entry in entries do
+		if type(entry) == "table" and type(entry.universeIds) == "table" then
+			for _, rawId in entry.universeIds do
+				const id = tostring(rawId or "")
+				if id ~= "" and not seen[id] then
+					seen[id] = true
+					Insert(universeIds, id)
+				end
+			end
+		end
+	end
+	if #universeIds == 0 then
+		return {}
+	end
+
+	const query = "universeIds="..Services.HttpService:UrlEncode(Concat(universeIds, ","))
+	local decoded
+	for _, host in { "games.roproxy.com", "games.rotunnel.com", "games.roblox.com" } do
+		local okFetch, body = NAmanage.HttpGet("https://"..host.."/v1/games?"..query, {
+			timeout = 8;
+			maxAttempts = 2;
+			Headers = { Accept = "application/json" };
+		})
+		if okFetch and type(body) == "string" and body ~= "" then
+			local okDecode, payload = pcall(Services.HttpService.JSONDecode, Services.HttpService, body)
+			if okDecode and type(payload) == "table" and type(payload.data) == "table" then
+				decoded = payload
+				break
+			end
+		end
+	end
+
+	const names = {}
+	for _, item in type(decoded) == "table" and decoded.data or {} do
+		const universeId = tostring(type(item) == "table" and item.id or "")
+		const rootPlaceId = tostring(type(item) == "table" and item.rootPlaceId or "")
+		const gameName = type(item) == "table" and item.name or nil
+		if type(gameName) == "string" and gameName ~= "" then
+			if universeId ~= "" then
+				names[universeId] = gameName
+			end
+			if rootPlaceId ~= "" then
+				names[rootPlaceId] = gameName
+			end
+		end
+	end
+	return names
+end
+
+NAmanage.ScriptHub_LoadSupported = function(query, page, refresh)
+	const hub = NAmanage.ScriptHub
+	if hub.searching or hub.tabMode ~= "supported" then
+		return false
+	end
+	query = GSub(GSub(tostring(query or ""), "^%s+", ""), "%s+$", "")
+	page = math.max(math.floor(tonumber(page) or 1), 1)
+	hub.query = query
+	hub.page = page
+	NAmanage.ScriptHub_ClearImageCache()
+	hub.searching = true
+	hub.fetchToken += 1
+	const token = hub.fetchToken
+	NAmanage.ScriptHub_Message("Loading my scripts...", Color3.fromRGB(65, 62, 82))
+	NAmanage.ScriptHub_UpdateControls()
+	SpawnCall(function()
+		local okCatalog, entriesOrErr = NAmanage.FetchScriptCatalog({ refresh = refresh == true })
+		if token ~= hub.fetchToken or hub.tabMode ~= "supported" then
+			return
+		end
+		if not okCatalog then
+			hub.searching = false
+			NAmanage.ScriptHub_Message("Catalog request failed: "..tostring(entriesOrErr), Color3.fromRGB(120, 55, 65))
+			NAmanage.ScriptHub_UpdateControls()
+			return
+		end
+
+		const gameIcons = NAmanage.ScriptHub_FetchCatalogGameIcons(entriesOrErr)
+		const gameNames = NAmanage.ScriptHub_FetchCatalogGameNames(entriesOrErr)
+		const normalizedQuery = Lower(query)
+		const currentGameId = tostring((game and game.GameId) or GameId or "")
+		const currentPlaceId = tostring((game and game.PlaceId) or PlaceId or "")
+		const matches = {}
+		for _, entry in entriesOrErr do
+			if type(entry) == "table" then
+				const gameLinked = type(entry.placeIds) == "table" and #entry.placeIds > 0 or type(entry.universeIds) == "table" and #entry.universeIds > 0
+				const categoryMatch = hub.catalogMode == "all" or hub.catalogMode == "games" and gameLinked or hub.catalogMode == "other" and not gameLinked
+				const placeId = type(entry.placeIds) == "table" and entry.placeIds[1]
+				const universeId = type(entry.universeIds) == "table" and entry.universeIds[1]
+				const gameName = gameLinked and (gameNames[tostring(universeId or "")] or gameNames[tostring(placeId or "")] or entry.gameName or entry.name) or ""
+				local searchable = Lower(tostring(entry.name or "").." "..tostring(entry.id or "").." "..tostring(gameName or ""))
+				if type(entry.placeIds) == "table" then
+					searchable ..= " "..Concat(entry.placeIds, " ")
+				end
+				if type(entry.universeIds) == "table" then
+					searchable ..= " "..Concat(entry.universeIds, " ")
+				end
+				if categoryMatch and (normalizedQuery == "" or Find(searchable, normalizedQuery, 1, true)) then
+					const currentGame = gameLinked and (NAmanage.ScriptCatalogHasId(entry.universeIds, currentGameId) or NAmanage.ScriptCatalogHasId(entry.placeIds, currentPlaceId)) or false
+					Insert(matches, {
+						naCatalog = true;
+						catalogGameLinked = gameLinked;
+						id = entry.id;
+						name = entry.name;
+						title = entry.name;
+						gameName = gameName;
+						scriptUrl = entry.scriptUrl;
+						imageUrl = entry.imageUrl or gameLinked and (gameIcons[tostring(placeId or "")] or NAmanage.ScriptHub_BuildGameIcon(universeId, placeId)) or nil;
+						placeIds = entry.placeIds;
+						universeIds = entry.universeIds;
+						isUniversal = not gameLinked;
+						featured = entry.featured == true;
+						currentGame = currentGame;
+					})
+				end
+			end
+		end
+		table.sort(matches, function(a, b)
+			if a.currentGame ~= b.currentGame then
+				return a.currentGame == true
+			end
+			if a.featured ~= b.featured then
+				return a.featured == true
+			end
+			if a.catalogGameLinked ~= b.catalogGameLinked then
+				return a.catalogGameLinked == true
+			end
+			return Lower(a.name) < Lower(b.name)
+		end)
+
+		const pageSize = math.max(math.floor(tonumber(hub.supportedPageSize) or 16), 1)
+		const totalPages = math.max(math.ceil(#matches / pageSize), 1)
+		page = math.clamp(page, 1, totalPages)
+		const firstIndex = (page - 1) * pageSize + 1
+		const pageEntries = {}
+		for index = firstIndex, math.min(firstIndex + pageSize - 1, #matches) do
+			Insert(pageEntries, matches[index])
+		end
+		hub.entries = pageEntries
+		hub.totalPages = totalPages
+		hub.page = page
+		hub.searching = false
+		NAmanage.ScriptHub_Render()
+	end)
+	return true
+end
+
+NAmanage.ScriptHub_ResolveScriptBloxPlaceId = function(data)
+	const hub = NAmanage.ScriptHub
+	const scriptId = tostring(type(data) == "table" and (data._id or data.id or data.slug) or "")
+	if scriptId == "" then
+		return nil
+	end
+	const cacheKey = "ScriptBlox:"..scriptId
+	const cached = hub.placeIdCache[cacheKey]
+	if cached ~= nil then
+		return cached or nil
+	end
+	local placeId
+	local okFetch, body = NAmanage.HttpGet("https://scriptblox.com/api/script/"..Services.HttpService:UrlEncode(scriptId), {
+		timeout = 7;
+		maxAttempts = 2;
+		Headers = { Accept = "application/json" };
+	})
+	if okFetch and type(body) == "string" and body ~= "" then
+		local okDecode, decoded = pcall(Services.HttpService.JSONDecode, Services.HttpService, body)
+		const details = okDecode and type(decoded) == "table" and type(decoded.script) == "table" and decoded.script or nil
+		placeId = details and NAmanage.ScriptHub_GetPlaceId(details) or nil
+	end
+	hub.placeIdCache[cacheKey] = placeId or false
+	return placeId
+end
+
+NAmanage.ScriptHub_ResolveRobloxScriptsPlaceId = function(data)
+	const hub = NAmanage.ScriptHub
+	const gameData = type(data) == "table" and type(data.game) == "table" and data.game or nil
+	const gameName = gameData and tostring(gameData.name or "") or ""
+	const wantedName = NAmanage.ScriptHub_NormalizeGameName(gameName)
+	const wantedSlug = NAmanage.ScriptHub_NormalizeGameName(gameData and gameData.slug or "")
+	if wantedName == "" and wantedSlug == "" then
+		return nil
+	end
+	const cacheKey = "RobloxScripts:"..(wantedSlug ~= "" and wantedSlug or wantedName)
+	const cached = hub.placeIdCache[cacheKey]
+	if cached ~= nil then
+		return cached or nil
+	end
+
+	local placeId
+	const query = Services.HttpService:UrlEncode(gameName ~= "" and gameName or tostring(gameData.slug or ""))
+	for _, host in { "apis.roproxy.com", "apis.rotunnel.com", "apis.roblox.com" } do
+		local okFetch, body = NAmanage.HttpGet("https://"..host.."/search-api/omni-search?searchQuery="..query.."&sessionId=na-script-hub", {
+			timeout = 7;
+			maxAttempts = 1;
+			Headers = { Accept = "application/json" };
+		})
+		if okFetch and type(body) == "string" and body ~= "" then
+			local okDecode, decoded = pcall(Services.HttpService.JSONDecode, Services.HttpService, body)
+			if okDecode and type(decoded) == "table" and type(decoded.searchResults) == "table" then
+				for _, group in decoded.searchResults do
+					if type(group) == "table" and group.contentGroupType == "Game" and type(group.contents) == "table" then
+						for _, item in group.contents do
+							const resultName = NAmanage.ScriptHub_NormalizeGameName(type(item) == "table" and item.name or "")
+							if resultName ~= "" and (resultName == wantedName or resultName == wantedSlug) then
+								const candidate = tonumber(item.rootPlaceId or item.placeId)
+								if candidate and candidate > 0 then
+									placeId = candidate
+									break
+								end
+							end
+						end
+					end
+					if placeId then
+						break
+					end
+				end
+			end
+		end
+		if placeId then
+			break
+		end
+	end
+	hub.placeIdCache[cacheKey] = placeId or false
+	return placeId
+end
+
+NAmanage.ScriptHub_HydratePlaceIds = function(entries, engine, token)
+	const hub = NAmanage.ScriptHub
+	const queue = {}
+	for _, data in entries do
+		if type(data) == "table" and not NAmanage.ScriptHub_IsUniversal(data) and not NAmanage.ScriptHub_GetPlaceId(data) then
+			if engine == "ScriptBlox" or engine == "RobloxScripts" then
+				Insert(queue, data)
+			end
+		end
+	end
+	if #queue == 0 then
+		return true
+	end
+
+	local nextIndex = 1
+	local running = math.min(#queue, 4)
+	for _ = 1, running do
+		Spawn(function()
+			while token == hub.fetchToken do
+				const index = nextIndex
+				nextIndex += 1
+				const data = queue[index]
+				if not data then
+					break
+				end
+				local placeId
+				if engine == "ScriptBlox" then
+					placeId = NAmanage.ScriptHub_ResolveScriptBloxPlaceId(data)
+				else
+					placeId = NAmanage.ScriptHub_ResolveRobloxScriptsPlaceId(data)
+				end
+				if placeId then
+					data.naResolvedPlaceId = placeId
+				end
+			end
+			running -= 1
+		end)
+	end
+	const deadline = os.clock() + 12
+	while running > 0 and token == hub.fetchToken and os.clock() < deadline do
+		task.wait(0.05)
+	end
+	return token == hub.fetchToken
+end
+
+NAmanage.ScriptHub_BuildURL = function(query, page)
+	const hub = NAmanage.ScriptHub
+	query = tostring(query or "")
+	page = math.max(tonumber(page) or 1, 1)
+	local encoded = Services.HttpService:UrlEncode(query)
+	if hub.engine == "RScripts" then
+		local url = Format("https://rscripts.net/api/v2/scripts?page=%d&orderBy=date&sort=desc", page)
+		if query ~= "" then
+			url ..= "&q="..encoded
+		end
+		return url
+	elseif hub.engine == "RobloxScripts" then
+		if #query > 100 then
+			query = Sub(query, 1, 100)
+			encoded = Services.HttpService:UrlEncode(query)
+		end
+		local url = Format("https://robloxscripts.com/api/v1/scripts?page=%d&limit=24&sort=newest", page)
+		if query ~= "" then
+			url ..= "&q="..encoded
+		end
+		return url
+	elseif hub.engine == "HaxHell" then
+		if query == "" then
+			return Format("https://haxhell.com/api/v1/scripts?page=%d&limit=24&sort=latest", page)
+		end
+		return Format("https://haxhell.com/api/v1/search/scripts?q=%s&page=%d&limit=24&sort=latest", encoded, page)
+	elseif query == "" then
+		return Format("https://scriptblox.com/api/script/fetch?page=%d", page)
+	end
+	return Format("https://scriptblox.com/api/script/search?q=%s&page=%d", encoded, page)
+end
+
+NAmanage.ScriptHub_ParseResponse = function(decoded, requestedPage)
+	const hub = NAmanage.ScriptHub
+	local entries = {}
+	local totalPages = 1
+	local currentPage = requestedPage
+	if hub.engine == "RScripts" then
+		entries = type(decoded.scripts) == "table" and decoded.scripts or type(decoded.data) == "table" and decoded.data or {}
+		totalPages = tonumber(type(decoded.info) == "table" and decoded.info.maxPages) or tonumber(decoded.totalPages) or 1
+	elseif hub.engine == "RobloxScripts" then
+		entries = type(decoded.data) == "table" and decoded.data or type(decoded.scripts) == "table" and decoded.scripts or {}
+		const pagination = type(decoded.pagination) == "table" and decoded.pagination or {}
+		const totalItems = tonumber(pagination.total or pagination.totalItems)
+		const limit = tonumber(pagination.limit or pagination.perPage) or 24
+		totalPages = tonumber(pagination.totalPages or pagination.pages or pagination.lastPage)
+		if not totalPages and totalItems then
+			totalPages = math.ceil(totalItems / math.max(limit, 1))
+		end
+		currentPage = tonumber(pagination.page or pagination.currentPage) or requestedPage
+	elseif hub.engine == "HaxHell" then
+		entries = type(decoded.data) == "table" and decoded.data or {}
+		const pagination = type(decoded.pagination) == "table" and decoded.pagination or {}
+		totalPages = tonumber(pagination.totalPages or pagination.pages or pagination.lastPage) or 1
+		currentPage = tonumber(pagination.page or pagination.currentPage) or requestedPage
+	else
+		const result = type(decoded.result) == "table" and decoded.result or {}
+		entries = type(result.scripts) == "table" and result.scripts or type(decoded.scripts) == "table" and decoded.scripts or {}
+		totalPages = tonumber(result.totalPages or decoded.totalPages) or 1
+	end
+	const pageCap = hub.engine == "HaxHell" and 10000 or 500
+	return entries, math.clamp(math.floor(tonumber(totalPages) or 1), 1, pageCap), math.max(math.floor(tonumber(currentPage) or requestedPage), 1)
+end
+
+NAmanage.ScriptHub_Fetch = function(query, page)
+	const hub = NAmanage.ScriptHub
+	if hub.tabMode == "supported" then
+		return NAmanage.ScriptHub_LoadSupported(query, page)
+	end
+	if hub.searching then
+		return false
+	end
+	query = tostring(query or "")
+	query = GSub(GSub(query, "^%s+", ""), "%s+$", "")
+	if hub.engine == "HaxHell" and query ~= "" and #query < 2 then
+		NAmanage.ScriptHub_Message("HaxHell search requires at least 2 characters.", Color3.fromRGB(120, 85, 45))
+		NAmanage.ScriptHub_UpdateControls()
+		return false
+	end
+	page = math.max(math.floor(tonumber(page) or 1), 1)
+	hub.query = query
+	hub.page = page
+	NAmanage.ScriptHub_ClearImageCache()
+	hub.searching = true
+	hub.fetchToken += 1
+	const token = hub.fetchToken
+	const requestEngine = hub.engine
+	NAmanage.ScriptHub_Message("Searching "..hub.engine.."...", Color3.fromRGB(65, 62, 82))
+	NAmanage.ScriptHub_UpdateControls()
+	SpawnCall(function()
+		const url = NAmanage.ScriptHub_BuildURL(query, page)
+		local okFetch, body, fetchErr = NAmanage.HttpGet(url, {
+			timeout = 12;
+			maxAttempts = 3;
+			Headers = { Accept = "application/json" };
+		})
+		if token ~= hub.fetchToken then
+			return
+		end
+		if not okFetch or type(body) ~= "string" or body == "" then
+			hub.searching = false
+			NAmanage.ScriptHub_Message("Request failed: "..tostring(fetchErr or "empty response"), Color3.fromRGB(120, 55, 65))
+			NAmanage.ScriptHub_UpdateControls()
+			return
+		end
+		local okDecode, decoded = pcall(Services.HttpService.JSONDecode, Services.HttpService, body)
+		if not okDecode or type(decoded) ~= "table" then
+			hub.searching = false
+			NAmanage.ScriptHub_Message("Invalid API response", Color3.fromRGB(120, 55, 65))
+			NAmanage.ScriptHub_UpdateControls()
+			return
+		end
+		local entries, totalPages, currentPage = NAmanage.ScriptHub_ParseResponse(decoded, page)
+		if not NAmanage.ScriptHub_HydratePlaceIds(entries, requestEngine, token) or token ~= hub.fetchToken then
+			return
+		end
+		hub.entries = entries
+		hub.totalPages = totalPages
+		hub.page = math.clamp(currentPage, 1, totalPages)
+		hub.searching = false
+		NAmanage.ScriptHub_Render()
+	end)
+	return true
+end
+
+NAmanage.ScriptHub_SearchInput = function()
+	const hub = NAmanage.ScriptHub
+	const ui = hub.ui or NAmanage.ScriptHub_GetUI()
+	const query = ui and ui.searchBox and ui.searchBox.Text or ""
+	if hub.tabMode == "supported" then
+		return NAmanage.ScriptHub_LoadSupported(query, 1)
+	elseif hub.tabMode == "saved" then
+		return NAmanage.ScriptHub_LoadSaved(query, 1)
+	end
+	return NAmanage.ScriptHub_Fetch(query, 1)
+end
+
+NAmanage.ScriptHub_RequestPage = function(page)
+	const hub = NAmanage.ScriptHub
+	if hub.searching or #hub.entries == 0 then
+		return
+	end
+	page = math.clamp(math.floor(tonumber(page) or hub.page), 1, math.max(hub.totalPages, 1))
+	if page ~= hub.page then
+		if hub.tabMode == "supported" then
+			NAmanage.ScriptHub_LoadSupported(hub.query, page)
+		elseif hub.tabMode == "saved" then
+			NAmanage.ScriptHub_LoadSaved(hub.query, page)
+		else
+			NAmanage.ScriptHub_Fetch(hub.query, page)
+		end
+	end
+end
+
+NAmanage.ScriptHub_Init = function()
+	const hub = NAmanage.ScriptHub
+	const ui = NAmanage.ScriptHub_GetUI()
+	if not (ui and ui.frame and ui.container and ui.results and ui.searchBox and ui.search and ui.engine and ui.publicTab and ui.supportedTab and ui.savedTab) then
+		return false
+	end
+	if hub.ready and hub.boundFrame == ui.frame then
+		return true
+	end
+	hub.boundFrame = ui.frame
+	hub.ready = true
+	NAlib.disconnect("NAScriptHub")
+	NAlib.connect("NAScriptHub", ui.publicTab.MouseButton1Click:Connect(function()
+		NAmanage.ScriptHub_SetTab("public")
+	end))
+	NAlib.connect("NAScriptHub", ui.supportedTab.MouseButton1Click:Connect(function()
+		NAmanage.ScriptHub_SetTab("supported")
+	end))
+	NAlib.connect("NAScriptHub", ui.savedTab.MouseButton1Click:Connect(function()
+		NAmanage.ScriptHub_SetTab("saved")
+	end))
+	NAlib.connect("NAScriptHub", ui.engine.MouseButton1Click:Connect(function()
+		if hub.searching or hub.tabMode ~= "public" then
+			return
+		end
+		const index = table.find(hub.engines, hub.engine) or 1
+		hub.engine = hub.engines[index % #hub.engines + 1]
+		hub.page = 1
+		hub.totalPages = 1
+		hub.entries = {}
+		hub.query = ""
+		ui.searchBox.Text = ""
+		NAmanage.ScriptHub_UpdateHeader()
+		NAmanage.ScriptHub_Fetch("", 1)
+	end))
+	NAlib.connect("NAScriptHub", ui.search.MouseButton1Click:Connect(NAmanage.ScriptHub_SearchInput))
+	NAlib.connect("NAScriptHub", ui.searchBox.FocusLost:Connect(function(enterPressed)
+		if enterPressed then
+			NAmanage.ScriptHub_SearchInput()
+		end
+	end))
+	if ui.first then
+		NAlib.connect("NAScriptHub", ui.first.MouseButton1Click:Connect(function() NAmanage.ScriptHub_RequestPage(1) end))
+	end
+	if ui.prev then
+		NAlib.connect("NAScriptHub", ui.prev.MouseButton1Click:Connect(function() NAmanage.ScriptHub_RequestPage(hub.page - 1) end))
+	end
+	if ui.next then
+		NAlib.connect("NAScriptHub", ui.next.MouseButton1Click:Connect(function() NAmanage.ScriptHub_RequestPage(hub.page + 1) end))
+	end
+	if ui.last then
+		NAlib.connect("NAScriptHub", ui.last.MouseButton1Click:Connect(function() NAmanage.ScriptHub_RequestPage(hub.totalPages) end))
+	end
+	if ui.filter then
+		NAlib.connect("NAScriptHub", ui.filter.MouseButton1Click:Connect(function()
+			if hub.searching then
+				return
+			end
+			if hub.tabMode == "supported" then
+				const index = table.find(hub.catalogModes, hub.catalogMode) or 1
+				hub.catalogMode = hub.catalogModes[index % #hub.catalogModes + 1]
+				NAmanage.ScriptHub_UpdateHeader()
+				NAmanage.ScriptHub_LoadSupported(hub.query, 1)
+				return
+			end
+			if hub.tabMode == "saved" then
+				return
+			end
+			if #hub.entries == 0 then
+				return
+			end
+			const index = table.find(hub.filterModes, hub.filterMode) or 1
+			hub.filterMode = hub.filterModes[index % #hub.filterModes + 1]
+			NAmanage.ScriptHub_Render()
+		end))
+	end
+	NAmanage.ScriptHub_EnsureImageFolder()
+	NAmanage.ScriptHub_UpdateHeader()
+	NAmanage.ScriptHub_ApplyResponsive(false)
+	NAmanage.ScriptHub_SaveFrameSize = function()
+		NAmanage.ExecutorWindowSizing.Save(ui.frame, "NAScriptHubSavedSizeX", "NAScriptHubSavedSizeY")
+	end
+	NAlib.disconnect("NAScriptHubResponsive")
+	NAlib.connect("NAScriptHubResponsive", ui.frame:GetPropertyChangedSignal("Size"):Connect(NAmanage.ScriptHub_SaveFrameSize))
+	NAlib.connect("NAScriptHubResponsive", ui.frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		const changed = NAmanage.ScriptHub_UpdateResponsiveLayout()
+		if changed and #hub.entries > 0 and hub.rendering ~= true then
+			Defer(NAmanage.ScriptHub_Render)
+		end
+	end))
+	if Services.Workspace and Services.Workspace.CurrentCamera then
+		NAlib.connect("NAScriptHubResponsive", Services.Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+			Defer(function()
+				if ui.frame and ui.frame.Parent then
+					NAmanage.ScriptHub_ApplyResponsive(true)
+				end
+			end)
+		end))
+	end
+	if NAStuff and NAStuff.NASCREENGUI then
+		NAlib.connect("NAScriptHubResponsive", NAStuff.NASCREENGUI:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			Defer(function()
+				if ui.frame and ui.frame.Parent then
+					NAmanage.ScriptHub_ApplyResponsive(true)
+				end
+			end)
+		end))
+	end
+	if NAUIMANAGER and NAUIMANAGER.AUTOSCALER then
+		NAlib.connect("NAScriptHubResponsive", NAUIMANAGER.AUTOSCALER:GetPropertyChangedSignal("Scale"):Connect(function()
+			Defer(function()
+				if ui.frame and ui.frame.Parent then
+					NAmanage.ScriptHub_ApplyResponsive(true)
+				end
+			end)
+		end))
+	end
+	if #hub.entries > 0 then
+		NAmanage.ScriptHub_Render()
+	else
+		NAmanage.ScriptHub_Message(hub.tabMode == "supported" and "Open this tab to load the NA script catalog." or hub.tabMode == "saved" and "Save a public-hub result to keep it here." or "Search or open the hub to load the latest scripts.", Color3.fromRGB(65, 62, 82))
+	end
+	return true
+end
+
+NAmanage.ScriptHub_Toggle = function()
+	const frame = NAUIMANAGER and NAUIMANAGER.ScriptHubFrame
+	if not frame then
+		DoNotif("Script Hub UI unavailable.", 3, "Script Hub")
+		return false
+	end
+	if not NAmanage.ScriptHub_Init() then
+		DoNotif("Script Hub failed to initialize.", 3, "Script Hub")
+		return false
+	end
+	if frame.Visible then
+		frame.Visible = false
+		return true
+	end
+	frame.Visible = true
+	NAmanage.centerFrame(frame)
+	if NAmanage.OnUIWindowShown then
+		pcall(NAmanage.OnUIWindowShown, frame)
+	end
+	if #NAmanage.ScriptHub.entries == 0 and not NAmanage.ScriptHub.searching then
+		if NAmanage.ScriptHub.tabMode == "supported" then
+			NAmanage.ScriptHub_LoadSupported(NAmanage.ScriptHub.query, 1)
+		elseif NAmanage.ScriptHub.tabMode == "saved" then
+			NAmanage.ScriptHub_LoadSaved(NAmanage.ScriptHub.query, 1)
+		else
+			NAmanage.ScriptHub_Fetch(NAmanage.ScriptHub.query, 1)
+		end
+	end
+	return true
+end
 
 do
 	const perf = NAStuff and NAStuff.StartupPerformance
@@ -110444,6 +117257,588 @@ NAgui.consoleeee = function()
 		--NAUIMANAGER.NAconsoleFrame.Position = UDim2.new(0.43, 0, 0.4, 0)
 		NAmanage.centerFrame(NAUIMANAGER.NAconsoleFrame)
 	end
+end
+
+NAmanage.MusicWindowInit = NAmanage.MusicWindowInit or function()
+	const frame = NAUIMANAGER and NAUIMANAGER.MusicFrame
+	if not frame then return false end
+	local st = NAStuff.MusicPlayer
+	if type(st) ~= "table" then
+		st = {}
+		NAStuff.MusicPlayer = st
+	end
+	if st.ready == true and st.frame == frame then return true end
+	NAlib.disconnect("NA_MusicPlayer")
+	NAlib.disconnect("NA_MusicPlayerSound")
+	NAlib.disconnect("NA_MusicRows")
+	st.ready = true
+	st.frame = frame
+	st.root = "Nameless-Admin/Music"
+	st.cfgPath = st.root.."/_config.json"
+	st.exts = {mp3=true,ogg=true,flac=true,wav=true}
+	st.mode = st.mode or "off"
+	st.loop = st.loop == true
+	st.vol = math.clamp(tonumber(st.vol) or 1, 0, 10)
+	st.spd = math.clamp(tonumber(st.spd) or 1, 0.25, 4)
+	const c = frame:FindFirstChild("Container")
+	if not c then return false end
+	const inp = c:FindFirstChild("TrackInput")
+	const load = c:FindFirstChild("Load")
+	const now = c:FindFirstChild("NowPlaying")
+	const stat = c:FindFirstChild("Status")
+	const time = c:FindFirstChild("Time")
+	const prog = c:FindFirstChild("Progress")
+	const fill = prog and prog:FindFirstChild("Fill")
+	const list = c:FindFirstChild("LocalList")
+	const mix = c:FindFirstChild("Mix")
+	const volBox = mix and mix:FindFirstChild("VolumeBox")
+	const spdBox = mix and mix:FindFirstChild("SpeedBox")
+	const ctrls = c:FindFirstChild("Controls")
+	const btns = {}
+	if ctrls then
+		for _, ch in ctrls:GetChildren() do
+			if ch:IsA("TextButton") then btns[ch.Name] = ch end
+		end
+	end
+	const function trim(v)
+		return tostring(v or ""):gsub("^%s*(.-)%s*$", "%1")
+	end
+	const function bn(p)
+		return tostring(p or ""):match("[^/\\]+$") or tostring(p or "")
+	end
+	const function noext(p)
+		return tostring(p or ""):gsub("%.[^%.]+$", "")
+	end
+	const function ext(p)
+		const clean = tostring(p or ""):match("([^?#]+)") or tostring(p or "")
+		local e = clean:match("%.([%w]+)$")
+		e = e and e:lower() or nil
+		return e and st.exts[e] and e or nil
+	end
+	const function hsh(s)
+		local h = 0
+		for i = 1, #s do h = (h * 31 + (string.byte(s, i) or 0)) % 4294967296 end
+		return Format("%08x", h)
+	end
+	const function safeFolder()
+		if type(isfolder) ~= "function" or type(makefolder) ~= "function" then return false end
+		local ok, ex = pcall(isfolder, st.root)
+		if ok and ex then return true end
+		return pcall(makefolder, st.root) == true
+	end
+	const function saveCfg()
+		if not (Services.HttpService and type(writefile) == "function" and safeFolder()) then return false end
+		local ok, data = pcall(Services.HttpService.JSONEncode, Services.HttpService, {
+			last = st.last or "",
+			vol = st.vol,
+			spd = st.spd,
+			loop = st.loop == true,
+			mode = st.mode or "off"
+		})
+		if ok and type(data) == "string" then return pcall(writefile, st.cfgPath, data) == true end
+		return false
+	end
+	const function loadCfg()
+		if not (Services.HttpService and type(isfile) == "function" and type(readfile) == "function") then return end
+		local okFile, has = pcall(isfile, st.cfgPath)
+		if not (okFile and has) then return end
+		local okRead, raw = pcall(readfile, st.cfgPath)
+		if not (okRead and type(raw) == "string" and raw ~= "") then return end
+		local okDec, cfg = pcall(Services.HttpService.JSONDecode, Services.HttpService, raw)
+		if not (okDec and type(cfg) == "table") then return end
+		st.last = tostring(cfg.last or st.last or "")
+		st.vol = math.clamp(tonumber(cfg.vol) or st.vol or 1, 0, 10)
+		st.spd = math.clamp(tonumber(cfg.spd) or st.spd or 1, 0.25, 4)
+		st.loop = cfg.loop == true
+		st.mode = (cfg.mode == "order" or cfg.mode == "random") and cfg.mode or "off"
+	end
+	const function fmt(sec)
+		sec = math.max(0, math.floor((tonumber(sec) or 0) + 0.5))
+		return Format("%02d:%02d", math.floor(sec / 60), sec % 60)
+	end
+	const function setStat(txt, col)
+		if stat then
+			stat.Text = tostring(txt or "Stopped")
+			if col then stat.BackgroundColor3 = col end
+		end
+	end
+	const function setNow(txt)
+		if now then now.Text = tostring(txt or "No track loaded") end
+	end
+	const function setProg(pos, len)
+		pos = tonumber(pos) or 0
+		len = tonumber(len) or 0
+		const a = len > 0 and math.clamp(pos / len, 0, 1) or 0
+		if fill then fill.Size = UDim2.new(a, 0, 1, 0) end
+		if time then time.Text = fmt(pos).." / "..fmt(len) end
+	end
+	const function syncMix()
+		if volBox then volBox.Text = tostring(math.floor((st.vol or 1) * 100 + 0.5) / 100) end
+		if spdBox then spdBox.Text = tostring(math.floor((st.spd or 1) * 100 + 0.5) / 100) end
+		if btns.Loop then btns.Loop.Text = st.loop and "Loop On" or "Loop" end
+		if btns.Mode then btns.Mode.Text = st.mode == "order" and "Order" or st.mode == "random" and "Random" or "Mode" end
+		if st.snd then
+			pcall(function()
+				st.snd.Volume = st.vol
+				st.snd.PlaybackSpeed = st.spd
+				st.snd.Looped = st.loop == true
+			end)
+		end
+	end
+	const function scan()
+		const out = {}
+		if type(listfiles) ~= "function" or type(getcustomasset) ~= "function" or not safeFolder() then return out end
+		local ok, files = pcall(listfiles, st.root)
+		if not (ok and type(files) == "table") then return out end
+		for _, path in files do
+			if type(path) == "string" and ext(path) then
+				local okAsset, asset = pcall(getcustomasset, path)
+				if okAsset and type(asset) == "string" and asset ~= "" then
+					out[#out + 1] = {path = path, name = bn(path), asset = asset}
+				end
+			end
+		end
+		table.sort(out, function(a, b) return tostring(a.name):lower() < tostring(b.name):lower() end)
+		st.tracks = out
+		return out
+	end
+	const function rowButton(txt)
+		const b = InstanceNew("TextButton")
+		b.Name = "Track"
+		b.BorderSizePixel = 0
+		b.BackgroundColor3 = Color3.fromRGB(50, 50, 58)
+		b.BackgroundTransparency = 0.15
+		b.TextColor3 = Color3.fromRGB(235, 235, 245)
+		b.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+		b.TextSize = 13
+		b.TextXAlignment = Enum.TextXAlignment.Left
+		b.TextTruncate = Enum.TextTruncate.AtEnd
+		b.Text = "  "..tostring(txt or "")
+		b.Size = UDim2.new(1, -4, 0, 28)
+		const cr = InstanceNew("UICorner", b)
+		cr.CornerRadius = UDim.new(0, 6)
+		const stt = InstanceNew("UIStroke", b)
+		stt.Thickness = 1
+		stt.Color = Color3.fromRGB(155, 100, 255)
+		stt.Transparency = 0.45
+		stt.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		stt.Name = "UIStroker"
+		return b
+	end
+	local loadTrack
+	const function rebuildList()
+		NAlib.disconnect("NA_MusicRows")
+		if not list then return end
+		for _, ch in list:GetChildren() do
+			if not ch:IsA("UIListLayout") and not ch:IsA("UIPadding") then ch:Destroy() end
+		end
+		const items = scan()
+		if #items == 0 then
+			const empty = InstanceNew("TextLabel")
+			empty.Name = "Empty"
+			empty.BackgroundTransparency = 1
+			empty.TextXAlignment = Enum.TextXAlignment.Left
+			empty.TextSize = 13
+			empty.TextColor3 = Color3.fromRGB(170, 170, 185)
+			empty.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+			empty.TextWrapped = true
+			empty.TextYAlignment = Enum.TextYAlignment.Top
+			empty.Text = "Drop mp3/ogg/flac/wav files into Nameless-Admin/Music, or paste an asset id/URL above."
+			empty.Size = UDim2.new(1, -4, 0, 52)
+			empty.Parent = list
+			return
+		end
+		for _, item in items do
+			const b = rowButton(item.name)
+			b.Parent = list
+			NAlib.connect("NA_MusicRows", MouseButtonFix(b, function()
+				if inp then inp.Text = item.name end
+				if loadTrack then loadTrack(item.name, true) end
+			end))
+		end
+	end
+	const function findLocal(q)
+		q = trim(q):lower()
+		if q == "" then return nil end
+		local best
+		for _, item in scan() do
+			const nm = tostring(item.name or ""):lower()
+			const base = noext(nm)
+			if q == nm or q == base then return item end
+			if not best and nm:find(q, 1, true) then best = item end
+		end
+		return best
+	end
+	const function normUrl(u)
+		u = trim(u)
+		if u:match("^www%.") then u = "https://"..u end
+		u = u:gsub(" ", "%%20")
+		u = u:gsub("^https://github%.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$", "https://raw.githubusercontent.com/%1/%2/%3/%4")
+		return u
+	end
+	const function fileNameFor(u, e)
+		local n = bn((u:match("([^?#]+)") or u)):gsub("%.[^%.]+$", "")
+		n = n:gsub("[^%w%._%-]", "_")
+		if n == "" then n = "track" end
+		return n.."_"..hsh(u).."."..e
+	end
+	const function reqBody(u)
+		local body
+		const rq = opt and opt.NAREQUEST
+		if type(rq) == "function" then
+			local ok, res = pcall(rq, {Url = u, Method = "GET", Headers = { ["Accept"] = "*/*" }})
+			if ok and type(res) == "table" then body = res.Body or res.body end
+		end
+		if type(body) ~= "string" or body == "" then
+			local ok, res = NAmanage.HttpGet(u, { timeout = 10, Headers = { ["Accept"] = "*/*" } })
+			if ok and type(res) == "string" and res ~= "" then body = res end
+		end
+		return body
+	end
+	const function dl(u)
+		if type(writefile) ~= "function" or type(getcustomasset) ~= "function" or not safeFolder() then
+			return nil, "File support and getcustomasset are required for URL audio."
+		end
+		u = normUrl(u)
+		const e = ext(u)
+		if not e then return nil, "URL must end in mp3, ogg, flac, or wav." end
+		const dst = st.root.."/"..fileNameFor(u, e)
+		if type(isfile) == "function" then
+			local okFile, has = pcall(isfile, dst)
+			if okFile and has then
+				local okAsset, asset = pcall(getcustomasset, dst)
+				if okAsset and asset then return {path = dst, name = bn(dst), asset = asset} end
+			end
+		end
+		const body = reqBody(u)
+		if type(body) ~= "string" or body == "" then return nil, "Failed to download audio." end
+		const okWrite = pcall(writefile, dst, body)
+		if not okWrite then return nil, "Failed to save audio." end
+		local okAsset, asset = pcall(getcustomasset, dst)
+		if not (okAsset and type(asset) == "string" and asset ~= "") then return nil, "Failed to load local audio asset." end
+		return {path = dst, name = bn(dst), asset = asset}
+	end
+	const function idOf(q)
+		q = trim(q)
+		const n = q:match("^rbxassetid://(%d+)$") or q:match("[?&]id=(%d+)") or q:match("^(%d+)$") or q:match("/library/(%d+)") or q:match("/catalog/(%d+)")
+		if n then return "rbxassetid://"..n, n end
+		return nil
+	end
+	const function resolve(q)
+		q = trim(q)
+		if q == "" then return nil, nil, "Enter an asset id, URL, or local filename." end
+		const loc = findLocal(q)
+		if loc and loc.asset then return loc.asset, loc.name end
+		local sid, raw = idOf(q)
+		if sid then return sid, raw end
+		if q:match("^https?://") or q:match("^www%.") then
+			local item, err = dl(q)
+			if item and item.asset then return item.asset, item.name end
+			return nil, nil, err or "Failed to load URL."
+		end
+		if ext(q) then return nil, nil, "Local audio file not found in Nameless-Admin/Music." end
+		return nil, nil, "Enter a valid asset id, URL, or local filename."
+	end
+	const function nextTrack()
+		const tracks = scan()
+		if #tracks == 0 then return nil end
+		const cur = trim(st.raw or st.last or ""):lower()
+		local idx
+		for i, it in tracks do
+			const nm = tostring(it.name or ""):lower()
+			if cur == nm or cur == noext(nm) then idx = i break end
+		end
+		if st.mode == "random" then
+			if #tracks == 1 then return tracks[1] end
+			local n = math.random(1, #tracks)
+			if n == idx then n = (n % #tracks) + 1 end
+			return tracks[n]
+		end
+		return tracks[((idx or 0) % #tracks) + 1]
+	end
+	const function protRoot()
+		local root
+		if __NAUIProtector and type(__NAUIProtector.parent) == "function" then
+			local ok, res = pcall(__NAUIProtector.parent)
+			if ok and typeof(res) == "Instance" then root = res end
+		end
+		if not root and NAlib and type(NAlib.huiGrabber) == "function" then
+			local ok, res = pcall(NAlib.huiGrabber)
+			if ok and typeof(res) == "Instance" then root = res end
+		end
+		if not root and NAStuff and typeof(NAStuff.NASCREENGUI) == "Instance" then root = NAStuff.NASCREENGUI end
+		if not root and typeof(frame) == "Instance" then root = frame end
+		return root
+	end
+	const function safeParent(obj)
+		if typeof(obj) ~= "Instance" then return nil end
+		local ok, par = pcall(function() return obj.Parent end)
+		if ok then return par end
+		return nil
+	end
+	const function ensureHost()
+		const root = protRoot()
+		if not root then return frame end
+		local host = st.host
+		if typeof(host) == "Instance" then
+			local par = safeParent(host)
+			if par ~= root then
+				const ok = pcall(function() host.Parent = root end)
+				par = safeParent(host)
+				if not ok or par ~= root then host = nil end
+			end
+		else
+			host = nil
+		end
+		if not host then
+			host = InstanceNew("Folder")
+			host.Name = NAmanage.GetSessionInstanceName and NAmanage.GetSessionInstanceName("MusicHost") or "NA_MusicHost"
+			host.Parent = root
+			st.host = host
+			if NAmanage and type(NAmanage.ProtectInstance) == "function" then
+				pcall(NAmanage.ProtectInstance, host, {
+					register = true,
+					enforceParent = true,
+					parent = root,
+					renameRoot = true,
+					nameKey = "MusicHost",
+				})
+			end
+		end
+		return host
+	end
+	const function clearSound()
+		NAlib.disconnect("NA_MusicPlayerSound")
+		if st.snd then
+			pcall(function() st.snd:Destroy() end)
+			st.snd = nil
+		end
+	end
+	const function mkSound(id, raw, auto, seek, repair)
+		clearSound()
+		const par = ensureHost() or frame
+		const s = InstanceNew("Sound")
+		s.Name = NAmanage.GetSessionInstanceName and NAmanage.GetSessionInstanceName("MusicPlayerSound") or "NA_MusicPlayerSound"
+		s.SoundId = id
+		s.Volume = st.vol
+		s.PlaybackSpeed = st.spd
+		s.Looped = st.loop == true
+		s.Parent = par
+		st.snd = s
+		st.sid = id
+		st.raw = tostring(raw or "")
+		st.last = st.raw
+		st.wasPlaying = auto == true
+		st.repairing = false
+		if NAmanage and type(NAmanage.ProtectInstance) == "function" then
+			pcall(NAmanage.ProtectInstance, s, {
+				register = true,
+				enforceParent = true,
+				parent = par,
+				renameRoot = true,
+				nameKey = "MusicPlayerSound",
+			})
+		end
+		if not repair then setNow("Loaded: "..st.raw) end
+		setStat(repair and "Restored" or "Loaded", Color3.fromRGB(55, 55, 75))
+		setProg(tonumber(seek) or 0, s.TimeLength or 0)
+		syncMix()
+		saveCfg()
+		const function clearGroup()
+			if st.snd == s and safeParent(s) then pcall(function() s.SoundGroup = nil end) end
+		end
+		const function markRepair()
+			if st.snd ~= s then return end
+			local pos = 0
+			pcall(function() pos = s.TimePosition or 0 end)
+			st.repairPos = pos
+			st.needsRepair = true
+		end
+		clearGroup()
+		NAlib.connect("NA_MusicPlayerSound", s:GetPropertyChangedSignal("SoundGroup"):Connect(function() Defer(clearGroup) end))
+		NAlib.connect("NA_MusicPlayerSound", s.AncestryChanged:Connect(function(_, parent)
+			if st.snd == s and parent == nil then markRepair() end
+		end))
+		pcall(function()
+			NAlib.connect("NA_MusicPlayerSound", s.Destroying:Connect(markRepair))
+		end)
+		NAlib.connect("NA_MusicPlayerSound", s.Loaded:Connect(function()
+			if st.snd ~= s then return end
+			const pos = tonumber(seek) or 0
+			if pos > 0 then pcall(function() s.TimePosition = math.clamp(pos, 0, math.max(s.TimeLength or 0, pos)) end) end
+			setStat("Loaded", Color3.fromRGB(55, 55, 75))
+			setProg(s.TimePosition or 0, s.TimeLength or 0)
+		end))
+		NAlib.connect("NA_MusicPlayerSound", s.Played:Connect(function()
+			if st.snd ~= s then return end
+			st.wasPlaying = true
+			setStat("Playing", Color3.fromRGB(35, 90, 70))
+		end))
+		NAlib.connect("NA_MusicPlayerSound", s.Paused:Connect(function()
+			if st.snd ~= s then return end
+			st.wasPlaying = false
+			setStat("Paused", Color3.fromRGB(65, 65, 82))
+		end))
+		NAlib.connect("NA_MusicPlayerSound", s.Stopped:Connect(function()
+			if st.snd ~= s then return end
+			st.wasPlaying = false
+			setStat("Stopped", Color3.fromRGB(55, 55, 65))
+			setProg(0, s.TimeLength or 0)
+		end))
+		NAlib.connect("NA_MusicPlayerSound", s.Ended:Connect(function()
+			if st.snd ~= s then return end
+			st.wasPlaying = false
+			setStat("Ended", Color3.fromRGB(86, 62, 45))
+			if st.mode == "order" or st.mode == "random" then
+				const nxt = nextTrack()
+				if nxt then loadTrack(nxt.name, true, true) end
+			end
+		end))
+		if auto then
+			Defer(function()
+				if st.snd ~= s then return end
+				pcall(function() s:Play() end)
+				const pos = tonumber(seek) or 0
+				if pos > 0 then pcall(function() s.TimePosition = pos end) end
+			end)
+		elseif tonumber(seek) and seek > 0 then
+			pcall(function() s.TimePosition = seek end)
+		end
+		return true
+	end
+	const function repairSound(force)
+		if not st.sid or st.repairing then return false end
+		const nowTick = tick()
+		if not force and nowTick - (tonumber(st.lastRepair) or 0) < 0.75 then return false end
+		st.lastRepair = nowTick
+		st.repairing = true
+		local pos = tonumber(st.repairPos) or 0
+		local play = st.wasPlaying == true
+		if st.snd then
+			pcall(function() pos = st.snd.TimePosition or pos end)
+			pcall(function() play = st.snd.IsPlaying == true or st.snd.Playing == true or play end)
+		end
+		return mkSound(st.sid, st.raw or st.last or "", play, pos, true)
+	end
+	function loadTrack(raw, auto, quiet)
+		raw = raw or (inp and inp.Text) or st.last or ""
+		local id, display, err = resolve(raw)
+		if not id then
+			if not quiet then DoNotif(err or "Failed to load track.", 3, "Music") end
+			setStat("Error", Color3.fromRGB(95, 45, 55))
+			return false
+		end
+		if inp then inp.Text = tostring(display or raw or "") end
+		return mkSound(id, display or raw, auto)
+	end
+	loadCfg()
+	if inp and trim(inp.Text) == "" then inp.Text = st.last or "" end
+	syncMix()
+	rebuildList()
+	if st.last and st.last ~= "" then setNow("Last: "..st.last) end
+	if load then NAlib.connect("NA_MusicPlayer", MouseButtonFix(load, function() loadTrack(nil, false) end)) end
+	if inp then NAlib.connect("NA_MusicPlayer", inp.FocusLost:Connect(function(ok) if ok then loadTrack(nil, false) end end)) end
+	if btns.Refresh then NAlib.connect("NA_MusicPlayer", MouseButtonFix(btns.Refresh, rebuildList)) end
+	if btns.Play then NAlib.connect("NA_MusicPlayer", MouseButtonFix(btns.Play, function()
+		if not st.snd then if not loadTrack(nil, true) then return end else pcall(function() st.snd:Play() end) end
+	end)) end
+	if btns.Pause then NAlib.connect("NA_MusicPlayer", MouseButtonFix(btns.Pause, function() if st.snd then pcall(function() st.snd:Pause() end) end end)) end
+	if btns.Resume then NAlib.connect("NA_MusicPlayer", MouseButtonFix(btns.Resume, function()
+		if st.snd then const ok = pcall(function() st.snd:Resume() end); if not ok then pcall(function() st.snd:Play() end) end end
+	end)) end
+	if btns.Stop then NAlib.connect("NA_MusicPlayer", MouseButtonFix(btns.Stop, function() if st.snd then pcall(function() st.snd:Stop() end) end end)) end
+	if btns.Loop then NAlib.connect("NA_MusicPlayer", MouseButtonFix(btns.Loop, function()
+		st.loop = not st.loop
+		syncMix()
+		saveCfg()
+	end)) end
+	if btns.Mode then NAlib.connect("NA_MusicPlayer", MouseButtonFix(btns.Mode, function()
+		st.mode = st.mode == "off" and "order" or st.mode == "order" and "random" or "off"
+		syncMix()
+		saveCfg()
+	end)) end
+	if btns.Next then NAlib.connect("NA_MusicPlayer", MouseButtonFix(btns.Next, function()
+		const nxt = nextTrack()
+		if not nxt then DoNotif("No local music files found.", 3, "Music") return end
+		loadTrack(nxt.name, true)
+	end)) end
+	if volBox then NAlib.connect("NA_MusicPlayer", volBox.FocusLost:Connect(function()
+		st.vol = math.clamp(tonumber(volBox.Text) or st.vol or 1, 0, 10)
+		syncMix()
+		saveCfg()
+	end)) end
+	if spdBox then NAlib.connect("NA_MusicPlayer", spdBox.FocusLost:Connect(function()
+		st.spd = math.clamp(tonumber(spdBox.Text) or st.spd or 1, 0.25, 4)
+		syncMix()
+		saveCfg()
+	end)) end
+	if prog then
+		prog.Active = true
+		NAlib.connect("NA_MusicPlayer", prog.InputBegan:Connect(function(i)
+			if not (st.snd and ((i.UserInputType == Enum.UserInputType.MouseButton1) or (i.UserInputType == Enum.UserInputType.Touch))) then return end
+			const len = tonumber(st.snd.TimeLength) or 0
+			if len <= 0 then return end
+			const a = math.clamp((i.Position.X - prog.AbsolutePosition.X) / math.max(prog.AbsoluteSize.X, 1), 0, 1)
+			pcall(function() st.snd.TimePosition = len * a end)
+			setProg(len * a, len)
+		end))
+	end
+	NAlib.connect("NA_MusicPlayer", Services.RunService.Heartbeat:Connect(function(dt)
+		st.tick = (tonumber(st.tick) or 0) + (tonumber(dt) or 0)
+		if st.tick < 0.18 then return end
+		st.tick = 0
+		if st.host and safeParent(st.host) == nil then st.host = nil end
+		if st.snd then
+			const par = safeParent(st.snd)
+			const want = ensureHost()
+			if st.needsRepair or par == nil then
+				st.needsRepair = false
+				repairSound(false)
+				return
+			elseif want and par ~= want then
+				const ok = pcall(function() st.snd.Parent = want end)
+				if not ok or safeParent(st.snd) ~= want then
+					repairSound(false)
+					return
+				end
+			end
+			pcall(function()
+				st.repairPos = st.snd.TimePosition or st.repairPos or 0
+				st.wasPlaying = st.snd.IsPlaying == true or st.snd.Playing == true
+			end)
+		end
+		if not (frame and frame.Parent and frame.Visible and st.snd) then return end
+		setProg(st.snd.TimePosition or 0, st.snd.TimeLength or 0)
+	end))
+	return true
+end
+
+NAmanage.MusicWindow_Open = NAmanage.MusicWindow_Open or function()
+	if not NAmanage.MusicWindowInit() then
+		DoNotif("Music player UI unavailable.", 3, "Music")
+		return false
+	end
+	const frame = NAUIMANAGER and NAUIMANAGER.MusicFrame
+	if frame then
+		frame.Visible = true
+		NAmanage.centerFrame(frame)
+		if NAmanage.OnUIWindowShown then pcall(NAmanage.OnUIWindowShown, frame) end
+		return true
+	end
+	return false
+end
+
+NAmanage.MusicWindow_Toggle = NAmanage.MusicWindow_Toggle or function()
+	const frame = NAUIMANAGER and NAUIMANAGER.MusicFrame
+	if frame and frame.Visible then
+		frame.Visible = false
+		return true
+	end
+	return NAmanage.MusicWindow_Open()
+end
+
+NAgui.musicplayer = NAgui.musicplayer or function()
+	return NAmanage.MusicWindow_Open()
 end
 
 NAgui.settingss = function()
@@ -123299,6 +130694,7643 @@ NAStuff.ExecutorCodec.Obfuscate = NAStuff.ExecutorCodec.Obfuscate or function(so
 	const packed = NAStuff.ExecutorCodec.LZW92Encode(source)
 	const payload = NAStuff.ExecutorCodec.Base32Encode(NAStuff.ExecutorCodec.RepeatXor(packed, repeatKey))
 	return '--[[NA_OBF:LZW92_RXOR32]]\nlocal P="'..payload..'" local K="'..repeatKey..'" '..NAStuff.ExecutorCodec.MakeBase32Decoder(NAStuff.ExecutorCodec.MakeRepeatXorDecoder(NAStuff.ExecutorCodec.MakeLZWDecoder(NAStuff.ExecutorCodec.UniversalRunTail))), "Ultra"
+end
+
+NAmanage.Executor_Init = NAmanage.Executor_Init or function()
+	if not (NAUIMANAGER and NAUIMANAGER.ExecutorFrame and NAUIMANAGER.ExecutorContainer) then
+		return false
+	end
+
+	const frame = NAUIMANAGER.ExecutorFrame
+	const container = NAUIMANAGER.ExecutorContainer
+	if frame.GetAttribute and NAmanage.GetAttr(frame, "NAExecutorReady") then
+		return true
+	end
+	if frame.SetAttribute then
+		NAmanage.SetAttr(frame, "NAExecutorReady", true)
+	end
+
+	for _, child in container:GetChildren() do
+		child:Destroy()
+	end
+
+	const TextServiceRef = Services.TextService
+	const UserInputServiceRef = Services.UserInputService
+	const GuiServiceRef = Services.GuiService
+	const execResponsive = {
+		compact = false,
+		phone = false,
+		lastW = 0,
+		lastH = 0,
+	}
+	const execSizeXAttr = "NAExecutorSavedSizeX"
+	const execSizeYAttr = "NAExecutorSavedSizeY"
+	const function saveExecutorFrameSize()
+		if not (frame and frame.Parent and frame.SetAttribute) then
+			return
+		end
+		if frame.GetAttribute and NAmanage.GetAttr(frame, "NAMenuMinimized") == true then
+			return
+		end
+		const w = tonumber(frame.Size.X.Offset) or 0
+		const h = tonumber(frame.Size.Y.Offset) or 0
+		if w > 0 and h > 0 then
+			NAmanage.SetAttr(frame, execSizeXAttr, math.floor(w + 0.5))
+			NAmanage.SetAttr(frame, execSizeYAttr, math.floor(h + 0.5))
+		end
+	end
+	const function getExecutorSavedSize()
+		if frame and frame.GetAttribute then
+			const w = tonumber(NAmanage.GetAttr(frame, execSizeXAttr))
+			const h = tonumber(NAmanage.GetAttr(frame, execSizeYAttr))
+			if w and h and w > 0 and h > 0 then
+				return w, h
+			end
+		end
+		return nil
+	end
+	NAmanage.Executor_SaveFrameSize = saveExecutorFrameSize
+	const baseExecDir = "Nameless-Admin"
+	const execDir = baseExecDir.."/NA-Exec"
+	const settingsFile = execDir.."/settings.json"
+	const tabsFile = execDir.."/tabs.json"
+	const indexFile = execDir.."/scripts.json"
+	const scriptsDir = execDir.."/Scripts"
+	const folderApiOk = type(isfolder) == "function"
+		and type(makefolder) == "function"
+	const fsOk = type(isfile) == "function"
+		and type(readfile) == "function"
+		and type(writefile) == "function"
+	const delOk = type(delfile) == "function"
+	const listOk = type(listfiles) == "function"
+	const cfg = {
+		syntax = true,
+		lineNumbers = true,
+		showHub = true,
+		runInCurrentThread = false,
+		threadIdentity = false,
+		identityLevel = 8,
+		profileExecution = false,
+		fontSize = 15,
+	}
+	const colors = {
+		panel = Color3.fromRGB(17, 17, 21),
+		panel2 = Color3.fromRGB(24, 24, 30),
+		panel3 = Color3.fromRGB(31, 31, 38),
+		stroke = Color3.fromRGB(72, 72, 82),
+		text = Color3.fromRGB(235, 235, 242),
+		subtle = Color3.fromRGB(170, 170, 180),
+		tabIdle = Color3.fromRGB(27, 27, 34),
+		tabActive = Color3.fromRGB(40, 40, 52),
+		tabTextIdle = Color3.fromRGB(178, 178, 190),
+		tabTextActive = Color3.fromRGB(241, 241, 248),
+		lineNumber = Color3.fromRGB(125, 125, 140),
+		code = Color3.fromRGB(230, 230, 236),
+		keyword = Color3.fromRGB(255, 171, 247),
+		global = Color3.fromRGB(132, 203, 255),
+		string = Color3.fromRGB(166, 226, 128),
+		comment = Color3.fromRGB(112, 122, 132),
+		number = Color3.fromRGB(255, 214, 112),
+		func = Color3.fromRGB(130, 230, 210),
+		method = Color3.fromRGB(118, 194, 255),
+		property = Color3.fromRGB(205, 194, 255),
+		operator = Color3.fromRGB(255, 155, 190),
+		bracket = Color3.fromRGB(210, 210, 225),
+		success = Color3.fromRGB(156, 235, 174),
+		warn = Color3.fromRGB(255, 214, 112),
+		error = Color3.fromRGB(255, 146, 146),
+	}
+	const function makeCornerAndStroke(obj, radius, thickness)
+		const corner = InstanceNew("UICorner")
+		corner.CornerRadius = UDim.new(0, 6)
+		corner.Parent = obj
+		const stroke = InstanceNew("UIStroke")
+		stroke.Color = colors.stroke
+		stroke.Transparency = 0.18
+		stroke.Thickness = thickness or 1
+		stroke.Parent = obj
+		return corner, stroke
+	end
+
+	const function makeButton(parent, text, background)
+		const button = InstanceNew("TextButton")
+		button.AutoButtonColor = false
+		button.BackgroundColor3 = background or colors.panel3
+		button.BorderSizePixel = 0
+		button.Font = Enum.Font.GothamSemibold
+		button.Text = text
+		button.TextColor3 = colors.text
+		button.TextSize = 13
+		button.Parent = parent
+		makeCornerAndStroke(button, 8, 1)
+		button.MouseEnter:Connect(function()
+			Services.TweenService:Create(button, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				BackgroundColor3 = (background or colors.panel3):Lerp(Color3.new(1, 1, 1), 0.06)
+			}):Play()
+		end)
+		button.MouseLeave:Connect(function()
+			local targetColor = background or colors.panel3
+			if button.GetAttribute and NAmanage.GetAttr(button, "NAExecutorSelected") then
+				targetColor = colors.tabActive
+			end
+			Services.TweenService:Create(button, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				BackgroundColor3 = targetColor
+			}):Play()
+		end)
+		return button
+	end
+
+	const function isScriptFileName(name)
+		const low = tostring(name or ""):lower()
+		return low:match("%.lua$") ~= nil or low:match("%.luau$") ~= nil or low:match("%.txt$") ~= nil
+	end
+
+	const function sanitizeScriptName(name)
+		name = tostring(name or "")
+		name = name:gsub('[\\/:*?"<>|]', "")
+		name = name:gsub("%s+", " ")
+		name = name:gsub("^%s+", ""):gsub("%s+$", "")
+		if name == "" then
+			name = "script"
+		end
+		if not isScriptFileName(name) then
+			name ..= ".luau"
+		end
+		return name
+	end
+
+	const function stripLuauExt(name)
+		return tostring(name or ""):gsub("%.luau$", ""):gsub("%.lua$", ""):gsub("%.txt$", "")
+	end
+
+	const function scriptPath(name)
+		return scriptsDir.."/"..sanitizeScriptName(name)
+	end
+
+	local ensureExecutorFolders
+
+	const function readScriptIndex()
+		const list = {}
+		if not (fsOk and isfile(indexFile)) then
+			return list
+		end
+		local ok, raw = pcall(readfile, indexFile)
+		if not ok or type(raw) ~= "string" or raw == "" then
+			return list
+		end
+		local okDecode, decoded = pcall(Services.HttpService.JSONDecode, Services.HttpService, raw)
+		if okDecode and type(decoded) == "table" then
+			for _, value in decoded do
+				if type(value) == "string" and value ~= "" then
+					list[#list + 1] = sanitizeScriptName(value)
+				end
+			end
+		end
+		return list
+	end
+
+	const function saveScriptIndex(names)
+		if not ensureExecutorFolders() then
+			return false
+		end
+		const seen = {}
+		const clean = {}
+		for _, name in names or {} do
+			const fileName = sanitizeScriptName(name)
+			const key = fileName:lower()
+			if not seen[key] then
+				seen[key] = true
+				clean[#clean + 1] = fileName
+			end
+		end
+		table.sort(clean, function(a, b)
+			return a:lower() < b:lower()
+		end)
+		local ok, encoded = pcall(function()
+			return Services.HttpService:JSONEncode(clean)
+		end)
+		if ok and encoded then
+			return pcall(writefile, indexFile, encoded)
+		end
+		return false
+	end
+
+	const function addScriptIndex(name)
+		const fileName = sanitizeScriptName(name)
+		const names = readScriptIndex()
+		local exists = false
+		for _, item in names do
+			if item:lower() == fileName:lower() then
+				exists = true
+				break
+			end
+		end
+		if not exists then
+			names[#names + 1] = fileName
+		end
+		saveScriptIndex(names)
+	end
+
+	const function removeScriptIndex(name)
+		const fileName = sanitizeScriptName(name)
+		const names = readScriptIndex()
+		for i = #names, 1, -1 do
+			if names[i]:lower() == fileName:lower() then
+				table.remove(names, i)
+			end
+		end
+		saveScriptIndex(names)
+	end
+
+	const function setStatus(message, color)
+		NAStuff.ExecutorStatusText = message or "Ready"
+		NAStuff.ExecutorStatusColor = color or colors.subtle
+		if not NAStuff.ExecutorStatusLabel then
+			return
+		end
+		pcall(function()
+			if typeof(NAStuff.ExecutorStatusLabel) == "Instance" and NAStuff.ExecutorStatusLabel.Parent then
+				NAStuff.ExecutorStatusLabel.Text = NAStuff.ExecutorStatusText
+				NAStuff.ExecutorStatusLabel.TextColor3 = NAStuff.ExecutorStatusColor
+			end
+		end)
+	end
+
+	function ensureExecutorFolders()
+		if not fsOk then
+			return false
+		end
+		if not folderApiOk then
+			return true
+		end
+		local ok = true
+		const function mk(path)
+			if not ok then
+				return
+			end
+			local has = false
+			local okCheck, result = pcall(isfolder, path)
+			if okCheck and result == true then
+				has = true
+			end
+			if not has then
+				const okMake = pcall(makefolder, path)
+				if not okMake then
+					ok = false
+				end
+			end
+		end
+		mk(baseExecDir)
+		mk(execDir)
+		mk(scriptsDir)
+		return ok
+	end
+
+	if fsOk then
+		ensureExecutorFolders()
+		pcall(function()
+			if isfile(settingsFile) then
+				const raw = readfile(settingsFile)
+				if raw and raw ~= "" then
+					local ok, decoded = pcall(Services.HttpService.JSONDecode, Services.HttpService, raw)
+					if ok and type(decoded) == "table" then
+						if type(decoded.syntax) == "boolean" then cfg.syntax = decoded.syntax end
+						if type(decoded.lineNumbers) == "boolean" then cfg.lineNumbers = decoded.lineNumbers end
+						if type(decoded.showHub) == "boolean" then cfg.showHub = decoded.showHub end
+						if type(decoded.scriptHub) == "boolean" then cfg.showHub = decoded.scriptHub end
+						if type(decoded.runInCurrentThread) == "boolean" then cfg.runInCurrentThread = decoded.runInCurrentThread end
+						if type(decoded.threadIdentity) == "boolean" then cfg.threadIdentity = decoded.threadIdentity end
+						if type(decoded.profileExecution) == "boolean" then cfg.profileExecution = decoded.profileExecution end
+						if tonumber(decoded.identityLevel) then cfg.identityLevel = math.clamp(math.floor(tonumber(decoded.identityLevel) + 0.5), 0, 8) end
+						if tonumber(decoded.fontSize) then cfg.fontSize = math.clamp(math.floor(tonumber(decoded.fontSize) + 0.5), 11, 24) end
+					end
+				end
+			end
+		end)
+	end
+
+	const function saveSettings()
+		if not fsOk then
+			return false
+		end
+		if not ensureExecutorFolders() then
+			return false
+		end
+		const payload = {
+			syntax = cfg.syntax == true,
+			lineNumbers = cfg.lineNumbers == true,
+			showHub = cfg.showHub ~= false,
+			scriptHub = cfg.showHub ~= false,
+			runInCurrentThread = cfg.runInCurrentThread == true,
+			threadIdentity = cfg.threadIdentity == true,
+			identityLevel = math.clamp(math.floor((tonumber(cfg.identityLevel) or 8) + 0.5), 0, 8),
+			profileExecution = cfg.profileExecution == true,
+			fontSize = math.clamp(math.floor((tonumber(cfg.fontSize) or 15) + 0.5), 11, 24),
+		}
+		local ok, encoded = pcall(function()
+			return Services.HttpService:JSONEncode(payload)
+		end)
+		if ok and encoded then
+			const wrote = pcall(writefile, settingsFile, encoded)
+			return wrote == true
+		end
+		return false
+	end
+
+	const function getExecutorViewport()
+		const screenGui = NAStuff and NAStuff.NASCREENGUI
+		if screenGui and screenGui.AbsoluteSize and screenGui.AbsoluteSize.X > 0 and screenGui.AbsoluteSize.Y > 0 then
+			return screenGui.AbsoluteSize
+		end
+		const cam = Services.Workspace and Services.Workspace.CurrentCamera
+		if cam and cam.ViewportSize and cam.ViewportSize.X > 0 and cam.ViewportSize.Y > 0 then
+			return cam.ViewportSize
+		end
+		return Vector2.new(1280, 720)
+	end
+
+	const function getSafePad()
+		local x, y = 12, 12
+		if GuiServiceRef and GuiServiceRef.GetGuiInset then
+			local ok, a, b = pcall(function()
+				return GuiServiceRef:GetGuiInset()
+			end)
+			if ok and typeof(a) == "Vector2" and typeof(b) == "Vector2" then
+				x += math.max(a.X, b.X)
+				y += math.max(a.Y, b.Y)
+			end
+		end
+		return x, y
+	end
+
+	const function isTouchCompact(vp)
+		const touch = UserInputServiceRef and UserInputServiceRef.TouchEnabled
+		const mouse = UserInputServiceRef and UserInputServiceRef.MouseEnabled
+		const key = UserInputServiceRef and UserInputServiceRef.KeyboardEnabled
+		return IsOnMobile or vp.Y < 600 or vp.X < 900 or (touch and not (mouse or key))
+	end
+
+	const function getExecutorSize(vp)
+		local padX, padY = getSafePad()
+		const maxW = math.max(1, math.floor(vp.X - padX * 2 + 0.5))
+		const maxH = math.max(1, math.floor(vp.Y - padY * 2 + 0.5))
+		const mobile = isTouchCompact(vp)
+		const baseW, baseH = 920, 540
+		local capW = mobile and math.floor(maxW * 0.90 + 0.5) or math.min(baseW, maxW)
+		local capH = mobile and math.floor(maxH * 0.90 + 0.5) or math.min(baseH, maxH)
+		capW = math.max(1, capW)
+		capH = math.max(1, capH)
+		local scale = math.min(capW / baseW, capH / baseH, 1)
+		if not scale or scale <= 0 then
+			scale = 1
+		end
+		local w = math.floor(baseW * scale + 0.5)
+		local h = math.floor(baseH * scale + 0.5)
+		const minW = math.min(mobile and 340 or 680, capW)
+		const minH = math.min(mobile and 280 or 420, capH)
+		w = math.clamp(w, minW, capW)
+		h = math.clamp(h, minH, capH)
+		return w, h, capW, capH, mobile
+	end
+
+	const function applyExecutorFrameSize(center)
+		if not frame or not frame.Parent then
+			return
+		end
+		if frame.GetAttribute and NAmanage.GetAttr(frame, "NAMenuMinimized") == true then
+			return
+		end
+		const vp = getExecutorViewport()
+		local defW, defH, capW, capH, mobile = getExecutorSize(vp)
+		const initialized = frame.GetAttribute and NAmanage.GetAttr(frame, "NAExecutorDefaultSized") == true
+		const minW = math.min(mobile and 340 or 680, capW)
+		const minH = math.min(mobile and 280 or 420, capH)
+		const curW = tonumber(frame.Size.X.Offset) or 0
+		const curH = tonumber(frame.Size.Y.Offset) or 0
+		local savedW, savedH = getExecutorSavedSize()
+		local targetW = defW
+		local targetH = defH
+		if savedW and savedH then
+			targetW = math.clamp(math.floor(savedW + 0.5), minW, capW)
+			targetH = math.clamp(math.floor(savedH + 0.5), minH, capH)
+		elseif initialized and curW > 0 and curH > 0 then
+			targetW = math.clamp(math.floor(curW + 0.5), minW, capW)
+			targetH = math.clamp(math.floor(curH + 0.5), minH, capH)
+			if mobile and (targetW >= capW * 0.96 or targetW / math.max(targetH, 1) > 1.95 or targetH < defH * 0.82) then
+				targetW = defW
+				targetH = defH
+			end
+		end
+		execResponsive.compact = targetW < 760 or targetH < 430
+		execResponsive.phone = targetW < 560
+		execResponsive.lastW = targetW
+		execResponsive.lastH = targetH
+		frame.AnchorPoint = Vector2.new(0, 0)
+		if frame.AbsoluteSize.X ~= targetW or frame.AbsoluteSize.Y ~= targetH then
+			frame.Size = UDim2.fromOffset(targetW, targetH)
+		end
+		if frame.SetAttribute then
+			NAmanage.SetAttr(frame, "NAExecutorDefaultSized", true)
+		end
+		saveExecutorFrameSize()
+		if center == true and NAmanage.centerFrame then
+			NAmanage.centerFrame(frame)
+		end
+	end
+	NAmanage.Executor_ApplyResponsive = applyExecutorFrameSize
+	const rootPad = InstanceNew("UIPadding")
+	rootPad.PaddingBottom = UDim.new(0, 10)
+	rootPad.PaddingLeft = UDim.new(0, 10)
+	rootPad.PaddingRight = UDim.new(0, 10)
+	rootPad.PaddingTop = UDim.new(0, 10)
+	rootPad.Parent = container
+
+	const topbar = frame:FindFirstChild("Topbar")
+	local settingsButton = topbar and topbar:FindFirstChild("Settings")
+	if settingsButton then
+		settingsButton.AnchorPoint = Vector2.new(1, 0.5)
+		settingsButton.Position = UDim2.new(1, -112, 0.5, 0)
+	end
+	if topbar and not settingsButton then
+		settingsButton = InstanceNew("TextButton")
+		settingsButton.Name = "Settings"
+		settingsButton.Parent = topbar
+		settingsButton.BorderSizePixel = 0
+		settingsButton.TextSize = 15
+		settingsButton.TextColor3 = Color3.fromRGB(245, 245, 245)
+		settingsButton.BackgroundColor3 = Color3.fromRGB(55, 55, 65)
+		settingsButton.Font = Enum.Font.Gotham
+		settingsButton.AnchorPoint = Vector2.new(1, 0.5)
+		settingsButton.BackgroundTransparency = 0.3
+		settingsButton.Size = UDim2.new(0, 24, 0, 24)
+		settingsButton.Text = "S"
+		settingsButton.Position = UDim2.new(1, -112, 0.5, 0)
+		makeCornerAndStroke(settingsButton, 6, 2)
+	end
+
+	const tabsBar = InstanceNew("Frame")
+	tabsBar.Name = "TabsBar"
+	tabsBar.BackgroundTransparency = 1
+	tabsBar.BorderSizePixel = 0
+	tabsBar.Position = UDim2.new(0, 0, 0, 0)
+	tabsBar.Size = UDim2.new(1, 0, 0, 34)
+	tabsBar.Parent = container
+
+	const tabScroll = InstanceNew("ScrollingFrame")
+	tabScroll.Name = "Tabs"
+	tabScroll.Active = true
+	tabScroll.BackgroundTransparency = 1
+	tabScroll.BorderSizePixel = 0
+	tabScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	tabScroll.Position = UDim2.new(0, 0, 0, 0)
+	tabScroll.ScrollBarImageColor3 = colors.subtle
+	tabScroll.ScrollBarThickness = 3
+	tabScroll.ScrollingDirection = Enum.ScrollingDirection.X
+	tabScroll.Size = UDim2.new(1, -42, 1, 0)
+	tabScroll.Parent = tabsBar
+
+	const tabWrap = InstanceNew("Frame")
+	tabWrap.Name = "Wrap"
+	tabWrap.BackgroundTransparency = 1
+	tabWrap.BorderSizePixel = 0
+	tabWrap.Position = UDim2.new(0, 0, 0, 0)
+	tabWrap.Size = UDim2.new(0, 0, 1, 0)
+	tabWrap.Parent = tabScroll
+
+	const tabLayout = InstanceNew("UIListLayout")
+	tabLayout.FillDirection = Enum.FillDirection.Horizontal
+	tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+	tabLayout.Padding = UDim.new(0, 6)
+	tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	tabLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	tabLayout.Parent = tabWrap
+
+	const addTabButton = makeButton(tabsBar, "+", colors.panel3)
+	addTabButton.Name = "AddTab"
+	addTabButton.Position = UDim2.new(1, -34, 0, 1)
+	addTabButton.Size = UDim2.new(0, 34, 0, 28)
+	addTabButton.TextSize = 18
+
+	const body = InstanceNew("Frame")
+	body.Name = "Body"
+	body.BackgroundTransparency = 1
+	body.BorderSizePixel = 0
+	body.Position = UDim2.new(0, 0, 0, 42)
+	body.Size = UDim2.new(1, 0, 1, -92)
+	body.Parent = container
+
+	const editorPane = InstanceNew("Frame")
+	editorPane.Name = "EditorPane"
+	editorPane.BackgroundColor3 = colors.panel
+	editorPane.BorderSizePixel = 0
+	editorPane.Position = UDim2.new(0, 0, 0, 0)
+	editorPane.Size = UDim2.new(1, -252, 1, 0)
+	editorPane.Parent = body
+	makeCornerAndStroke(editorPane, 10, 1)
+
+	const hubPane = InstanceNew("Frame")
+	hubPane.Name = "ScriptHub"
+	hubPane.BackgroundColor3 = colors.panel
+	hubPane.BorderSizePixel = 0
+	hubPane.Position = UDim2.new(1, -242, 0, 0)
+	hubPane.Size = UDim2.new(0, 242, 1, 0)
+	hubPane.Parent = body
+	makeCornerAndStroke(hubPane, 10, 1)
+
+	const editorPad = InstanceNew("UIPadding")
+	editorPad.PaddingBottom = UDim.new(0, 8)
+	editorPad.PaddingLeft = UDim.new(0, 8)
+	editorPad.PaddingRight = UDim.new(0, 8)
+	editorPad.PaddingTop = UDim.new(0, 8)
+	editorPad.Parent = editorPane
+
+	const gutter = InstanceNew("Frame")
+	gutter.Name = "Gutter"
+	gutter.BackgroundColor3 = colors.panel2
+	gutter.BorderSizePixel = 0
+	gutter.Position = UDim2.new(0, 0, 0, 0)
+	gutter.Size = UDim2.new(0, 44, 1, 0)
+	gutter.Parent = editorPane
+	makeCornerAndStroke(gutter, 8, 1)
+
+	const gutterClip = InstanceNew("Frame")
+	gutterClip.BackgroundTransparency = 1
+	gutterClip.BorderSizePixel = 0
+	gutterClip.ClipsDescendants = true
+	gutterClip.Size = UDim2.new(1, 0, 1, 0)
+	gutterClip.Parent = gutter
+
+	const gutterLabel = InstanceNew("TextLabel")
+	gutterLabel.Name = "Lines"
+	gutterLabel.AnchorPoint = Vector2.new(1, 0)
+	gutterLabel.BackgroundTransparency = 1
+	gutterLabel.BorderSizePixel = 0
+	gutterLabel.Font = Enum.Font.Code
+	gutterLabel.Position = UDim2.new(1, -6, 0, 0)
+	gutterLabel.Size = UDim2.new(1, -10, 0, 0)
+	gutterLabel.Text = "1"
+	gutterLabel.TextColor3 = colors.lineNumber
+	gutterLabel.TextSize = 15
+	gutterLabel.TextXAlignment = Enum.TextXAlignment.Right
+	gutterLabel.TextYAlignment = Enum.TextYAlignment.Top
+	gutterLabel.Parent = gutterClip
+
+	const editorScroll = InstanceNew("ScrollingFrame")
+	editorScroll.Name = "Scroll"
+	editorScroll.Active = true
+	editorScroll.BackgroundColor3 = colors.panel
+	editorScroll.BorderSizePixel = 0
+	editorScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	editorScroll.Position = UDim2.new(0, 50, 0, 0)
+	editorScroll.ScrollBarImageColor3 = colors.subtle
+	editorScroll.ScrollBarThickness = 0
+	editorScroll.ScrollingDirection = Enum.ScrollingDirection.XY
+	editorScroll.Size = UDim2.new(1, -50, 1, 0)
+	editorScroll.Parent = editorPane
+	makeCornerAndStroke(editorScroll, 8, 1)
+
+	const editorLineScroll = InstanceNew("ScrollingFrame")
+	editorLineScroll.Name = "LineScrollProxy"
+	editorLineScroll.Active = false
+	editorLineScroll.BackgroundTransparency = 1
+	editorLineScroll.BorderSizePixel = 0
+	editorLineScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	editorLineScroll.Position = editorScroll.Position
+	editorLineScroll.ScrollBarThickness = 0
+	editorLineScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	editorLineScroll.Size = editorScroll.Size
+	editorLineScroll.Visible = false
+	editorLineScroll.Parent = editorPane
+
+	const function makeEditorScrollBar(parent, name, axis)
+		const horizontal = axis == "X"
+		const bar = InstanceNew("Frame")
+		bar.Name = name
+		bar.BackgroundColor3 = colors.panel2
+		bar.BorderSizePixel = 0
+		bar.Visible = false
+		bar.ZIndex = 35
+		bar.Parent = parent
+		makeCornerAndStroke(bar, 7, 1)
+
+		const upButton = InstanceNew("TextButton")
+		upButton.Name = horizontal and "Left" or "Up"
+		upButton.AutoButtonColor = false
+		upButton.BackgroundColor3 = colors.panel3
+		upButton.BorderSizePixel = 0
+		upButton.Font = Enum.Font.GothamBold
+		upButton.Text = horizontal and "<" or "^"
+		upButton.TextColor3 = colors.text
+		upButton.TextSize = 10
+		upButton.ZIndex = 36
+		upButton.Parent = bar
+		makeCornerAndStroke(upButton, 5, 1)
+
+		const downButton = InstanceNew("TextButton")
+		downButton.Name = horizontal and "Right" or "Down"
+		downButton.AutoButtonColor = false
+		downButton.BackgroundColor3 = colors.panel3
+		downButton.BorderSizePixel = 0
+		downButton.Font = Enum.Font.GothamBold
+		downButton.Text = horizontal and ">" or "v"
+		downButton.TextColor3 = colors.text
+		downButton.TextSize = 10
+		downButton.ZIndex = 36
+		downButton.Parent = bar
+		makeCornerAndStroke(downButton, 5, 1)
+
+		const track = InstanceNew("Frame")
+		track.Name = "Track"
+		track.BackgroundColor3 = colors.panel
+		track.BorderSizePixel = 0
+		track.ZIndex = 36
+		track.Parent = bar
+		makeCornerAndStroke(track, 5, 1)
+
+		const thumb = InstanceNew("Frame")
+		thumb.Name = "Thumb"
+		thumb.BackgroundColor3 = colors.subtle
+		thumb.BorderSizePixel = 0
+		thumb.ZIndex = 37
+		thumb.Parent = track
+		makeCornerAndStroke(thumb, 5, 1)
+
+		if horizontal then
+			bar.Size = UDim2.new(0, 120, 0, 16)
+			upButton.Position = UDim2.new(0, 0, 0, 0)
+			upButton.Size = UDim2.new(0, 16, 1, 0)
+			downButton.AnchorPoint = Vector2.new(1, 0)
+			downButton.Position = UDim2.new(1, 0, 0, 0)
+			downButton.Size = UDim2.new(0, 16, 1, 0)
+			track.Position = UDim2.new(0, 18, 0, 0)
+			track.Size = UDim2.new(1, -36, 1, 0)
+		else
+			bar.Size = UDim2.new(0, 16, 0, 120)
+			upButton.Position = UDim2.new(0, 0, 0, 0)
+			upButton.Size = UDim2.new(1, 0, 0, 16)
+			downButton.AnchorPoint = Vector2.new(0, 1)
+			downButton.Position = UDim2.new(0, 0, 1, 0)
+			downButton.Size = UDim2.new(1, 0, 0, 16)
+			track.Position = UDim2.new(0, 0, 0, 18)
+			track.Size = UDim2.new(1, 0, 1, -36)
+		end
+
+		return {
+			bar = bar,
+			upButton = upButton,
+			downButton = downButton,
+			track = track,
+			thumb = thumb,
+		}
+	end
+
+	const editorVScroll = makeEditorScrollBar(editorPane, "CustomScrollBar", "Y")
+	const editorHScroll = makeEditorScrollBar(editorPane, "CustomHorizontalScrollBar", "X")
+	local editorGetVisibleLines
+	local editorGetTotalLines
+	local editorGetViewLine
+	local editorSetViewLine
+
+	const function layoutEditorScrollBar(_, target, widgets)
+		const bar = widgets and widgets.bar
+		if not (target and bar and bar.Parent) then
+			return
+		end
+		const parentPos = bar.Parent.AbsolutePosition
+		const relX = math.floor(target.AbsolutePosition.X - parentPos.X + 0.5)
+		const relY = math.floor(target.AbsolutePosition.Y - parentPos.Y + 0.5)
+		const w = math.floor(target.AbsoluteSize.X + 0.5)
+		const h = math.floor(target.AbsoluteSize.Y + 0.5)
+		if bar == editorHScroll.bar then
+			bar.Position = UDim2.new(0, relX, 0, relY + h - 16)
+			bar.Size = UDim2.new(0, math.max(48, w - 18), 0, 16)
+		else
+			bar.Position = UDim2.new(0, relX + w - 16, 0, relY)
+			bar.Size = UDim2.new(0, 16, 0, math.max(48, h - 18))
+		end
+	end
+
+	const executorVerticalScroll = NAmanage.CustomScroll and NAmanage.CustomScroll.create and NAmanage.CustomScroll.create("executor_editor_v", {
+		getWidgets = function()
+			return editorVScroll
+		end,
+		getTarget = function()
+			return editorScroll
+		end,
+		getVisibleSpace = function()
+			return editorGetVisibleLines and editorGetVisibleLines() or 1
+		end,
+		getTotalSpace = function()
+			return editorGetTotalLines and editorGetTotalLines() or 1
+		end,
+		getPosition = function()
+			return math.max(0, (editorGetViewLine and editorGetViewLine() or 1) - 1)
+		end,
+		setPosition = function(_, _, pos)
+			if editorSetViewLine then
+				editorSetViewLine(math.floor((tonumber(pos) or 0) + 1.5))
+			end
+		end,
+		layoutForTarget = layoutEditorScrollBar,
+		step = 3,
+	})
+	const executorHorizontalScroll = NAmanage.CustomScroll and NAmanage.CustomScroll.create and NAmanage.CustomScroll.create("executor_editor_h", {
+		axis = "X",
+		getWidgets = function()
+			return editorHScroll
+		end,
+		getTarget = function()
+			return editorScroll
+		end,
+		layoutForTarget = layoutEditorScrollBar,
+		step = 96,
+	})
+	if executorVerticalScroll and executorVerticalScroll.install then
+		executorVerticalScroll.install()
+	end
+	if executorHorizontalScroll and executorHorizontalScroll.install then
+		executorHorizontalScroll.install()
+	end
+
+	const textBox = InstanceNew("TextBox")
+	textBox.Name = "Source"
+	textBox.BackgroundTransparency = 1
+	textBox.BorderSizePixel = 0
+	textBox.ClearTextOnFocus = false
+	textBox.Font = Enum.Font.Code
+	textBox.MultiLine = true
+	textBox.PlaceholderColor3 = colors.subtle
+	textBox.PlaceholderText = "-- Write your script here"
+	textBox.Position = UDim2.new(0, 8, 0, 0)
+	textBox.Size = UDim2.new(0, 320, 0, 200)
+	textBox.Text = ""
+	textBox.TextColor3 = colors.code
+	textBox.TextSize = 15
+	textBox.TextWrapped = false
+	textBox.TextXAlignment = Enum.TextXAlignment.Left
+	textBox.TextYAlignment = Enum.TextYAlignment.Top
+	textBox.Parent = editorScroll
+
+	const function makeLayer(name, color, zIndex)
+		const layer = InstanceNew("TextLabel")
+		layer.Name = name
+		layer.BackgroundTransparency = 1
+		layer.BorderSizePixel = 0
+		layer.Font = Enum.Font.Code
+		layer.Position = textBox.Position
+		layer.Size = textBox.Size
+		layer.Text = ""
+		layer.TextColor3 = color
+		layer.TextSize = textBox.TextSize
+		layer.TextWrapped = false
+		layer.TextXAlignment = Enum.TextXAlignment.Left
+		layer.TextYAlignment = Enum.TextYAlignment.Top
+		layer.ZIndex = zIndex
+		layer.Parent = editorScroll
+		return layer
+	end
+
+	const keywordLayer = makeLayer("Keywords", colors.keyword, 4)
+	const globalLayer = makeLayer("Globals", colors.global, 4)
+	const stringLayer = makeLayer("Strings", colors.string, 4)
+	const commentLayer = makeLayer("Comments", colors.comment, 4)
+	const numberLayer = makeLayer("Numbers", colors.number, 4)
+	const functionLayer = makeLayer("Functions", colors.func, 4)
+	const methodLayer = makeLayer("Methods", colors.method, 4)
+	const propertyLayer = makeLayer("Properties", colors.property, 4)
+	const operatorLayer = makeLayer("Operators", colors.operator, 4)
+	const bracketLayer = makeLayer("Brackets", colors.bracket, 4)
+	textBox.ZIndex = 3
+
+	const pagePanel = InstanceNew("Frame")
+	pagePanel.Name = "PageControls"
+	pagePanel.AnchorPoint = Vector2.new(1, 0)
+	pagePanel.BackgroundColor3 = colors.panel2
+	pagePanel.BorderSizePixel = 0
+	pagePanel.Position = UDim2.new(1, -14, 0, 14)
+	pagePanel.Size = UDim2.new(0, 210, 0, 28)
+	pagePanel.ZIndex = 30
+	pagePanel.Parent = editorPane
+	makeCornerAndStroke(pagePanel, 8, 1)
+
+	const pageLayout = InstanceNew("UIListLayout")
+	pageLayout.FillDirection = Enum.FillDirection.Horizontal
+	pageLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+	pageLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	pageLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	pageLayout.Padding = UDim.new(0, 5)
+	pageLayout.Parent = pagePanel
+
+	const pagePad = InstanceNew("UIPadding")
+	pagePad.PaddingLeft = UDim.new(0, 5)
+	pagePad.PaddingRight = UDim.new(0, 5)
+	pagePad.Parent = pagePanel
+
+	const pagePrev = makeButton(pagePanel, "<", colors.panel3)
+	pagePrev.LayoutOrder = 1
+	pagePrev.Size = UDim2.new(0, 32, 0, 22)
+	pagePrev.ZIndex = 31
+	const pageLabel = InstanceNew("TextLabel")
+	pageLabel.BackgroundTransparency = 1
+	pageLabel.BorderSizePixel = 0
+	pageLabel.Font = Enum.Font.GothamSemibold
+	pageLabel.LayoutOrder = 2
+	pageLabel.Size = UDim2.new(1, -74, 0, 22)
+	pageLabel.Text = "Lines 1-1/1"
+	pageLabel.TextColor3 = colors.subtle
+	pageLabel.TextSize = 12
+	pageLabel.TextXAlignment = Enum.TextXAlignment.Center
+	pageLabel.ZIndex = 31
+	pageLabel.Parent = pagePanel
+	const pageNext = makeButton(pagePanel, ">", colors.panel3)
+	pageNext.LayoutOrder = 3
+	pageNext.Size = UDim2.new(0, 32, 0, 22)
+	pageNext.ZIndex = 31
+
+	const hubPad = InstanceNew("UIPadding")
+	hubPad.PaddingBottom = UDim.new(0, 8)
+	hubPad.PaddingLeft = UDim.new(0, 8)
+	hubPad.PaddingRight = UDim.new(0, 8)
+	hubPad.PaddingTop = UDim.new(0, 8)
+	hubPad.Parent = hubPane
+
+	const hubTitle = InstanceNew("TextLabel")
+	hubTitle.BackgroundTransparency = 1
+	hubTitle.BorderSizePixel = 0
+	hubTitle.Font = Enum.Font.GothamBold
+	hubTitle.Size = UDim2.new(1, 0, 0, 18)
+	hubTitle.Text = "Saved Scripts"
+	hubTitle.TextColor3 = colors.text
+	hubTitle.TextSize = 15
+	hubTitle.TextXAlignment = Enum.TextXAlignment.Left
+	hubTitle.Parent = hubPane
+
+	const hubSubtitle = InstanceNew("TextLabel")
+	hubSubtitle.Name = "SelectedLabel"
+	hubSubtitle.BackgroundTransparency = 1
+	hubSubtitle.BorderSizePixel = 0
+	hubSubtitle.Font = Enum.Font.Gotham
+	hubSubtitle.Position = UDim2.new(0, 0, 0, 20)
+	hubSubtitle.Size = UDim2.new(1, 0, 0, 14)
+	hubSubtitle.Text = "No script selected"
+	hubSubtitle.TextColor3 = colors.subtle
+	hubSubtitle.TextSize = 11
+	hubSubtitle.TextWrapped = true
+	hubSubtitle.TextXAlignment = Enum.TextXAlignment.Left
+	hubSubtitle.Parent = hubPane
+
+	const hubList = InstanceNew("ScrollingFrame")
+	hubList.Name = "List"
+	hubList.Active = true
+	hubList.BackgroundColor3 = colors.panel2
+	hubList.BorderSizePixel = 0
+	hubList.CanvasSize = UDim2.new(0, 0, 0, 0)
+	hubList.Position = UDim2.new(0, 0, 0, 42)
+	hubList.ScrollBarImageColor3 = colors.subtle
+	hubList.ScrollBarThickness = 5
+	hubList.Size = UDim2.new(1, 0, 1, -204)
+	hubList.Parent = hubPane
+	makeCornerAndStroke(hubList, 8, 1)
+
+	const hubListLayout = InstanceNew("UIListLayout")
+	hubListLayout.Padding = UDim.new(0, 6)
+	hubListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	hubListLayout.Parent = hubList
+
+	const hubListPad = InstanceNew("UIPadding")
+	hubListPad.PaddingBottom = UDim.new(0, 8)
+	hubListPad.PaddingLeft = UDim.new(0, 8)
+	hubListPad.PaddingRight = UDim.new(0, 8)
+	hubListPad.PaddingTop = UDim.new(0, 8)
+	hubListPad.Parent = hubList
+
+	const hubButtons = InstanceNew("ScrollingFrame")
+	hubButtons.Name = "Actions"
+	hubButtons.Active = true
+	hubButtons.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	hubButtons.BackgroundTransparency = 1
+	hubButtons.BorderSizePixel = 0
+	hubButtons.CanvasSize = UDim2.new(0, 0, 0, 0)
+	hubButtons.ElasticBehavior = Enum.ElasticBehavior.Never
+	hubButtons.Position = UDim2.new(0, 0, 1, -154)
+	hubButtons.ScrollingDirection = Enum.ScrollingDirection.Y
+	hubButtons.ScrollBarImageColor3 = colors.subtle
+	hubButtons.ScrollBarThickness = 4
+	hubButtons.Size = UDim2.new(1, 0, 0, 154)
+	hubButtons.Parent = hubPane
+
+	const hubButtonsLayout = InstanceNew("UIListLayout")
+	hubButtonsLayout.Padding = UDim.new(0, 6)
+	hubButtonsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	hubButtonsLayout.Parent = hubButtons
+
+	const hubButtonsPad = InstanceNew("UIPadding")
+	hubButtonsPad.PaddingRight = UDim.new(0, 5)
+	hubButtonsPad.Parent = hubButtons
+
+	const hubOpen = makeButton(hubButtons, "Open In Tab", colors.panel3)
+	hubOpen.Size = UDim2.new(1, 0, 0, 26)
+	const hubOpenNew = makeButton(hubButtons, "Open In New Tab", colors.panel3)
+	hubOpenNew.Size = UDim2.new(1, 0, 0, 26)
+	const hubSave = makeButton(hubButtons, "Save Current Script", colors.panel3)
+	hubSave.Size = UDim2.new(1, 0, 0, 26)
+	const hubClear = makeButton(hubButtons, "Clear Selection", colors.panel3)
+	hubClear.Size = UDim2.new(1, 0, 0, 26)
+	const hubNew = makeButton(hubButtons, "New Script Tab", colors.panel3)
+	hubNew.Size = UDim2.new(1, 0, 0, 26)
+	const hubDelete = makeButton(hubButtons, "Delete Selected", colors.panel3)
+	hubDelete.Size = UDim2.new(1, 0, 0, 26)
+	const hubRefresh = makeButton(hubButtons, "Refresh List", colors.panel3)
+	hubRefresh.Size = UDim2.new(1, 0, 0, 26)
+	NAStuff.ExecutorTools = NAStuff.ExecutorTools or {}
+	NAStuff.ExecutorTools.HubStopLast = makeButton(hubButtons, "Stop Last Task", colors.panel3)
+	NAStuff.ExecutorTools.HubStopLast.Size = UDim2.new(1, 0, 0, 26)
+
+	const statusLabel = InstanceNew("TextLabel")
+	statusLabel.Name = "Status"
+	statusLabel.BackgroundTransparency = 1
+	statusLabel.BorderSizePixel = 0
+	statusLabel.Font = Enum.Font.Gotham
+	statusLabel.Position = UDim2.new(0, 0, 1, -42)
+	statusLabel.Size = UDim2.new(1, 0, 0, 16)
+	statusLabel.Text = "Ready"
+	statusLabel.TextColor3 = colors.subtle
+	statusLabel.TextSize = 12
+	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+	statusLabel.Parent = container
+	NAStuff.ExecutorStatusLabel = statusLabel
+
+	const actions = InstanceNew("Frame")
+	actions.Name = "Buttons"
+	actions.BackgroundTransparency = 1
+	actions.BorderSizePixel = 0
+	actions.Position = UDim2.new(0, 0, 1, -22)
+	actions.Size = UDim2.new(1, 0, 0, 28)
+	actions.Parent = container
+
+	const actionLayout = InstanceNew("UIGridLayout")
+	actionLayout.CellPadding = UDim2.new(0, 6, 0, 0)
+	const hasClipboardPaste = type(getclipboard) == "function"
+	const actionButtonCount = hasClipboardPaste and 12 or 11
+	actionLayout.CellSize = UDim2.new(1 / actionButtonCount, -6, 1, 0)
+	actionLayout.FillDirectionMaxCells = actionButtonCount
+	actionLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	actionLayout.Parent = actions
+
+	const safeExecuteButton = makeButton(actions, "Safe Execute", colors.tabActive)
+	const executeButton = makeButton(actions, "Execute", colors.tabActive)
+	const clearButton = makeButton(actions, "Clear", colors.panel3)
+	const copyButton = makeButton(actions, "Copy", colors.panel3)
+	const newLineButton = makeButton(actions, "New Line", colors.panel3)
+	const pasteButton = hasClipboardPaste and makeButton(actions, "Paste from Clipboard", colors.panel3) or nil
+	if pasteButton then
+		pasteButton.TextSize = 10
+	end
+	const formatButton = makeButton(actions, "Format", colors.panel3)
+	NAStuff.ExecutorTools.DeobfuscateButton = makeButton(actions, "Deobfuscate", colors.panel3)
+	NAStuff.ExecutorTools.ObfuscateButton = makeButton(actions, "Obfuscate", colors.panel3)
+	const renameButton = makeButton(actions, "Rename Tab", colors.panel3)
+	const duplicateButton = makeButton(actions, "Duplicate Tab", colors.panel3)
+	const deleteTabButton = makeButton(actions, "Delete Tab", colors.panel3)
+
+	const settingsPanel = InstanceNew("Frame")
+	settingsPanel.Name = "SettingsPanel"
+	settingsPanel.BackgroundColor3 = colors.panel
+	settingsPanel.BorderSizePixel = 0
+	settingsPanel.AnchorPoint = Vector2.new(1, 0)
+	settingsPanel.Position = UDim2.new(1, -10, 0, 42)
+	settingsPanel.Size = UDim2.new(0, 236, 0, 328)
+	settingsPanel.Visible = false
+	settingsPanel.ZIndex = 45
+	settingsPanel.Parent = frame
+	makeCornerAndStroke(settingsPanel, 10, 1)
+
+	const settingsTitle = InstanceNew("TextLabel")
+	settingsTitle.BackgroundTransparency = 1
+	settingsTitle.BorderSizePixel = 0
+	settingsTitle.Font = Enum.Font.GothamBold
+	settingsTitle.Position = UDim2.new(0, 12, 0, 10)
+	settingsTitle.Size = UDim2.new(1, -24, 0, 18)
+	settingsTitle.Text = "Executor Settings"
+	settingsTitle.TextColor3 = colors.text
+	settingsTitle.TextSize = 14
+	settingsTitle.TextXAlignment = Enum.TextXAlignment.Left
+	settingsTitle.ZIndex = 46
+	settingsTitle.Parent = settingsPanel
+
+	const settingsContent = InstanceNew("Frame")
+	settingsContent.Name = "Content"
+	settingsContent.BackgroundTransparency = 1
+	settingsContent.BorderSizePixel = 0
+	settingsContent.Position = UDim2.new(0, 0, 0, 36)
+	settingsContent.Size = UDim2.new(1, 0, 1, -36)
+	settingsContent.ZIndex = 46
+	settingsContent.Parent = settingsPanel
+
+	const settingsList = InstanceNew("UIListLayout")
+	settingsList.Padding = UDim.new(0, 8)
+	settingsList.SortOrder = Enum.SortOrder.LayoutOrder
+	settingsList.Parent = settingsContent
+
+	const settingsPad = InstanceNew("UIPadding")
+	settingsPad.PaddingTop = UDim.new(0, 0)
+	settingsPad.PaddingBottom = UDim.new(0, 12)
+	settingsPad.PaddingLeft = UDim.new(0, 12)
+	settingsPad.PaddingRight = UDim.new(0, 12)
+	settingsPad.Parent = settingsContent
+
+	const function makeSettingToggle(labelText)
+		const row = InstanceNew("Frame")
+		row.BackgroundTransparency = 1
+		row.BorderSizePixel = 0
+		row.Size = UDim2.new(1, 0, 0, 28)
+		row.ZIndex = 46
+		row.Parent = settingsContent
+
+		const label = InstanceNew("TextLabel")
+		label.BackgroundTransparency = 1
+		label.BorderSizePixel = 0
+		label.Font = Enum.Font.Gotham
+		label.Size = UDim2.new(1, -84, 1, 0)
+		label.Text = labelText
+		label.TextColor3 = colors.text
+		label.TextSize = 12
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.ZIndex = 46
+		label.Parent = row
+
+		const hit = InstanceNew("TextButton")
+		hit.Name = "Hitbox"
+		hit.AutoButtonColor = false
+		hit.BackgroundTransparency = 1
+		hit.BorderSizePixel = 0
+		hit.Text = ""
+		hit.Position = UDim2.new(0, 0, 0, 0)
+		hit.Size = UDim2.new(1, -82, 1, 0)
+		hit.ZIndex = 47
+		hit.Parent = row
+
+		const toggle = makeButton(row, "On", colors.panel3)
+		toggle.AnchorPoint = Vector2.new(1, 0.5)
+		toggle.Position = UDim2.new(1, 0, 0.5, 0)
+		toggle.Size = UDim2.new(0, 74, 0, 24)
+		toggle.ZIndex = 48
+
+		return toggle, hit
+	end
+
+	local syntaxToggle, syntaxHit = makeSettingToggle("Syntax Highlight")
+	local lineNumbersToggle, lineNumbersHit = makeSettingToggle("Line Numbers")
+	local scriptHubToggle, scriptHubHit = makeSettingToggle("Script Hub")
+	NAStuff.ExecutorTools.CurrentThreadToggle, NAStuff.ExecutorTools.CurrentThreadHit = makeSettingToggle("Current Thread Run")
+	NAStuff.ExecutorTools.ThreadIdentityToggle, NAStuff.ExecutorTools.ThreadIdentityHit = makeSettingToggle("Thread Identity")
+	NAStuff.ExecutorTools.ProfileExecutionToggle, NAStuff.ExecutorTools.ProfileExecutionHit = makeSettingToggle("Profile Execution")
+
+	const function makeSettingStepper(labelText)
+		const row = InstanceNew("Frame")
+		row.BackgroundTransparency = 1
+		row.BorderSizePixel = 0
+		row.Size = UDim2.new(1, 0, 0, 28)
+		row.ZIndex = 46
+		row.Parent = settingsContent
+
+		const label = InstanceNew("TextLabel")
+		label.BackgroundTransparency = 1
+		label.BorderSizePixel = 0
+		label.Font = Enum.Font.Gotham
+		label.Size = UDim2.new(1, -104, 1, 0)
+		label.Text = labelText
+		label.TextColor3 = colors.text
+		label.TextSize = 12
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.ZIndex = 46
+		label.Parent = row
+
+		const minus = makeButton(row, "-", colors.panel3)
+		minus.AnchorPoint = Vector2.new(1, 0.5)
+		minus.Position = UDim2.new(1, -66, 0.5, 0)
+		minus.Size = UDim2.new(0, 28, 0, 24)
+		minus.ZIndex = 48
+
+		const value = InstanceNew("TextLabel")
+		value.BackgroundTransparency = 1
+		value.BorderSizePixel = 0
+		value.Font = Enum.Font.GothamSemibold
+		value.Position = UDim2.new(1, -62, 0, 0)
+		value.Size = UDim2.new(0, 30, 1, 0)
+		value.Text = ""
+		value.TextColor3 = colors.subtle
+		value.TextSize = 12
+		value.TextXAlignment = Enum.TextXAlignment.Center
+		value.ZIndex = 46
+		value.Parent = row
+
+		const plus = makeButton(row, "+", colors.panel3)
+		plus.AnchorPoint = Vector2.new(1, 0.5)
+		plus.Position = UDim2.new(1, 0, 0.5, 0)
+		plus.Size = UDim2.new(0, 28, 0, 24)
+		plus.ZIndex = 48
+
+		return minus, value, plus
+	end
+
+	local fontMinus, fontValue, fontPlus = makeSettingStepper("Font Size")
+	NAStuff.ExecutorTools.IdentityMinus, NAStuff.ExecutorTools.IdentityValue, NAStuff.ExecutorTools.IdentityPlus = makeSettingStepper("Identity Level")
+
+	const promptOverlay = InstanceNew("Frame")
+	promptOverlay.Name = "Prompt"
+	promptOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	promptOverlay.BackgroundTransparency = 0.3
+	promptOverlay.BorderSizePixel = 0
+	promptOverlay.Size = UDim2.new(1, 0, 1, 0)
+	promptOverlay.Visible = false
+	promptOverlay.ZIndex = 50
+	promptOverlay.Parent = container
+
+	const promptCard = InstanceNew("Frame")
+	promptCard.BackgroundColor3 = colors.panel
+	promptCard.BorderSizePixel = 0
+	promptCard.AnchorPoint = Vector2.new(0.5, 0.5)
+	promptCard.Position = UDim2.new(0.5, 0, 0.5, 0)
+	promptCard.Size = UDim2.new(1, -28, 0, 170)
+	promptCard.ZIndex = 51
+	promptCard.Parent = promptOverlay
+	makeCornerAndStroke(promptCard, 10, 1)
+	NAStuff.ExecutorTools.PromptSizeConstraint = InstanceNew("UISizeConstraint")
+	NAStuff.ExecutorTools.PromptSizeConstraint.MaxSize = Vector2.new(360, 170)
+	NAStuff.ExecutorTools.PromptSizeConstraint.MinSize = Vector2.new(220, 170)
+	NAStuff.ExecutorTools.PromptSizeConstraint.Parent = promptCard
+
+	const promptTitle = InstanceNew("TextLabel")
+	promptTitle.BackgroundTransparency = 1
+	promptTitle.BorderSizePixel = 0
+	promptTitle.Font = Enum.Font.GothamBold
+	promptTitle.Position = UDim2.new(0, 14, 0, 10)
+	promptTitle.Size = UDim2.new(1, -28, 0, 36)
+	promptTitle.Text = "Name"
+	promptTitle.TextColor3 = colors.text
+	promptTitle.TextSize = 15
+	promptTitle.TextWrapped = true
+	promptTitle.TextXAlignment = Enum.TextXAlignment.Left
+	promptTitle.TextYAlignment = Enum.TextYAlignment.Top
+	promptTitle.ZIndex = 52
+	promptTitle.Parent = promptCard
+
+	const promptInput = InstanceNew("TextBox")
+	promptInput.BackgroundColor3 = colors.panel2
+	promptInput.BorderSizePixel = 0
+	promptInput.ClearTextOnFocus = false
+	promptInput.Font = Enum.Font.Gotham
+	promptInput.PlaceholderText = "Enter a name"
+	promptInput.Position = UDim2.new(0, 14, 0, 54)
+	promptInput.Size = UDim2.new(1, -28, 0, 38)
+	promptInput.Text = ""
+	promptInput.TextColor3 = colors.text
+	promptInput.TextSize = 14
+	promptInput.ZIndex = 52
+	promptInput.Parent = promptCard
+	makeCornerAndStroke(promptInput, 8, 1)
+
+	const promptOk = makeButton(promptCard, "OK", colors.tabActive)
+	promptOk.Position = UDim2.new(0, 14, 1, -42)
+	promptOk.Size = UDim2.new(0.5, -20, 0, 28)
+	promptOk.ZIndex = 52
+	const promptCancel = makeButton(promptCard, "Cancel", colors.panel3)
+	promptCancel.Position = UDim2.new(0.5, 6, 1, -42)
+	promptCancel.Size = UDim2.new(0.5, -20, 0, 28)
+	promptCancel.ZIndex = 52
+
+	NAStuff.ExecutorTools.ObfuscationMenu = {}
+	NAStuff.ExecutorTools.ObfuscationMenu.Overlay = InstanceNew("Frame")
+	NAStuff.ExecutorTools.ObfuscationMenu.Overlay.Name = "ObfuscationMenu"
+	NAStuff.ExecutorTools.ObfuscationMenu.Overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	NAStuff.ExecutorTools.ObfuscationMenu.Overlay.BackgroundTransparency = 0.3
+	NAStuff.ExecutorTools.ObfuscationMenu.Overlay.BorderSizePixel = 0
+	NAStuff.ExecutorTools.ObfuscationMenu.Overlay.Size = UDim2.new(1, 0, 1, 0)
+	NAStuff.ExecutorTools.ObfuscationMenu.Overlay.Visible = false
+	NAStuff.ExecutorTools.ObfuscationMenu.Overlay.ZIndex = 54
+	NAStuff.ExecutorTools.ObfuscationMenu.Overlay.Parent = container
+
+	NAStuff.ExecutorTools.ObfuscationMenu.Card = InstanceNew("Frame")
+	NAStuff.ExecutorTools.ObfuscationMenu.Card.BackgroundColor3 = colors.panel
+	NAStuff.ExecutorTools.ObfuscationMenu.Card.BorderSizePixel = 0
+	NAStuff.ExecutorTools.ObfuscationMenu.Card.AnchorPoint = Vector2.new(0.5, 0.5)
+	NAStuff.ExecutorTools.ObfuscationMenu.Card.Position = UDim2.new(0.5, 0, 0.5, 0)
+	NAStuff.ExecutorTools.ObfuscationMenu.Card.Size = UDim2.new(1, -28, 0, 340)
+	NAStuff.ExecutorTools.ObfuscationMenu.Card.ZIndex = 55
+	NAStuff.ExecutorTools.ObfuscationMenu.Card.Parent = NAStuff.ExecutorTools.ObfuscationMenu.Overlay
+	makeCornerAndStroke(NAStuff.ExecutorTools.ObfuscationMenu.Card, 10, 1)
+
+	NAStuff.ExecutorTools.ObfuscationMenu.SizeConstraint = InstanceNew("UISizeConstraint")
+	NAStuff.ExecutorTools.ObfuscationMenu.SizeConstraint.MaxSize = Vector2.new(420, 340)
+	NAStuff.ExecutorTools.ObfuscationMenu.SizeConstraint.MinSize = Vector2.new(220, 280)
+	NAStuff.ExecutorTools.ObfuscationMenu.SizeConstraint.Parent = NAStuff.ExecutorTools.ObfuscationMenu.Card
+
+	NAStuff.ExecutorTools.ObfuscationMenu.Title = InstanceNew("TextLabel")
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.BackgroundTransparency = 1
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.BorderSizePixel = 0
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.Font = Enum.Font.GothamBold
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.Position = UDim2.new(0, 14, 0, 12)
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.Size = UDim2.new(1, -28, 0, 22)
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.Text = "Obfuscation Method"
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.TextColor3 = colors.text
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.TextSize = 15
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.TextWrapped = true
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.TextXAlignment = Enum.TextXAlignment.Left
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.ZIndex = 56
+	NAStuff.ExecutorTools.ObfuscationMenu.Title.Parent = NAStuff.ExecutorTools.ObfuscationMenu.Card
+
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle = InstanceNew("TextLabel")
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.BackgroundTransparency = 1
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.BorderSizePixel = 0
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.Font = Enum.Font.Gotham
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.Position = UDim2.new(0, 14, 0, 38)
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.Size = UDim2.new(1, -28, 0, 32)
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.Text = "Select a method for the current Executor tab."
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.TextColor3 = colors.subtle
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.TextSize = 12
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.TextWrapped = true
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.TextXAlignment = Enum.TextXAlignment.Left
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.TextYAlignment = Enum.TextYAlignment.Top
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.ZIndex = 56
+	NAStuff.ExecutorTools.ObfuscationMenu.Subtitle.Parent = NAStuff.ExecutorTools.ObfuscationMenu.Card
+
+	NAStuff.ExecutorTools.ObfuscationMenu.List = InstanceNew("ScrollingFrame")
+	NAStuff.ExecutorTools.ObfuscationMenu.List.Name = "Methods"
+	NAStuff.ExecutorTools.ObfuscationMenu.List.BackgroundColor3 = colors.panel2
+	NAStuff.ExecutorTools.ObfuscationMenu.List.BackgroundTransparency = 0.08
+	NAStuff.ExecutorTools.ObfuscationMenu.List.BorderSizePixel = 0
+	NAStuff.ExecutorTools.ObfuscationMenu.List.Position = UDim2.new(0, 14, 0, 76)
+	NAStuff.ExecutorTools.ObfuscationMenu.List.Size = UDim2.new(1, -28, 0, 180)
+	NAStuff.ExecutorTools.ObfuscationMenu.List.CanvasSize = UDim2.new(0, 0, 0, 0)
+	NAStuff.ExecutorTools.ObfuscationMenu.List.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	NAStuff.ExecutorTools.ObfuscationMenu.List.ScrollingDirection = Enum.ScrollingDirection.Y
+	NAStuff.ExecutorTools.ObfuscationMenu.List.ScrollBarThickness = 4
+	NAStuff.ExecutorTools.ObfuscationMenu.List.ScrollBarImageColor3 = colors.subtle
+	NAStuff.ExecutorTools.ObfuscationMenu.List.ZIndex = 56
+	NAStuff.ExecutorTools.ObfuscationMenu.List.Parent = NAStuff.ExecutorTools.ObfuscationMenu.Card
+	makeCornerAndStroke(NAStuff.ExecutorTools.ObfuscationMenu.List, 8, 1)
+
+	NAStuff.ExecutorTools.ObfuscationMenu.ListLayout = InstanceNew("UIListLayout")
+	NAStuff.ExecutorTools.ObfuscationMenu.ListLayout.Padding = UDim.new(0, 6)
+	NAStuff.ExecutorTools.ObfuscationMenu.ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	NAStuff.ExecutorTools.ObfuscationMenu.ListLayout.Parent = NAStuff.ExecutorTools.ObfuscationMenu.List
+
+	NAStuff.ExecutorTools.ObfuscationMenu.ListPadding = InstanceNew("UIPadding")
+	NAStuff.ExecutorTools.ObfuscationMenu.ListPadding.PaddingTop = UDim.new(0, 6)
+	NAStuff.ExecutorTools.ObfuscationMenu.ListPadding.PaddingBottom = UDim.new(0, 6)
+	NAStuff.ExecutorTools.ObfuscationMenu.ListPadding.PaddingLeft = UDim.new(0, 6)
+	NAStuff.ExecutorTools.ObfuscationMenu.ListPadding.PaddingRight = UDim.new(0, 6)
+	NAStuff.ExecutorTools.ObfuscationMenu.ListPadding.Parent = NAStuff.ExecutorTools.ObfuscationMenu.List
+
+	NAStuff.ExecutorTools.ObfuscationMenu.Buttons = {}
+	NAStuff.ExecutorTools.ObfuscationMenu.Selected = "auto"
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod = function(mode, title, detail)
+		local button = InstanceNew("TextButton")
+		button.Name = mode
+		button.AutoButtonColor = false
+		button.BackgroundColor3 = mode == "auto" and colors.tabActive or colors.panel3
+		button.BorderSizePixel = 0
+		button.Font = Enum.Font.Gotham
+		button.Size = UDim2.new(1, -2, 0, 42)
+		button.Text = title.."  -  "..detail
+		button.TextColor3 = mode == "auto" and colors.tabTextActive or colors.text
+		button.TextSize = 12
+		button.TextWrapped = true
+		button.TextXAlignment = Enum.TextXAlignment.Left
+		button.ZIndex = 57
+		button.Parent = NAStuff.ExecutorTools.ObfuscationMenu.List
+		makeCornerAndStroke(button, 7, 1)
+		NAStuff.ExecutorTools.ObfuscationMenu.Buttons[mode] = button
+		button.MouseButton1Click:Connect(function()
+			NAStuff.ExecutorTools.ObfuscationMenu.Selected = mode
+			for method, methodButton in NAStuff.ExecutorTools.ObfuscationMenu.Buttons do
+				const selected = method == mode
+				methodButton.BackgroundColor3 = selected and colors.tabActive or colors.panel3
+				methodButton.TextColor3 = selected and colors.tabTextActive or colors.text
+			end
+			NAStuff.ExecutorTools.ObfuscationMenu.Selection.Text = "Selected: "..title
+			NAStuff.ExecutorTools.ObfuscationMenu.Confirm.Text = "Obfuscate: "..title
+		end)
+	end
+
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("auto", "Auto", "Chooses Ultra, Strong, or Balanced by script size")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("wearedevs", "WeAreDevs / Prometheus", "Prometheus Strong LuaU pipeline - reversible with NA Deobfuscate")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("light", "Light", "Compatibility alias for Base64")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("base4", "Base4 Bytes", "Four base-4 digits per source byte")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("base36", "Base36 Bytes", "Two fixed base-36 digits per source byte")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("base62", "Base62 Bytes", "Two fixed base-62 digits per source byte")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("base64", "Base64", "Standard Base64 text encoding")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("base64url", "Base64URL", "URL-safe Base64 alphabet without padding")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("base32", "Base32", "RFC-style A-Z and 2-7 encoding")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("z85", "Z85", "Compact printable base-85 encoding")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("hex", "Hex", "Two hexadecimal digits per source byte")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("percent", "Percent Bytes", "Every byte encoded as %XX")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("decimal", "Decimal Bytes", "Comma-separated byte values")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("binary", "Binary Bytes", "Eight 0/1 digits per source byte")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("octal", "Octal Bytes", "Three octal digits per source byte")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("reverse64", "Reverse Base64", "Base64 payload stored backwards")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("pairswap", "Pair Swap + Base64", "Swaps each adjacent byte pair")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("reversebytes", "Reverse Bytes + Base64", "Reverses the complete source byte order")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("indexxor", "Index XOR + Base64", "XOR key changes with each byte position")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("indexshift", "Index Shift + Base64", "Byte shift changes with each byte position")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("affine", "Affine Bytes + Base64", "Invertible multiply-and-add byte transform")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("bitreverse", "Bit Reverse + Base64", "Reverses the 8 bits inside every byte")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("gray", "Gray Code + Base64", "Converts every byte to Gray code")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("rot13", "ROT13 + Base64", "ROT13 letter transform then Base64")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("shift", "Byte Shift + Base64", "Adds a rotating numeric byte offset")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("complement", "Complement + Base64", "Maps each byte to 255-byte")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("nibble", "Nibble Swap + Base64", "Swaps high and low 4-bit halves")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("rotate", "Bit Rotate + Base64", "Rotates every source byte by 3 bits")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("xor", "XOR + Base64", "Single-byte XOR with generated key")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("repeatxor", "Repeating XOR + Base64", "Multi-byte repeating generated key")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("delta", "Delta + Base64", "Stores byte differences instead of bytes")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("rle", "RLE + Base64", "Run-length packs repeated bytes")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("lzw92", "LZW92", "LZW compression packed in base-92 pairs")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("lzw92base64", "LZW92 + Base64", "LZW92 stream wrapped in Base64")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("jscamo", "JavaScript Camouflage", "Looks like a JavaScript module but executes as Luau")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("jscamostrong", "JavaScript Camouflage Strong", "JavaScript decoy + LZW92 + repeating XOR")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("pycamo", "Python Camouflage", "Looks like a Python module but executes as Luau")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("pycamostrong", "Python Camouflage Strong", "Python decoy + LZW92 + repeating XOR")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("balanced", "Balanced", "XOR + Base64 compatibility preset")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("strong", "Strong", "LZW92 + XOR + Base64")
+	NAStuff.ExecutorTools.ObfuscationMenu.AddMethod("ultra", "Ultra", "LZW92 + repeating XOR + Base32")
+
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection = InstanceNew("TextLabel")
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection.BackgroundTransparency = 1
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection.BorderSizePixel = 0
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection.Font = Enum.Font.Gotham
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection.Position = UDim2.new(0, 14, 0, 262)
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection.Size = UDim2.new(1, -28, 0, 16)
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection.Text = "Selected: Auto"
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection.TextColor3 = colors.subtle
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection.TextSize = 11
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection.TextXAlignment = Enum.TextXAlignment.Left
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection.ZIndex = 56
+	NAStuff.ExecutorTools.ObfuscationMenu.Selection.Parent = NAStuff.ExecutorTools.ObfuscationMenu.Card
+
+	NAStuff.ExecutorTools.ObfuscationMenu.Confirm = makeButton(NAStuff.ExecutorTools.ObfuscationMenu.Card, "Obfuscate: Auto", colors.tabActive)
+	NAStuff.ExecutorTools.ObfuscationMenu.Confirm.Position = UDim2.new(0, 14, 1, -42)
+	NAStuff.ExecutorTools.ObfuscationMenu.Confirm.Size = UDim2.new(0.62, -18, 0, 28)
+	NAStuff.ExecutorTools.ObfuscationMenu.Confirm.ZIndex = 56
+
+	NAStuff.ExecutorTools.ObfuscationMenu.Cancel = makeButton(NAStuff.ExecutorTools.ObfuscationMenu.Card, "Cancel", colors.panel3)
+	NAStuff.ExecutorTools.ObfuscationMenu.Cancel.Position = UDim2.new(0.62, 4, 1, -42)
+	NAStuff.ExecutorTools.ObfuscationMenu.Cancel.Size = UDim2.new(0.38, -18, 0, 28)
+	NAStuff.ExecutorTools.ObfuscationMenu.Cancel.ZIndex = 56
+
+	NAStuff.ExecutorTools.ObfuscationMenu.Show = function()
+		NAStuff.ExecutorTools.ObfuscationMenu.Selected = "auto"
+		for method, methodButton in NAStuff.ExecutorTools.ObfuscationMenu.Buttons do
+			const selected = method == "auto"
+			methodButton.BackgroundColor3 = selected and colors.tabActive or colors.panel3
+			methodButton.TextColor3 = selected and colors.tabTextActive or colors.text
+		end
+		NAStuff.ExecutorTools.ObfuscationMenu.Selection.Text = "Selected: Auto"
+		NAStuff.ExecutorTools.ObfuscationMenu.Confirm.Text = "Obfuscate: Auto"
+		NAStuff.ExecutorTools.ObfuscationMenu.List.CanvasPosition = Vector2.new(0, 0)
+		NAStuff.ExecutorTools.ObfuscationMenu.Overlay.Visible = true
+	end
+
+	NAStuff.ExecutorTools.ObfuscationMenu.Hide = function()
+		NAStuff.ExecutorTools.ObfuscationMenu.Overlay.Visible = false
+	end
+
+	NAStuff.ExecutorTools.ObfuscationMenu.Cancel.MouseButton1Click:Connect(NAStuff.ExecutorTools.ObfuscationMenu.Hide)
+	NAStuff.ExecutorTools.ObfuscationMenu.Confirm.MouseButton1Click:Connect(function()
+		const mode = NAStuff.ExecutorTools.ObfuscationMenu.Selected or "auto"
+		NAStuff.ExecutorTools.ObfuscationMenu.Hide()
+		if type(NAStuff.ExecutorTools.RunObfuscateMode) == "function" then
+			NAStuff.ExecutorTools.RunObfuscateMode(mode)
+		end
+	end)
+
+	local promptCallback
+	const tabs = {}
+	local currentTab = 1
+	local selectedScript
+	local refreshQueued = false
+	local tabSaveDirty = false
+	local tabSaveScheduled = false
+	local lastTabClickIndex = 0
+	local lastTabClickTime = 0
+	const editorLineBuffer = 24
+	local editorVirtualStart = 1
+	local editorVirtualEnd = 1
+	local editorVirtualLineHeight = 19
+	local editorLoading = false
+	local editorLoaded = false
+	local editorTextLock = 0
+	local editorRenderedText = ""
+	local editorRenderedStart = 1
+	local editorRenderedEnd = 1
+	local editorLastCursorPosition = 1
+	NAStuff.ExecutorTools.TabsLoaded = false
+	local commitCurrentPage
+	local queueRefreshEditor
+
+	NAmanage.ExecutorYieldWork = function(state)
+		const now = os.clock()
+		if now - (state.lastYield or now) < 0.006 then
+			return
+		end
+		if type(task) == "table" and type(task.wait) == "function" then
+			task.wait()
+		elseif type(wait) == "function" then
+			wait()
+		end
+		state.lastYield = os.clock()
+	end
+
+	NAmanage.ExecutorHydrateTab = function(tab)
+		if not tab then
+			return nil
+		end
+		if type(tab.lines) == "table" and #tab.lines > 0 then
+			tab.linesDeferred = false
+			return tab
+		end
+		const source = NAmanage.ExecutorRepairTabText(tab.text or "")
+		tab.text = source
+		const lines = {}
+		local cursor = 1
+		const workState = { lastYield = os.clock() }
+		while true do
+			const newline = source:find("\n", cursor, true)
+			if not newline then
+				lines[#lines + 1] = source:sub(cursor)
+				break
+			end
+			lines[#lines + 1] = source:sub(cursor, newline - 1)
+			cursor = newline + 1
+			if #lines % 128 == 0 then
+				NAmanage.ExecutorYieldWork(workState)
+			end
+		end
+		if #lines == 0 then
+			lines[1] = ""
+		end
+		tab.lines = lines
+		tab.viewLine = math.clamp(tonumber(tab.viewLine or tab.page) or 1, 1, math.max(#lines, 1))
+		tab.page = 1
+		tab.chunks = { tab.text }
+		tab.textDirty = false
+		tab.linesDeferred = false
+		return tab
+	end
+
+	NAStuff.ExecutorTools.GetCurrentTab = function()
+		const tab = tabs[currentTab]
+		if tab and tab.linesDeferred == true then
+			return nil
+		end
+		return NAmanage.ExecutorNormalizeTab(tab)
+	end
+
+	const function showPrompt(title, initialText, callback)
+		promptTitle.Text = title or "Name"
+		promptInput.Text = initialText or ""
+		promptCallback = callback
+		promptOverlay.Visible = true
+		Defer(function()
+			pcall(function()
+				promptInput:CaptureFocus()
+				promptInput.CursorPosition = #promptInput.Text + 1
+			end)
+		end)
+	end
+
+	const function closePrompt(okPressed)
+		promptOverlay.Visible = false
+		const callback = promptCallback
+		promptCallback = nil
+		if callback then
+			callback(okPressed == true, promptInput.Text or "")
+		end
+	end
+
+	promptOk.MouseButton1Click:Connect(function()
+		closePrompt(true)
+	end)
+	promptCancel.MouseButton1Click:Connect(function()
+		closePrompt(false)
+	end)
+	promptInput.FocusLost:Connect(function(enterPressed)
+		if promptOverlay.Visible and enterPressed == true then
+			closePrompt(true)
+		end
+	end)
+
+	const function updateTabCanvas()
+		const width = tabLayout.AbsoluteContentSize.X
+		tabWrap.Size = UDim2.new(0, width, 1, 0)
+		tabScroll.CanvasSize = UDim2.new(0, width, 0, 0)
+	end
+	tabLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateTabCanvas)
+	tabScroll:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateTabCanvas)
+
+	const function saveTabsNow()
+		if not NAStuff.ExecutorTools.TabsLoaded then
+			return false
+		end
+		if not fsOk then
+			setStatus("Executor tabs cannot save: filesystem unavailable", colors.error)
+			return false
+		end
+		if not ensureExecutorFolders() then
+			setStatus("Executor tabs cannot save: folder create failed", colors.error)
+			return false
+		end
+		if editorLoaded and type(commitCurrentPage) == "function" then
+			commitCurrentPage(true)
+		end
+		const payload = { cur = currentTab, tabs = {} }
+		const workState = { lastYield = os.clock() }
+		for i, tab in tabs do
+			local tabText
+			if tab.linesDeferred == true and tab.textDirty ~= true then
+				tabText = tostring(tab.text or "")
+			else
+				NAmanage.ExecutorNormalizeTab(tab)
+				tabText = NAmanage.ExecutorRepairTabText(NAmanage.ExecutorGetTabText(tab))
+				if tabText ~= tab.text then
+					tab.text = tabText
+					tab.lines = NAmanage.ExecutorSplitEditorLines(tabText)
+					tab.chunks = { tabText }
+					tab.textDirty = false
+				end
+			end
+			payload.tabs[i] = {
+				title = tab.title or ("Tab "..i),
+				text = tabText,
+			}
+			NAmanage.ExecutorYieldWork(workState)
+		end
+		local ok, encoded = pcall(function()
+			return Services.HttpService:JSONEncode(payload)
+		end)
+		if not (ok and encoded) then
+			setStatus("Executor tabs cannot save: encode failed", colors.error)
+			return false
+		end
+		const function tryWrite(fn)
+			if type(fn) ~= "function" then
+				return false, "writefile missing"
+			end
+			local wrote, err = pcall(fn, tabsFile, encoded)
+			if not wrote then
+				return false, err or "writefile failed"
+			end
+			if type(readfile) == "function" then
+				local okRead, saved = pcall(readfile, tabsFile)
+				if okRead and saved == encoded then
+					return true
+				end
+				return false, "write verification failed"
+			end
+			return true
+		end
+
+		local wrote, err = tryWrite(writefile)
+		if not wrote and NAStuff and type(NAStuff._wf) == "function" and NAStuff._wf ~= writefile then
+			wrote, err = tryWrite(NAStuff._wf)
+		end
+		if not wrote then
+			setStatus("Executor tabs cannot save: "..tostring(err or "writefile failed"), colors.error)
+			return false
+		end
+		setStatus("Executor tabs saved", colors.success)
+		return true
+	end
+
+	const function scheduleTabsSave()
+		if not fsOk then
+			setStatus("Executor tabs cannot save: filesystem unavailable", colors.error)
+			return
+		end
+		tabSaveDirty = true
+		if tabSaveScheduled then
+			return
+		end
+		tabSaveScheduled = true
+		Delay(0.8, function()
+			if tabSaveDirty then
+				tabSaveDirty = false
+				if not saveTabsNow() then
+					tabSaveDirty = true
+				end
+			end
+			tabSaveScheduled = false
+			if tabSaveDirty then
+				scheduleTabsSave()
+			end
+		end)
+	end
+
+	const function getEditorLineHeight()
+		const fallback = tonumber(textBox.TextSize) or 15
+		local ok, measured = pcall(function()
+			return TextServiceRef:GetTextSize("M", textBox.TextSize, textBox.Font, Vector2.new(1000, 1000)).Y
+		end)
+		return math.max(1, math.ceil((ok and type(measured) == "number" and measured or fallback)))
+	end
+
+	const function updatePageInfo()
+		const tab = NAStuff.ExecutorTools.GetCurrentTab()
+		const total = tab and math.max(#tab.lines, 1) or 1
+		const lineHeight = getEditorLineHeight()
+		local viewHeight = (editorScroll.AbsoluteSize.Y or 0) - 22
+		if NAmanage.virtView then
+			viewHeight = NAmanage.virtView(editorLineScroll, viewHeight, editorLineScroll.CanvasSize.Y.Offset, lineHeight * 3)
+		end
+		viewHeight = math.max(1, viewHeight)
+		const visibleCount = math.max(1, math.floor(viewHeight / math.max(lineHeight, 1)))
+		const editorLinePos = NAmanage.GetLogicalCanvasPosition and NAmanage.GetLogicalCanvasPosition(editorLineScroll) or editorLineScroll.CanvasPosition
+		const firstLine = math.clamp(math.floor(math.max(editorLinePos.Y, 0) / math.max(lineHeight, 1)) + 1, 1, total)
+		const lastLine = math.clamp(firstLine + visibleCount - 1, firstLine, total)
+		pageLabel.Text = "Lines "..tostring(firstLine).."-"..tostring(lastLine).."/"..tostring(total)
+		pagePrev.Visible = false
+		pageNext.Visible = false
+		pagePanel.Visible = total > math.max(1, lastLine - firstLine + 1)
+	end
+
+	const function beginEditorTextSet()
+		editorTextLock += 1
+		editorLoading = true
+	end
+
+	const function finishEditorTextSet()
+		editorLoading = false
+		Defer(function()
+			editorTextLock = math.max(editorTextLock - 1, 0)
+		end)
+	end
+
+	const function setEditorBoxText(text)
+		beginEditorTextSet()
+		textBox.Text = tostring(text or "")
+		finishEditorTextSet()
+	end
+
+	const function insertEditorNewLine()
+		const currentText = tostring(textBox.Text or "")
+		local cursor = tonumber(textBox.CursorPosition) or -1
+		const selectionStart = tonumber(textBox.SelectionStart) or -1
+		if cursor <= 0 then
+			cursor = tonumber(editorLastCursorPosition) or (#currentText + 1)
+		end
+		cursor = math.clamp(cursor, 1, #currentText + 1)
+
+		local startPos = cursor
+		local endPos = cursor - 1
+		if selectionStart > 0 and selectionStart ~= cursor then
+			startPos = math.clamp(math.min(selectionStart, cursor), 1, #currentText + 1)
+			endPos = math.clamp(math.max(selectionStart, cursor) - 1, 0, #currentText)
+		end
+
+		setEditorBoxText(currentText:sub(1, startPos - 1).."\n"..currentText:sub(endPos + 1))
+		editorLastCursorPosition = math.clamp(startPos + 1, 1, #textBox.Text + 1)
+		commitCurrentPage(true)
+		scheduleTabsSave()
+		queueRefreshEditor()
+	end
+
+	commitCurrentPage = function(skipSave)
+		if editorLoading then
+			return
+		end
+		const tab = NAStuff.ExecutorTools.GetCurrentTab()
+		if not tab then
+			return
+		end
+		const visibleText = tostring(textBox.Text or "")
+		const lineHeight = getEditorLineHeight()
+		const function syncViewOnly()
+			const editorLinePos = NAmanage.GetLogicalCanvasPosition and NAmanage.GetLogicalCanvasPosition(editorLineScroll) or editorLineScroll.CanvasPosition
+			tab.viewLine = math.clamp(math.floor(math.max(editorLinePos.Y, 0) / lineHeight) + 1, 1, math.max(#tab.lines, 1))
+			updatePageInfo()
+		end
+		if visibleText == tostring(editorRenderedText or "") then
+			syncViewOnly()
+			return
+		end
+		const total = math.max(#tab.lines, 1)
+		const firstLine = math.clamp(tonumber(editorRenderedStart) or editorVirtualStart or 1, 1, total)
+		const lastLine = math.clamp(tonumber(editorRenderedEnd) or editorVirtualEnd or firstLine, firstLine, total)
+		tab.lines = NAmanage.ExecutorReplaceEditorLineRange(tab.lines, firstLine, lastLine, visibleText)
+		editorVirtualStart = firstLine
+		editorVirtualEnd = firstLine + #(NAmanage.ExecutorSplitEditorLines(visibleText)) - 1
+		editorRenderedStart = editorVirtualStart
+		editorRenderedEnd = editorVirtualEnd
+		editorRenderedText = visibleText
+		tab.textDirty = true
+		syncViewOnly()
+		if not skipSave then
+			scheduleTabsSave()
+		end
+	end
+
+	const function setTabFullText(tab, source, deferLines)
+		if not tab then
+			return
+		end
+		tab.text = tostring(source or "")
+		if deferLines == true then
+			tab.lines = nil
+			tab.linesDeferred = true
+		else
+			tab.lines = NAmanage.ExecutorSplitEditorLines(tab.text)
+			tab.linesDeferred = false
+		end
+		tab.chunks = { tab.text }
+		tab.textDirty = false
+		tab.page = 1
+		tab.viewLine = 1
+	end
+
+	const function measureSource(source)
+		const lineHeight = getEditorLineHeight()
+		local longest = 0
+		local lines = 0
+		for line in ((source or "").."\n"):gmatch("(.-)\n") do
+			lines += 1
+			const width = TextServiceRef:GetTextSize((line ~= "" and line or " "), textBox.TextSize, textBox.Font, Vector2.new(10000, 10000)).X
+			if width > longest then
+				longest = width
+			end
+		end
+		if lines <= 0 then
+			lines = 1
+		end
+		const viewportWidth = math.max(1, (editorScroll.AbsoluteSize.X or 0) - 18)
+		const desiredWidth = math.max(viewportWidth, longest + 12)
+		const desiredHeight = math.max(math.max(editorScroll.AbsoluteSize.Y - 22, 1), lines * lineHeight + 12)
+		return desiredWidth, desiredHeight, lines, lineHeight
+	end
+
+	const function getEditorViewportHeight()
+		local h = (editorScroll.AbsoluteSize.Y or 0) - 22
+		if NAmanage.virtView then
+			h = NAmanage.virtView(editorLineScroll, h, editorLineScroll.CanvasSize.Y.Offset, getEditorLineHeight() * 3)
+		end
+		return math.max(1, h)
+	end
+
+	const function getEditorWindowMetrics()
+		const lineHeight = getEditorLineHeight()
+		const visible = math.max(1, math.floor(getEditorViewportHeight() / math.max(lineHeight, 1)))
+		return lineHeight, visible
+	end
+
+	const function getEditorVisibleLine(totalLines)
+		const lineHeight = getEditorWindowMetrics()
+		const total = math.max(tonumber(totalLines) or 1, 1)
+		const editorLinePos = NAmanage.GetLogicalCanvasPosition and NAmanage.GetLogicalCanvasPosition(editorLineScroll) or editorLineScroll.CanvasPosition
+		return math.clamp(math.floor(math.max(editorLinePos.Y, 0) / math.max(lineHeight, 1)) + 1, 1, total)
+	end
+
+	const function getEditorWindowRange(totalLines, firstVisibleLine)
+		local _, visibleLines = getEditorWindowMetrics()
+		const total = math.max(tonumber(totalLines) or 1, 1)
+		const firstVisible = math.clamp(tonumber(firstVisibleLine) or getEditorVisibleLine(total), 1, total)
+		const lastVisible = math.clamp(firstVisible + visibleLines - 1, firstVisible, total)
+		const firstRender = firstVisible
+		const lastRender = lastVisible
+		return firstRender, lastRender, firstVisible, lastVisible
+	end
+
+	const function buildHighlightLayers(source)
+		source = source or ""
+		const buffers = {
+			keywords = {},
+			globals = {},
+			strings = {},
+			comments = {},
+			numbers = {},
+			functions = {},
+			methods = {},
+			properties = {},
+			operators = {},
+			brackets = {},
+		}
+		const function blankFor(ch)
+			if ch == "\n" or ch == "\r" or ch == "\t" then
+				return ch
+			end
+			return " "
+		end
+		const function appendToLayer(layerName, text)
+			for i = 1, #text do
+				const ch = text:sub(i, i)
+				for key, arr in buffers do
+					arr[#arr + 1] = (key == layerName) and ch or blankFor(ch)
+				end
+			end
+		end
+		const function appendPlain(text)
+			for i = 1, #text do
+				const ch = text:sub(i, i)
+				const blank = blankFor(ch)
+				for _, arr in buffers do
+					arr[#arr + 1] = blank
+				end
+			end
+		end
+		local i = 1
+		const n = #source
+		const function findLongBracket(pos)
+			const eq = source:match("^%[(=*)%[", pos)
+			if not eq then
+				return nil
+			end
+			const closePattern = "]"..eq.."]"
+			local closeStart, closeEnd = source:find(closePattern, pos + 2 + #eq, true)
+			return closeStart, closeEnd, closePattern
+		end
+		const function nextNonSpace(pos)
+			local j = pos
+			while j <= n and source:sub(j, j):match("%s") do
+				j += 1
+			end
+			return source:sub(j, j), j
+		end
+		const function prevNonSpace(pos)
+			local j = pos
+			while j >= 1 and source:sub(j, j):match("%s") do
+				j -= 1
+			end
+			return source:sub(j, j), j
+		end
+		while i <= n do
+			const ch = source:sub(i, i)
+			const nextTwo = source:sub(i, i + 1)
+			if nextTwo == "--" and source:sub(i + 2, i + 2) == "[" then
+				local _, closeEnd = findLongBracket(i + 2)
+				const endIndex = closeEnd or n
+				appendToLayer("comments", source:sub(i, endIndex))
+				i = endIndex + 1
+			elseif nextTwo == "--" then
+				const newlineIndex = source:find("\n", i + 2, true)
+				const endIndex = newlineIndex and (newlineIndex - 1) or n
+				appendToLayer("comments", source:sub(i, endIndex))
+				i = endIndex + 1
+			elseif ch == "\"" or ch == "'" or ch == "`" then
+				const quote = ch
+				local j = i + 1
+				local escaped = false
+				while j <= n do
+					const cur = source:sub(j, j)
+					if escaped then
+						escaped = false
+					elseif cur == "\\" then
+						escaped = true
+					elseif cur == quote then
+						break
+					end
+					j += 1
+				end
+				if j > n then
+					j = n
+				end
+				appendToLayer("strings", source:sub(i, j))
+				i = j + 1
+			elseif ch == "[" and findLongBracket(i) then
+				local _, closeEnd = findLongBracket(i)
+				const endIndex = closeEnd or n
+				appendToLayer("strings", source:sub(i, endIndex))
+				i = endIndex + 1
+			elseif ch:match("[%a_]") then
+				local j = i
+				while j <= n and source:sub(j, j):match("[%w_]") do
+					j += 1
+				end
+				const token = source:sub(i, j - 1)
+				const prevChar = prevNonSpace(i - 1)
+				const nextChar = nextNonSpace(j)
+				if NAStuff.ExecutorKeywordSet[token] then
+					appendToLayer("keywords", token)
+				elseif NAStuff.ExecutorTypeSet[token] then
+					appendToLayer("keywords", token)
+				elseif prevChar == ":" and nextChar == "(" then
+					appendToLayer("methods", token)
+				elseif prevChar == "." then
+					appendToLayer("properties", token)
+				elseif nextChar == "(" then
+					appendToLayer(NAStuff.ExecutorGlobalSet[token] and "globals" or "functions", token)
+				elseif NAStuff.ExecutorGlobalSet[token] then
+					appendToLayer("globals", token)
+				else
+					appendPlain(token)
+				end
+				i = j
+			elseif ch:match("%d") then
+				local j = i
+				while j <= n and source:sub(j, j):match("[%w_%.]") do
+					j += 1
+				end
+				appendToLayer("numbers", source:sub(i, j - 1))
+				i = j
+			elseif ch:match("[%[%]%(%){}]") then
+				appendToLayer("brackets", ch)
+				i += 1
+			elseif source:sub(i, i + 2) == "..." then
+				appendToLayer("operators", "...")
+				i += 3
+			elseif source:sub(i, i + 2) == "//=" or source:sub(i, i + 2) == "..=" then
+				appendToLayer("operators", source:sub(i, i + 2))
+				i += 3
+			elseif ch:match("[%+%-%*/%%%^#=<>~:;,%.,|&%?]") or nextTwo == ".." or nextTwo == "==" or nextTwo == "~=" or nextTwo == "<=" or nextTwo == ">=" or nextTwo == "//" or nextTwo == "->" then
+				if nextTwo == ".." or nextTwo == "==" or nextTwo == "~=" or nextTwo == "<=" or nextTwo == ">=" or nextTwo == "::" or nextTwo == "//" or nextTwo == "->" then
+					appendToLayer("operators", nextTwo)
+					i += 2
+				else
+					appendToLayer("operators", ch)
+					i += 1
+				end
+			else
+				appendPlain(ch)
+				i += 1
+			end
+		end
+		return Concat(buffers.keywords), Concat(buffers.globals), Concat(buffers.strings), Concat(buffers.comments), Concat(buffers.numbers), Concat(buffers.functions), Concat(buffers.methods), Concat(buffers.properties), Concat(buffers.operators), Concat(buffers.brackets)
+	end
+
+	const function syncCurrentTabText()
+		commitCurrentPage()
+	end
+
+	const function refreshEditorNow()
+		const current = tabs[currentTab]
+		if current and current.linesDeferred == true then
+			return
+		end
+		const source = textBox.Text or ""
+		updatePageInfo()
+		const tab = NAmanage.ExecutorNormalizeTab(current)
+		const totalLineCount = tab and math.max(#tab.lines, 1) or 1
+		local width, visibleHeight, renderedLineCount, lineHeight = measureSource(source)
+		editorVirtualLineHeight = lineHeight
+		const fullHeight = math.max(getEditorViewportHeight(), totalLineCount * lineHeight + 12)
+		local _, visibleLines = getEditorWindowMetrics()
+		const virtualTotal = math.max(totalLineCount + 1, visibleLines)
+		const maxTopY = math.max(0, (virtualTotal - visibleLines) * lineHeight)
+		const proxyHeight = math.max(fullHeight + lineHeight + 8, (editorScroll.AbsoluteSize.Y or 0) + maxTopY + lineHeight)
+		const yOffset = 0
+		textBox.Position = UDim2.new(0, 8, 0, 0)
+		textBox.Size = UDim2.new(0, width, 0, visibleHeight)
+		for _, layer in { keywordLayer, globalLayer, stringLayer, commentLayer, numberLayer, functionLayer, methodLayer, propertyLayer, operatorLayer, bracketLayer } do
+			layer.Position = textBox.Position
+			layer.Size = textBox.Size
+		end
+		const canvasWidth = math.max(editorScroll.AbsoluteSize.X or 1, 8 + width + 2)
+		editorScroll.CanvasSize = UDim2.new(0, canvasWidth, 0, math.max(editorScroll.AbsoluteSize.Y, 1))
+		editorLineScroll.Position = editorScroll.Position
+		editorLineScroll.Size = editorScroll.Size
+		editorLineScroll.CanvasSize = UDim2.new(0, 0, 0, proxyHeight)
+		if NAmanage.CustomScroll and NAmanage.CustomScroll.refreshByTarget then
+			NAmanage.CustomScroll.refreshByTarget(editorScroll)
+			NAmanage.CustomScroll.refreshByTarget(editorLineScroll)
+		end
+		local gutterWidth = 0
+		if cfg.lineNumbers then
+			const digits = #tostring(totalLineCount)
+			gutterWidth = math.max(44, 16 + digits * 9)
+			gutter.Size = UDim2.new(0, gutterWidth, 1, 0)
+		end
+		editorScroll.Position = UDim2.new(0, gutterWidth > 0 and (gutterWidth + 6) or 0, 0, 0)
+		editorScroll.Size = UDim2.new(1, gutterWidth > 0 and -(gutterWidth + 6) or 0, 1, 0)
+		const numbers = {}
+		for index = editorVirtualStart, editorVirtualEnd do
+			numbers[#numbers + 1] = tostring(index)
+		end
+		gutterLabel.Text = Concat(numbers, "\n")
+		gutterLabel.Size = UDim2.new(1, -10, 0, math.max(renderedLineCount, 1) * lineHeight + 8)
+		local keywordText, globalText, stringText, commentText, numberText, functionText, methodText, propertyText, operatorText, bracketText = buildHighlightLayers(source)
+		keywordLayer.Text = keywordText
+		globalLayer.Text = globalText
+		stringLayer.Text = stringText
+		commentLayer.Text = commentText
+		numberLayer.Text = numberText
+		functionLayer.Text = functionText
+		methodLayer.Text = methodText
+		propertyLayer.Text = propertyText
+		operatorLayer.Text = operatorText
+		bracketLayer.Text = bracketText
+		gutterLabel.Position = UDim2.new(1, -6, 0, 0)
+	end
+
+	queueRefreshEditor = function()
+		if refreshQueued then
+			return
+		end
+		refreshQueued = true
+		Defer(function()
+			refreshQueued = false
+			refreshEditorNow()
+		end)
+	end
+
+	const function loadCurrentPage(preserveScroll)
+		const targetIndex = currentTab
+		local tab = tabs[targetIndex]
+		if tab and tab.linesDeferred == true then
+			tab = NAmanage.ExecutorHydrateTab(tab)
+		else
+			tab = NAmanage.ExecutorNormalizeTab(tab)
+		end
+		if currentTab ~= targetIndex or tabs[targetIndex] ~= tab then
+			return false
+		end
+		if not tab then
+			editorRenderedStart = 1
+			editorRenderedEnd = 1
+			editorRenderedText = ""
+			setEditorBoxText("")
+			updatePageInfo()
+			queueRefreshEditor()
+			return true
+		end
+		const total = math.max(#tab.lines, 1)
+		const lineHeight = getEditorWindowMetrics()
+		const visibleLine = preserveScroll == true and getEditorVisibleLine(total) or math.clamp(tonumber(tab.viewLine) or 1, 1, total)
+		local firstRender, lastRender, firstVisible = getEditorWindowRange(total, visibleLine)
+		editorVirtualStart = firstRender
+		editorVirtualEnd = lastRender
+		tab.viewLine = firstVisible
+		const renderedText = NAmanage.ExecutorSliceEditorLines(tab.lines, editorVirtualStart, editorVirtualEnd)
+		editorRenderedStart = editorVirtualStart
+		editorRenderedEnd = editorVirtualEnd
+		editorRenderedText = renderedText
+		beginEditorTextSet()
+		if preserveScroll ~= true then
+			if NAmanage.SetLogicalCanvasPosition then
+				NAmanage.SetLogicalCanvasPosition(editorLineScroll, 0, math.max(0, (firstVisible - 1) * lineHeight))
+			else
+				editorLineScroll.CanvasPosition = Vector2.new(0, math.max(0, (firstVisible - 1) * lineHeight))
+			end
+		end
+		textBox.Text = renderedText
+		finishEditorTextSet()
+		updatePageInfo()
+		queueRefreshEditor()
+		return true
+	end
+
+	editorGetVisibleLines = function()
+		local _, visibleLines = getEditorWindowMetrics()
+		return math.max(1, visibleLines)
+	end
+	editorGetTotalLines = function()
+		const tab = NAStuff.ExecutorTools.GetCurrentTab()
+		return tab and math.max(#tab.lines + 1, editorGetVisibleLines()) or 1
+	end
+	editorGetViewLine = function()
+		const tab = NAStuff.ExecutorTools.GetCurrentTab()
+		return tab and getEditorVisibleLine(math.max(#tab.lines, 1)) or 1
+	end
+	editorSetViewLine = function(line)
+		const tab = NAStuff.ExecutorTools.GetCurrentTab()
+		if not tab then
+			return
+		end
+		commitCurrentPage(true)
+		const total = math.max(#tab.lines, 1)
+		const lineHeight = getEditorWindowMetrics()
+		const nextLine = math.clamp(tonumber(line) or 1, 1, total)
+		tab.viewLine = nextLine
+		if NAmanage.SetLogicalCanvasPosition then
+			NAmanage.SetLogicalCanvasPosition(editorLineScroll, 0, math.max(0, (nextLine - 1) * lineHeight))
+		else
+			editorLineScroll.CanvasPosition = Vector2.new(0, math.max(0, (nextLine - 1) * lineHeight))
+		end
+		loadCurrentPage(true)
+	end
+
+	const function turnEditorPage(delta)
+		const tab = NAStuff.ExecutorTools.GetCurrentTab()
+		if not tab then
+			return
+		end
+		commitCurrentPage()
+		local _, windowLines = getEditorWindowMetrics()
+		const total = math.max(#tab.lines, 1)
+		const currentLine = getEditorVisibleLine(total)
+		const nextLine = math.clamp(currentLine + (delta * windowLines), 1, total)
+		if nextLine == tab.viewLine then
+			updatePageInfo()
+			return
+		end
+		tab.viewLine = nextLine
+		if NAmanage.SetLogicalCanvasPosition then
+			NAmanage.SetLogicalCanvasPosition(editorLineScroll, 0, math.max(0, (nextLine - 1) * editorVirtualLineHeight))
+		else
+			editorLineScroll.CanvasPosition = Vector2.new(0, math.max(0, (nextLine - 1) * editorVirtualLineHeight))
+		end
+		loadCurrentPage()
+		scheduleTabsSave()
+		setStatus("Scrolled to line "..tostring(nextLine).."/"..tostring(total), colors.subtle)
+	end
+
+	editorLineScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+		if editorLoading then
+			return
+		end
+		local tab = NAStuff.ExecutorTools.GetCurrentTab()
+		const total = tab and math.max(#tab.lines, 1) or 1
+		local _, _, firstVisible, lastVisible = getEditorWindowRange(total)
+		const edgeBuffer = math.max(1, math.floor(editorLineBuffer / 3))
+		if firstVisible < editorVirtualStart or lastVisible > editorVirtualEnd or (firstVisible - editorVirtualStart) < edgeBuffer or (editorVirtualEnd - lastVisible) < edgeBuffer then
+			commitCurrentPage(true)
+			tab = NAStuff.ExecutorTools.GetCurrentTab()
+			if tab then
+				tab.viewLine = firstVisible
+			end
+			loadCurrentPage(true)
+		else
+			gutterLabel.Position = UDim2.new(1, -6, 0, 0)
+		end
+	end)
+	local redirectingEditorScroll = false
+	editorScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+		if editorLoading or redirectingEditorScroll then
+			return
+		end
+		const editorScrollPos = NAmanage.GetLogicalCanvasPosition and NAmanage.GetLogicalCanvasPosition(editorScroll) or editorScroll.CanvasPosition
+		const y = tonumber(editorScrollPos.Y) or 0
+		if math.abs(y) <= 0.5 then
+			return
+		end
+		redirectingEditorScroll = true
+		if executorVerticalScroll and executorVerticalScroll.scrollBy then
+			local lineDelta = y / math.max(editorVirtualLineHeight, 1)
+			if math.abs(lineDelta) < 1 then
+				lineDelta = y > 0 and 1 or -1
+			end
+			executorVerticalScroll.scrollBy(lineDelta)
+		else
+			if NAmanage.GetLogicalCanvasPosition and NAmanage.SetLogicalCanvasPosition then
+				const editorLinePos = NAmanage.GetLogicalCanvasPosition(editorLineScroll)
+				NAmanage.SetLogicalCanvasPosition(editorLineScroll, 0, math.max(0, editorLinePos.Y + y))
+			else
+				editorLineScroll.CanvasPosition = Vector2.new(0, math.max(0, editorLineScroll.CanvasPosition.Y + y))
+			end
+		end
+		if NAmanage.SetLogicalCanvasPosition then
+			NAmanage.SetLogicalCanvasPosition(editorScroll, editorScrollPos.X, 0)
+		else
+			editorScroll.CanvasPosition = Vector2.new(editorScroll.CanvasPosition.X, 0)
+		end
+		redirectingEditorScroll = false
+	end)
+	editorScroll:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		if editorLoading then
+			return
+		end
+		const tab = tabs[currentTab]
+		if tab and tab.linesDeferred == true then
+			queueRefreshEditor()
+		elseif NAmanage.ExecutorNormalizeTab(tab) then
+			commitCurrentPage(true)
+			loadCurrentPage(true)
+		else
+			queueRefreshEditor()
+		end
+	end)
+
+	const function handleEditorWheel(input)
+		if not input or input.UserInputType ~= Enum.UserInputType.MouseWheel then
+			return
+		end
+		const wheel = input.Position and input.Position.Z or 0
+		if wheel == 0 then
+			return
+		end
+		const step = math.max(24, getEditorLineHeight() * 3)
+		const horizontal = Services.UserInputService and (Services.UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or Services.UserInputService:IsKeyDown(Enum.KeyCode.RightShift))
+		if horizontal and executorHorizontalScroll and executorHorizontalScroll.scrollBy then
+			executorHorizontalScroll.scrollBy(-wheel * step)
+		elseif executorVerticalScroll and executorVerticalScroll.scrollBy then
+			executorVerticalScroll.scrollBy(-wheel * 3)
+		end
+	end
+	editorScroll.InputChanged:Connect(handleEditorWheel)
+	textBox.InputChanged:Connect(handleEditorWheel)
+
+	const function refreshSettingsButtons()
+		cfg.fontSize = math.clamp(math.floor((tonumber(cfg.fontSize) or 15) + 0.5), 11, 24)
+		cfg.identityLevel = math.clamp(math.floor((tonumber(cfg.identityLevel) or 8) + 0.5), 0, 8)
+		const identitySetterAvailable = type(setthreadidentity) == "function" or type(setidentity) == "function" or type(set_thread_identity) == "function" or type(setthreadcontext) == "function"
+		syntaxToggle.Text = cfg.syntax and "On" or "Off"
+		syntaxToggle.BackgroundColor3 = cfg.syntax and colors.tabActive or colors.panel3
+		lineNumbersToggle.Text = cfg.lineNumbers and "On" or "Off"
+		lineNumbersToggle.BackgroundColor3 = cfg.lineNumbers and colors.tabActive or colors.panel3
+		scriptHubToggle.Text = cfg.showHub and "On" or "Off"
+		scriptHubToggle.BackgroundColor3 = cfg.showHub and colors.tabActive or colors.panel3
+		NAStuff.ExecutorTools.CurrentThreadToggle.Text = cfg.runInCurrentThread and "On" or "Off"
+		NAStuff.ExecutorTools.CurrentThreadToggle.BackgroundColor3 = cfg.runInCurrentThread and colors.tabActive or colors.panel3
+		NAStuff.ExecutorTools.ThreadIdentityToggle.Text = identitySetterAvailable and (cfg.threadIdentity and "On" or "Off") or "N/A"
+		NAStuff.ExecutorTools.ThreadIdentityToggle.BackgroundColor3 = (identitySetterAvailable and cfg.threadIdentity) and colors.tabActive or colors.panel3
+		NAStuff.ExecutorTools.ProfileExecutionToggle.Text = cfg.profileExecution and "On" or "Off"
+		NAStuff.ExecutorTools.ProfileExecutionToggle.BackgroundColor3 = cfg.profileExecution and colors.tabActive or colors.panel3
+		fontValue.Text = tostring(cfg.fontSize)
+		NAStuff.ExecutorTools.IdentityValue.Text = tostring(cfg.identityLevel)
+	end
+
+	const function updateBodyLayout()
+		const function num(v, fallback)
+			v = tonumber(v)
+			if v == nil or v ~= v or v == math.huge or v == -math.huge then
+				return fallback
+			end
+			return v
+		end
+
+		const function clamp(v, min, max)
+			min = num(min, 0)
+			max = num(max, min)
+			if max < min then
+				max = min
+			end
+			return math.clamp(num(v, min), min, max)
+		end
+
+		const abs = frame.AbsoluteSize
+		const bAbs = body.AbsoluteSize
+		const size = frame.Size
+		local w = num(abs.X, 0)
+		local h = num(abs.Y, 0)
+		if w <= 0 then
+			w = num(execResponsive.lastW, 0)
+		end
+		if h <= 0 then
+			h = num(execResponsive.lastH, 0)
+		end
+		if w <= 0 then
+			w = num(size.X.Offset, 640)
+		end
+		if h <= 0 then
+			h = num(size.Y.Offset, 420)
+		end
+
+		execResponsive.lastW = w
+		execResponsive.lastH = h
+		execResponsive.compact = w < 760 or h < 430
+		execResponsive.phone = w < 560
+
+		const compact = execResponsive.compact
+		const gap = compact and 6 or 8
+		const pad = compact and 6 or 10
+		const showHub = cfg.showHub == true
+
+		rootPad.PaddingBottom = UDim.new(0, pad)
+		rootPad.PaddingLeft = UDim.new(0, pad)
+		rootPad.PaddingRight = UDim.new(0, pad)
+		rootPad.PaddingTop = UDim.new(0, pad)
+		tabsBar.Size = UDim2.new(1, 0, 0, compact and 30 or 34)
+		body.Position = UDim2.new(0, 0, 0, compact and 36 or 42)
+		body.Size = UDim2.new(1, 0, 1, compact and -112 or -92)
+		statusLabel.Position = UDim2.new(0, 0, 1, compact and -68 or -42)
+		actions.Position = UDim2.new(0, 0, 1, compact and -50 or -22)
+		actions.Size = UDim2.new(1, 0, 0, compact and 48 or 28)
+
+		hubPane.Visible = showHub
+		editorPane.Visible = true
+		if showHub then
+			const bodyW = num(bAbs.X, 0)
+			const useSplit = bodyW <= 0 or bodyW >= 360
+			if useSplit then
+				editorPane.Position = UDim2.new(0, 0, 0, 0)
+				editorPane.Size = UDim2.new(0.5, -math.ceil(gap / 2), 1, 0)
+				hubPane.Position = UDim2.new(0.5, math.floor(gap / 2), 0, 0)
+				hubPane.Size = UDim2.new(0.5, -math.floor(gap / 2), 1, 0)
+			else
+				editorPane.Position = UDim2.new(0, 0, 0, 0)
+				editorPane.Size = UDim2.new(0.5, -math.ceil(gap / 2), 1, 0)
+				hubPane.Position = UDim2.new(0.5, math.floor(gap / 2), 0, 0)
+				hubPane.Size = UDim2.new(0.5, -math.floor(gap / 2), 1, 0)
+			end
+
+			const top = compact and 36 or 42
+			const innerGap = compact and 6 or 8
+			hubButtons.Position = UDim2.new(0, 0, 0, top)
+			hubButtons.Size = UDim2.new(0.5, -math.ceil(innerGap / 2), 1, -top)
+			hubList.Position = UDim2.new(0.5, math.floor(innerGap / 2), 0, top)
+			hubList.Size = UDim2.new(0.5, -math.floor(innerGap / 2), 1, -top)
+		else
+			editorPane.Position = UDim2.new(0, 0, 0, 0)
+			editorPane.Size = UDim2.new(1, 0, 1, 0)
+		end
+
+		const actionPad = w < 420 and 2 or (compact and 4 or 6)
+		const actionColumns = compact and math.ceil(actionButtonCount / 2) or actionButtonCount
+		actionLayout.CellPadding = UDim2.new(0, actionPad, 0, compact and 4 or 0)
+		actionLayout.CellSize = UDim2.new(1 / math.max(1, actionColumns), -actionPad, 0, compact and 22 or 28)
+		actionLayout.FillDirectionMaxCells = actionColumns
+		hubButtons.ScrollBarThickness = compact and 3 or 4
+		for _, btn in { hubOpen, hubOpenNew, hubSave, hubClear, hubNew, hubDelete, hubRefresh, NAStuff.ExecutorTools.HubStopLast } do
+			btn.Size = UDim2.new(1, -2, 0, compact and 22 or 26)
+			btn.TextSize = compact and 11 or 13
+		end
+		const actionButtons = { safeExecuteButton, executeButton, clearButton, copyButton, newLineButton }
+		if pasteButton then
+			actionButtons[#actionButtons + 1] = pasteButton
+		end
+		actionButtons[#actionButtons + 1] = formatButton
+		actionButtons[#actionButtons + 1] = NAStuff.ExecutorTools.DeobfuscateButton
+		actionButtons[#actionButtons + 1] = NAStuff.ExecutorTools.ObfuscateButton
+		actionButtons[#actionButtons + 1] = renameButton
+		actionButtons[#actionButtons + 1] = duplicateButton
+		actionButtons[#actionButtons + 1] = deleteTabButton
+		for _, btn in actionButtons do
+			const longAction = btn == pasteButton or btn == NAStuff.ExecutorTools.DeobfuscateButton or btn == NAStuff.ExecutorTools.ObfuscateButton
+			btn.TextSize = longAction and (compact and 9 or 10) or (compact and 11 or 13)
+		end
+		cfg.fontSize = clamp(math.floor(num(cfg.fontSize, 15) + 0.5), 11, 24)
+		textBox.TextSize = clamp(cfg.fontSize + (compact and -2 or 0), 10, 24)
+		gutterLabel.TextSize = textBox.TextSize
+		for _, layer in { keywordLayer, globalLayer, stringLayer, commentLayer, numberLayer, functionLayer, methodLayer, propertyLayer, operatorLayer, bracketLayer } do
+			layer.TextSize = textBox.TextSize
+		end
+	end
+
+	const function queueExecutorResponsive(resizeFrame)
+		if resizeFrame == true then
+			applyExecutorFrameSize()
+		end
+		updateBodyLayout()
+		Defer(function()
+			if frame and frame.Parent then
+				updateBodyLayout()
+			end
+		end)
+		const tab = tabs[currentTab]
+		if tab and tab.linesDeferred == true then
+			queueRefreshEditor()
+		elseif NAmanage.ExecutorNormalizeTab(tab) then
+			commitCurrentPage(true)
+			loadCurrentPage(true)
+		else
+			queueRefreshEditor()
+		end
+	end
+
+	const function applySettings(skipSave)
+		cfg.syntax = cfg.syntax == true
+		cfg.lineNumbers = cfg.lineNumbers == true
+		cfg.showHub = cfg.showHub ~= false
+		cfg.runInCurrentThread = cfg.runInCurrentThread == true
+		cfg.threadIdentity = cfg.threadIdentity == true
+		cfg.profileExecution = cfg.profileExecution == true
+		cfg.identityLevel = math.clamp(math.floor((tonumber(cfg.identityLevel) or 8) + 0.5), 0, 8)
+		cfg.fontSize = math.clamp(math.floor((tonumber(cfg.fontSize) or 15) + 0.5), 11, 24)
+		for _, layer in { keywordLayer, globalLayer, stringLayer, commentLayer, numberLayer, functionLayer, methodLayer, propertyLayer, operatorLayer, bracketLayer } do
+			layer.Visible = cfg.syntax
+		end
+		gutter.Visible = cfg.lineNumbers
+		updateBodyLayout()
+		refreshSettingsButtons()
+		queueRefreshEditor()
+		if not skipSave then
+			if saveSettings() then
+				setStatus("Saved executor settings", colors.success)
+			else
+				setStatus("Executor settings changed locally", colors.warn)
+			end
+		end
+	end
+
+	const function updateTabButtonVisuals()
+		for index, tab in tabs do
+			if tab.holder and tab.label and tab.close then
+				const isCurrent = index == currentTab
+				tab.holder.BackgroundColor3 = isCurrent and colors.tabActive or colors.tabIdle
+				tab.label.TextColor3 = isCurrent and colors.tabTextActive or colors.tabTextIdle
+				tab.close.TextColor3 = isCurrent and colors.tabTextActive or colors.tabTextIdle
+			end
+		end
+	end
+
+	const function renameTab(index)
+		const tab = tabs[index]
+		if not tab then
+			return
+		end
+		showPrompt("Rename tab", tab.title or "", function(okPressed, value)
+			if not okPressed then
+				return
+			end
+			value = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+			if value == "" then
+				value = "Tab "..index
+			end
+			tab.title = value
+			if tab.label then
+				tab.label.Text = value
+				const width = TextServiceRef:GetTextSize(value, 13, Enum.Font.GothamSemibold, Vector2.new(1000, 1000)).X + 46
+				tab.holder.Size = UDim2.new(0, math.clamp(width, 96, 230), 0, 28)
+			end
+			updateTabCanvas()
+			scheduleTabsSave()
+			setStatus("Renamed tab", colors.success)
+		end)
+	end
+
+	const function selectTab(index, skipCommit, skipSave)
+		const tab = tabs[index]
+		if not tab then
+			return
+		end
+		if editorLoaded and skipCommit ~= true then
+			commitCurrentPage(true)
+		end
+		currentTab = index
+		const wasDeferred = tab.linesDeferred == true
+		if wasDeferred then
+			setStatus("Loading "..tostring(tab.title or ("Tab "..index)).."...", colors.warn)
+		end
+		const loaded = loadCurrentPage()
+		if loaded == false or currentTab ~= index then
+			return
+		end
+		editorLoaded = true
+		updateTabButtonVisuals()
+		if skipSave ~= true then
+			scheduleTabsSave()
+		end
+		if wasDeferred then
+			setStatus("Loaded "..tostring(tab.title or ("Tab "..index)), colors.success)
+		end
+	end
+
+	const function closeTab(index)
+		if #tabs <= 1 then
+			setTabFullText(tabs[currentTab], "")
+			loadCurrentPage()
+			scheduleTabsSave()
+			setStatus("Cleared current tab", colors.warn)
+			return
+		end
+		const wasCurrent = index == currentTab
+		if editorLoaded and not wasCurrent then
+			commitCurrentPage(true)
+		end
+		const tab = tabs[index]
+		if tab and tab.holder then
+			tab.holder:Destroy()
+		end
+		table.remove(tabs, index)
+		if wasCurrent then
+			currentTab = math.clamp(index, 1, #tabs)
+		elseif currentTab > #tabs then
+			currentTab = #tabs
+		elseif currentTab > index then
+			currentTab -= 1
+		end
+		for tabIndex, entry in tabs do
+			if (entry.title or "") == "" then
+				entry.title = "Tab "..tabIndex
+			end
+		end
+		selectTab(currentTab, true)
+		setStatus("Deleted tab", colors.warn)
+	end
+
+	const function createTab(initialText, initialTitle, deferLines)
+		const tab = {
+			title = initialTitle and tostring(initialTitle) or ("Tab "..(#tabs + 1)),
+			text = tostring(initialText or ""),
+		}
+		if deferLines == true then
+			tab.linesDeferred = true
+			tab.viewLine = 1
+			tab.page = 1
+			tab.chunks = { tab.text }
+			tab.textDirty = false
+		else
+			NAmanage.ExecutorNormalizeTab(tab)
+		end
+		const holder = InstanceNew("Frame")
+		holder.BackgroundColor3 = colors.tabIdle
+		holder.BorderSizePixel = 0
+		holder.Size = UDim2.new(0, 120, 0, 28)
+		holder.Parent = tabWrap
+		makeCornerAndStroke(holder, 8, 1)
+
+		const openButton = InstanceNew("TextButton")
+		openButton.AutoButtonColor = false
+		openButton.BackgroundTransparency = 1
+		openButton.BorderSizePixel = 0
+		openButton.Position = UDim2.new(0, 10, 0, 0)
+		openButton.Size = UDim2.new(1, -34, 1, 0)
+		openButton.Font = Enum.Font.GothamSemibold
+		openButton.Text = tab.title
+		openButton.TextColor3 = colors.tabTextIdle
+		openButton.TextSize = 13
+		openButton.TextXAlignment = Enum.TextXAlignment.Left
+		openButton.Parent = holder
+
+		const closeButton = InstanceNew("TextButton")
+		closeButton.AutoButtonColor = false
+		closeButton.BackgroundTransparency = 1
+		closeButton.BorderSizePixel = 0
+		closeButton.Position = UDim2.new(1, -24, 0, 0)
+		closeButton.Size = UDim2.new(0, 24, 1, 0)
+		closeButton.Font = Enum.Font.GothamBold
+		closeButton.Text = "×"
+		closeButton.TextColor3 = colors.tabTextIdle
+		closeButton.TextSize = 13
+		closeButton.Parent = holder
+
+		tab.holder = holder
+		tab.label = openButton
+		tab.close = closeButton
+		tabs[#tabs + 1] = tab
+
+		const width = TextServiceRef:GetTextSize(tab.title, 13, Enum.Font.GothamSemibold, Vector2.new(1000, 1000)).X + 46
+		holder.Size = UDim2.new(0, math.clamp(width, 96, 230), 0, 28)
+
+		openButton.MouseButton1Click:Connect(function()
+			const tabIndex = Discover(tabs, tab)
+			if not tabIndex then
+				return
+			end
+			const now = os.clock()
+			if lastTabClickIndex == tabIndex and (now - lastTabClickTime) <= 0.35 then
+				renameTab(tabIndex)
+			else
+				selectTab(tabIndex)
+			end
+			lastTabClickIndex = tabIndex
+			lastTabClickTime = now
+		end)
+		closeButton.MouseButton1Click:Connect(function()
+			const tabIndex = Discover(tabs, tab)
+			if tabIndex then
+				closeTab(tabIndex)
+			end
+		end)
+		updateTabCanvas()
+		return #tabs
+	end
+
+	const function readScriptFile(name)
+		if not (fsOk and name) then
+			return nil
+		end
+		const path = scriptPath(name)
+		if not isfile(path) then
+			return nil
+		end
+		local ok, data = pcall(readfile, path)
+		if ok and type(data) == "string" then
+			return data
+		end
+		return nil
+	end
+
+	const function selectSavedScript(name, opts)
+		opts = type(opts) == "table" and opts or {}
+		if opts.toggle == true and selectedScript == name then
+			name = nil
+		end
+		selectedScript = name
+		hubSubtitle.Text = name and ("Selected: "..name) or "No script selected"
+		for _, child in hubList:GetChildren() do
+			if child:IsA("TextButton") then
+				if child.SetAttribute then
+					NAmanage.SetAttr(child, "NAExecutorSelected", child.Name == (name or ""))
+				end
+				child.BackgroundColor3 = (child.Name == (name or "")) and colors.tabActive or colors.panel3
+			end
+		end
+	end
+
+	const function refreshSavedScripts()
+		const workState = { lastYield = os.clock() }
+		for _, child in hubList:GetChildren() do
+			if child:IsA("TextButton") then
+				child:Destroy()
+				NAmanage.ExecutorYieldWork(workState)
+			end
+		end
+		const names = {}
+		const seen = {}
+		const function pushName(name, fromDisk)
+			if type(name) ~= "string" then
+				return
+			end
+			name = name:match("([^/\\]+)$") or name
+			name = sanitizeScriptName(name)
+			if not isScriptFileName(name) then
+				return
+			end
+			if fromDisk ~= true and fsOk and type(isfile) == "function" and not isfile(scriptPath(name)) then
+				return
+			end
+			const key = name:lower()
+			if seen[key] then
+				return
+			end
+			seen[key] = true
+			names[#names + 1] = name
+		end
+		if fsOk and listOk then
+			ensureExecutorFolders()
+			local ok, files = pcall(listfiles, scriptsDir)
+			if ok and type(files) == "table" then
+				for _, file in files do
+					pushName(file, true)
+				end
+			end
+		end
+		for _, name in readScriptIndex() do
+			pushName(name, false)
+		end
+		table.sort(names, function(a, b)
+			return a:lower() < b:lower()
+		end)
+		saveScriptIndex(names)
+		local selectedAlive = selectedScript == nil
+		for _, name in names do
+			if selectedScript and name:lower() == tostring(selectedScript):lower() then
+				selectedAlive = true
+			end
+			const item = makeButton(hubList, name, colors.panel3)
+			item.Name = name
+			item.Size = UDim2.new(1, 0, 0, 28)
+			item.TextSize = 12
+			item.TextXAlignment = Enum.TextXAlignment.Left
+			item.MouseButton1Click:Connect(function()
+				selectSavedScript(name, { toggle = true })
+			end)
+			NAmanage.ExecutorYieldWork(workState)
+		end
+		if not selectedAlive then
+			selectedScript = nil
+		end
+		hubList.CanvasSize = UDim2.new(0, 0, 0, hubListLayout.AbsoluteContentSize.Y + 14)
+		selectSavedScript(selectedScript)
+	end
+
+	hubListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		hubList.CanvasSize = UDim2.new(0, 0, 0, hubListLayout.AbsoluteContentSize.Y + 14)
+	end)
+
+	const function getCurrentScriptName()
+		const tab = tabs[currentTab]
+		local title = tab and tab.title or selectedScript or "script"
+		title = stripLuauExt(title)
+		if title == "" or title:match("^Tab%s*%d+$") then
+			title = "Script_"..os.date("%Y%m%d_%H%M%S")
+		end
+		return title
+	end
+
+	const function saveCurrentScriptAs(name)
+		if not fsOk then
+			setStatus("Filesystem unavailable", colors.error)
+			return false
+		end
+		if not ensureExecutorFolders() then
+			setStatus("Failed to create Scripts folder", colors.error)
+			return false
+		end
+		syncCurrentTabText()
+		const fileName = sanitizeScriptName(name)
+		const path = scriptPath(fileName)
+		local ok, err = pcall(writefile, path, NAmanage.ExecutorGetTabText(tabs[currentTab]))
+		if ok and (type(isfile) ~= "function" or isfile(path)) then
+			addScriptIndex(fileName)
+			refreshSavedScripts()
+			selectSavedScript(fileName)
+			setStatus("Saved script: "..fileName, colors.success)
+			return true
+		end
+		setStatus("Failed to save script: "..tostring(err or "writefile failed"), colors.error)
+		return false
+	end
+
+	const function promptSaveCurrentScript()
+		saveCurrentScriptAs(selectedScript or getCurrentScriptName())
+	end
+
+	const function loadSavedScriptIntoCurrent(newTab)
+		if not selectedScript then
+			setStatus("Select a saved script first", colors.warn)
+			return
+		end
+		const source = readScriptFile(selectedScript)
+		if type(source) ~= "string" then
+			setStatus("Could not read saved script", colors.error)
+			return
+		end
+		if newTab then
+			const tabIndex = createTab(source, stripLuauExt(selectedScript), true)
+			selectTab(tabIndex)
+			setStatus("Opened "..selectedScript.." in a new tab", colors.success)
+		else
+			if tabs[currentTab] then
+				setTabFullText(tabs[currentTab], source, true)
+				if (tabs[currentTab].title or "") == "" or tabs[currentTab].title:match("^Tab %d+$") then
+					tabs[currentTab].title = stripLuauExt(selectedScript)
+					tabs[currentTab].label.Text = tabs[currentTab].title
+					const width = TextServiceRef:GetTextSize(tabs[currentTab].title, 13, Enum.Font.GothamSemibold, Vector2.new(1000, 1000)).X + 46
+					tabs[currentTab].holder.Size = UDim2.new(0, math.clamp(width, 96, 230), 0, 28)
+				end
+			end
+			loadCurrentPage()
+			updateTabButtonVisuals()
+			scheduleTabsSave()
+			setStatus("Loaded "..selectedScript, colors.success)
+		end
+	end
+
+	NAmanage.Executor_LoadTabsFromDisk = function()
+		local loaded = false
+		const workState = { lastYield = os.clock() }
+		if fsOk and isfile(tabsFile) then
+			local ok, raw = pcall(readfile, tabsFile)
+			if ok and raw and raw ~= "" then
+				local okDecode, decoded = pcall(Services.HttpService.JSONDecode, Services.HttpService, raw)
+				if okDecode and type(decoded) == "table" then
+					if type(decoded.tabs) == "table" then
+						for index, entry in decoded.tabs do
+							if type(entry) == "table" then
+								createTab(entry.text or "", entry.title or ("Tab "..index), true)
+								loaded = true
+							elseif type(entry) == "string" then
+								createTab(entry, "Tab "..index, true)
+								loaded = true
+							end
+							NAmanage.ExecutorYieldWork(workState)
+						end
+						currentTab = math.clamp(tonumber(decoded.cur) or 1, 1, math.max(#tabs, 1))
+					elseif type(decoded[1]) == "string" then
+						for index, entry in decoded do
+							createTab(entry, "Tab "..index, true)
+							loaded = true
+							NAmanage.ExecutorYieldWork(workState)
+						end
+						currentTab = 1
+					end
+				end
+			end
+		end
+		if not loaded then
+			createTab("", "Tab 1")
+			currentTab = 1
+		end
+		NAStuff.ExecutorTools.TabsLoaded = true
+	end
+
+	textBox:GetPropertyChangedSignal("Text"):Connect(function()
+		if not editorLoading and editorTextLock <= 0 then
+			syncCurrentTabText()
+		end
+		queueRefreshEditor()
+	end)
+	textBox:GetPropertyChangedSignal("CursorPosition"):Connect(function()
+		const cursor = tonumber(textBox.CursorPosition) or -1
+		if cursor > 0 then
+			editorLastCursorPosition = cursor
+		end
+	end)
+	textBox.FocusLost:Connect(function()
+		if editorLoaded and type(saveTabsNow) == "function" then
+			saveTabsNow()
+		end
+	end)
+
+	addTabButton.MouseButton1Click:Connect(function()
+		const tabIndex = createTab("", "Tab "..(#tabs + 1))
+		selectTab(tabIndex)
+		scheduleTabsSave()
+		setStatus("Created a new tab", colors.success)
+	end)
+
+	if settingsButton then
+		settingsButton.MouseButton1Click:Connect(function()
+			NAmanage.ExecutorPlaceSettingsPanel(settingsPanel)
+			settingsPanel.Visible = not settingsPanel.Visible
+		end)
+	end
+	frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		NAmanage.ExecutorPlaceSettingsPanel(settingsPanel)
+	end)
+
+	NAmanage.ExecutorBindSetting(syntaxToggle, syntaxHit, cfg, "syntax", applySettings)
+	NAmanage.ExecutorBindSetting(lineNumbersToggle, lineNumbersHit, cfg, "lineNumbers", applySettings)
+	NAmanage.ExecutorBindSetting(scriptHubToggle, scriptHubHit, cfg, "showHub", applySettings)
+	NAmanage.ExecutorBindSetting(NAStuff.ExecutorTools.CurrentThreadToggle, NAStuff.ExecutorTools.CurrentThreadHit, cfg, "runInCurrentThread", applySettings)
+	NAmanage.ExecutorBindSetting(NAStuff.ExecutorTools.ThreadIdentityToggle, NAStuff.ExecutorTools.ThreadIdentityHit, cfg, "threadIdentity", applySettings)
+	NAmanage.ExecutorBindSetting(NAStuff.ExecutorTools.ProfileExecutionToggle, NAStuff.ExecutorTools.ProfileExecutionHit, cfg, "profileExecution", applySettings)
+	fontMinus.MouseButton1Click:Connect(function()
+		cfg.fontSize = math.clamp((tonumber(cfg.fontSize) or 15) - 1, 11, 24)
+		applySettings(false)
+	end)
+	fontPlus.MouseButton1Click:Connect(function()
+		cfg.fontSize = math.clamp((tonumber(cfg.fontSize) or 15) + 1, 11, 24)
+		applySettings(false)
+	end)
+	NAStuff.ExecutorTools.IdentityMinus.MouseButton1Click:Connect(function()
+		cfg.identityLevel = math.clamp((tonumber(cfg.identityLevel) or 8) - 1, 0, 8)
+		applySettings(false)
+	end)
+	NAStuff.ExecutorTools.IdentityPlus.MouseButton1Click:Connect(function()
+		cfg.identityLevel = math.clamp((tonumber(cfg.identityLevel) or 8) + 1, 0, 8)
+		applySettings(false)
+	end)
+
+	MouseButtonFix(pagePrev, function()
+		turnEditorPage(-1)
+	end)
+	MouseButtonFix(pageNext, function()
+		turnEditorPage(1)
+	end)
+
+	NAStuff.ExecutorTools.LastThread = nil
+	NAStuff.ExecutorTools.LastStartedAt = 0
+
+	NAStuff.ExecutorTools.ThreadStatus = function(thread)
+		if type(thread) ~= "thread" then
+			return "none"
+		end
+		NAStuff.ExecutorTools.Ok, NAStuff.ExecutorTools.Status = pcall(coroutine.status, thread)
+		return NAStuff.ExecutorTools.Ok and tostring(NAStuff.ExecutorTools.Status) or "unknown"
+	end
+
+	NAStuff.ExecutorTools.MemoryKb = function()
+		if type(collectgarbage) ~= "function" then
+			return nil
+		end
+		NAStuff.ExecutorTools.Ok, NAStuff.ExecutorTools.Value = pcall(collectgarbage, "count")
+		if NAStuff.ExecutorTools.Ok and type(NAStuff.ExecutorTools.Value) == "number" then
+			return NAStuff.ExecutorTools.Value
+		end
+		return nil
+	end
+
+	NAStuff.ExecutorTools.GetIdentity = function()
+		NAStuff.ExecutorTools.IdentityGetter = type(getthreadidentity) == "function" and getthreadidentity
+			or type(getidentity) == "function" and getidentity
+			or type(get_thread_identity) == "function" and get_thread_identity
+			or type(getthreadcontext) == "function" and getthreadcontext
+		if type(NAStuff.ExecutorTools.IdentityGetter) ~= "function" then
+			return nil
+		end
+		NAStuff.ExecutorTools.Ok, NAStuff.ExecutorTools.Value = pcall(NAStuff.ExecutorTools.IdentityGetter)
+		if NAStuff.ExecutorTools.Ok then
+			return NAStuff.ExecutorTools.Value
+		end
+		return nil
+	end
+
+	NAStuff.ExecutorTools.SetIdentity = function(level)
+		NAStuff.ExecutorTools.IdentitySetter = type(setthreadidentity) == "function" and setthreadidentity
+			or type(setidentity) == "function" and setidentity
+			or type(set_thread_identity) == "function" and set_thread_identity
+			or type(setthreadcontext) == "function" and setthreadcontext
+		if type(NAStuff.ExecutorTools.IdentitySetter) ~= "function" then
+			return false, "setthreadidentity unavailable"
+		end
+		NAStuff.ExecutorTools.Ok, NAStuff.ExecutorTools.Err = pcall(NAStuff.ExecutorTools.IdentitySetter, level)
+		if not NAStuff.ExecutorTools.Ok then
+			return false, NAStuff.ExecutorTools.Err
+		end
+		return true
+	end
+
+	NAStuff.ExecutorTools.RunFunction = function(fn)
+		NAStuff.ExecutorTools.OldIdentity = nil
+		NAStuff.ExecutorTools.IdentityChanged = false
+		if cfg.threadIdentity == true then
+			cfg.identityLevel = math.clamp(math.floor((tonumber(cfg.identityLevel) or 8) + 0.5), 0, 8)
+			NAStuff.ExecutorTools.OldIdentity = NAStuff.ExecutorTools.GetIdentity() or 2
+			NAStuff.ExecutorTools.OkSet, NAStuff.ExecutorTools.SetErr = NAStuff.ExecutorTools.SetIdentity(cfg.identityLevel)
+			if not NAStuff.ExecutorTools.OkSet then
+				return false, tostring(NAStuff.ExecutorTools.SetErr or "setthreadidentity unavailable")
+			end
+			NAStuff.ExecutorTools.IdentityChanged = true
+		end
+
+		NAStuff.ExecutorTools.StartClock = os.clock()
+		NAStuff.ExecutorTools.StartMem = NAStuff.ExecutorTools.MemoryKb()
+		NAStuff.ExecutorTools.RunOk, NAStuff.ExecutorTools.RunErr = xpcall(fn, function(err)
+			NAStuff.ExecutorTools.Traceback = "debug.traceback unavailable"
+			if type(debug) == "table" and type(debug.traceback) == "function" then
+				NAStuff.ExecutorTools.OkTb, NAStuff.ExecutorTools.TbResult = pcall(debug.traceback, nil, 2)
+				if NAStuff.ExecutorTools.OkTb and NAStuff.ExecutorTools.TbResult then
+					NAStuff.ExecutorTools.Traceback = tostring(NAStuff.ExecutorTools.TbResult)
+				end
+			end
+			return tostring(err).."\n"..NAStuff.ExecutorTools.Traceback
+		end)
+
+		if NAStuff.ExecutorTools.IdentityChanged and NAStuff.ExecutorTools.OldIdentity ~= nil then
+			pcall(NAStuff.ExecutorTools.SetIdentity, NAStuff.ExecutorTools.OldIdentity)
+		end
+
+		if NAStuff.ExecutorTools.RunOk then
+			if cfg.profileExecution == true then
+				NAStuff.ExecutorTools.Duration = math.max(os.clock() - NAStuff.ExecutorTools.StartClock, 0)
+				NAStuff.ExecutorTools.EndMem = NAStuff.ExecutorTools.MemoryKb()
+				NAStuff.ExecutorTools.Suffix = Format(" (%.3fs", NAStuff.ExecutorTools.Duration)
+				if NAStuff.ExecutorTools.StartMem and NAStuff.ExecutorTools.EndMem then
+					NAStuff.ExecutorTools.Suffix ..= Format(", %.1f KB", NAStuff.ExecutorTools.EndMem - NAStuff.ExecutorTools.StartMem)
+				end
+				NAStuff.ExecutorTools.Suffix ..= ")"
+				return true, "Execution finished"..NAStuff.ExecutorTools.Suffix
+			end
+			return true, "Execution finished"
+		end
+		return false, tostring(NAStuff.ExecutorTools.RunErr)
+	end
+
+
+	safeExecuteButton.MouseButton1Click:Connect(function()
+		commitCurrentPage(true)
+		const source = NAmanage.ExecutorGetTabText(tabs[currentTab])
+		if source == "" then
+			setStatus("Nothing to execute", colors.warn)
+			return
+		end
+		setStatus("Queueing safe execution...", colors.warn)
+		const chunkName = "Executor/"..(tabs[currentTab] and (tabs[currentTab].title or ("Tab "..currentTab)) or "Script")
+		local okRun, runErr = NAmanage.RunSource(source, chunkName)
+		if okRun then
+			setStatus("Safe execution queued", colors.success)
+		else
+			setStatus(tostring(runErr or "Safe execution failed"), colors.error)
+		end
+	end)
+
+	executeButton.MouseButton1Click:Connect(function()
+		commitCurrentPage(true)
+		const source = NAmanage.ExecutorGetTabText(tabs[currentTab])
+		if source == "" then
+			setStatus("Nothing to execute", colors.warn)
+			return
+		end
+		setStatus("Running script...", colors.warn)
+		const chunkName = "Executor/"..(tabs[currentTab] and (tabs[currentTab].title or ("Tab "..currentTab)) or "Script")
+		local fn, loadErr = NAmanage.RawCompile(source, chunkName)
+		if not fn then
+			setStatus(tostring(loadErr), colors.error)
+			return
+		end
+		NAStuff.ExecutorTools.LastStartedAt = os.clock()
+		if cfg.runInCurrentThread == true then
+			NAStuff.ExecutorTools.LastThread = nil
+			local okRun, result = NAStuff.ExecutorTools.RunFunction(fn)
+			setStatus(result, okRun and colors.success or colors.error)
+			return
+		end
+		NAStuff.ExecutorTools.LastThread = Spawn(function()
+			local okRun, result = NAStuff.ExecutorTools.RunFunction(fn)
+			pcall(Defer, setStatus, result, okRun and colors.success or colors.error)
+		end)
+	end)
+	clearButton.MouseButton1Click:Connect(function()
+		setTabFullText(tabs[currentTab], "")
+		loadCurrentPage()
+		scheduleTabsSave()
+		setStatus("Cleared current tab", colors.warn)
+	end)
+	copyButton.MouseButton1Click:Connect(function()
+		commitCurrentPage(true)
+		const ok = pcall(setclipboard, NAmanage.ExecutorGetTabText(tabs[currentTab]))
+		if ok then
+			setStatus("Copied tab contents", colors.success)
+		else
+			setStatus("Clipboard unavailable", colors.error)
+		end
+	end)
+	newLineButton.MouseButton1Click:Connect(function()
+		insertEditorNewLine()
+	end)
+	if pasteButton then
+		pasteButton.MouseButton1Click:Connect(function()
+			local ok, clip = pcall(getclipboard)
+			if not ok or type(clip) ~= "string" then
+				setStatus("Clipboard unavailable", colors.error)
+				return
+			end
+			const currentText = tostring(textBox.Text or "")
+			const cursor = tonumber(textBox.CursorPosition) or -1
+			const selectionStart = tonumber(textBox.SelectionStart) or -1
+			local startPos
+			local endPos
+			if cursor > 0 and selectionStart > 0 and cursor ~= selectionStart then
+				startPos = math.min(cursor, selectionStart)
+				endPos = math.max(cursor, selectionStart) - 1
+			else
+				startPos = cursor > 0 and cursor or (#currentText + 1)
+				endPos = startPos - 1
+			end
+			startPos = math.clamp(startPos, 1, #currentText + 1)
+			endPos = math.clamp(endPos, 0, #currentText)
+			setEditorBoxText(currentText:sub(1, startPos - 1)..clip..currentText:sub(endPos + 1))
+			pcall(function()
+				textBox.CursorPosition = math.clamp(startPos + #clip, 1, #textBox.Text + 1)
+			end)
+			commitCurrentPage(true)
+			scheduleTabsSave()
+			queueRefreshEditor()
+			setStatus("Pasted clipboard", colors.success)
+		end)
+	end
+	formatButton.MouseButton1Click:Connect(function()
+		if NAStuff.ExecutorTools.FormatBusy == true then
+			setStatus("Formatter is already running", colors.warn)
+			return
+		end
+		commitCurrentPage(true)
+		const tab = tabs[currentTab]
+		const source = NAmanage.ExecutorGetTabText(tab)
+		if source:gsub("%s+", "") == "" then
+			setStatus("Nothing to format", colors.warn)
+			return
+		end
+		NAStuff.ExecutorTools.FormatBusy = true
+		formatButton.Text = "Formatting..."
+		setStatus("Formatting Luau script...", colors.warn)
+		Spawn(function()
+			local okFormat, formatted, formatErr = pcall(NAmanage.ExecutorFormatLuauSource, source)
+			if not okFormat then
+				formatErr = formatted
+				formatted = nil
+			end
+			Defer(function()
+				NAStuff.ExecutorTools.FormatBusy = false
+				if formatButton and formatButton.Parent then
+					formatButton.Text = "Format"
+				end
+				if type(formatted) ~= "string" then
+					setStatus(tostring(formatErr or "Formatting failed"), colors.error)
+					return
+				end
+				if NAmanage.ExecutorGetTabText(tab) ~= source then
+					setStatus("Format cancelled because the tab changed", colors.warn)
+					return
+				end
+				if formatted == source then
+					setStatus("Already formatted", colors.subtle)
+					return
+				end
+				setTabFullText(tab, formatted, true)
+				scheduleTabsSave()
+				if tabs[currentTab] == tab then
+					loadCurrentPage()
+					setStatus("Formatted Luau script (validated)", colors.success)
+				else
+					setStatus("Formatted tab in background", colors.success)
+				end
+			end)
+		end)
+	end)
+	NAStuff.ExecutorTools.DeobfuscateButton.MouseButton1Click:Connect(function()
+		commitCurrentPage(true)
+		local targetTab = tabs[currentTab]
+		local source = NAmanage.ExecutorGetTabText(targetTab)
+		if source:gsub("%s+", "") == "" then
+			setStatus("Nothing to deobfuscate", colors.warn)
+			return
+		end
+		setStatus("Auto-detecting obfuscation...", colors.warn)
+		Spawn(function()
+			local okDecode, decoded, applied = pcall(NAStuff.ExecutorCodec.AutoDeobfuscate, source)
+			if not okDecode then
+				Defer(setStatus, "Deobfuscation failed: "..tostring(decoded), colors.error)
+				return
+			end
+			if type(decoded) ~= "string" or decoded == source then
+				Defer(setStatus, "No supported obfuscation layer detected", colors.warn)
+				return
+			end
+			Defer(function()
+				setTabFullText(targetTab, decoded, true)
+				if tabs[currentTab] == targetTab then loadCurrentPage() end
+				scheduleTabsSave()
+				local detail = type(applied) == "table" and table.concat(applied, " -> ") or "decoded"
+				if #detail > 96 then detail = detail:sub(1, 93).."..." end
+				setStatus("Deobfuscated: "..detail, colors.success)
+			end)
+		end)
+	end)
+	NAStuff.ExecutorTools.RunObfuscateMode = function(mode)
+		commitCurrentPage(true)
+		local targetTab = tabs[currentTab]
+		local source = NAmanage.ExecutorGetTabText(targetTab)
+		if source:gsub("%s+", "") == "" then
+			setStatus("Nothing to obfuscate", colors.warn)
+			return
+		end
+		setStatus("Obfuscating script...", colors.warn)
+		Spawn(function()
+			local okObfuscate, encoded, selectedMode, transformErr = pcall(NAStuff.ExecutorCodec.Obfuscate, source, mode)
+			if not okObfuscate then
+				Defer(setStatus, "Obfuscation failed: "..tostring(encoded), colors.error)
+				return
+			end
+			if type(encoded) ~= "string" then
+				Defer(setStatus, tostring(transformErr or "Unsupported obfuscation mode"), colors.error)
+				return
+			end
+			local compiled, compileErr = loadstring(encoded, "Executor/ObfuscationCheck")
+			if not compiled then
+				Defer(setStatus, "Generated wrapper failed compile check: "..tostring(compileErr), colors.error)
+				return
+			end
+			Defer(function()
+				setTabFullText(targetTab, encoded, true)
+				if tabs[currentTab] == targetTab then loadCurrentPage() end
+				scheduleTabsSave()
+				setStatus("Obfuscated ("..tostring(selectedMode or mode or "Auto").."): "..tostring(#source).." -> "..tostring(#encoded).." bytes", colors.success)
+			end)
+		end)
+	end
+	NAStuff.ExecutorTools.ObfuscateButton.MouseButton1Click:Connect(function()
+		NAStuff.ExecutorTools.ObfuscationMenu.Show()
+	end)
+	renameButton.MouseButton1Click:Connect(function()
+		renameTab(currentTab)
+	end)
+	duplicateButton.MouseButton1Click:Connect(function()
+		commitCurrentPage(true)
+		const tab = tabs[currentTab]
+		const tabIndex = createTab(tab and NAmanage.ExecutorGetTabText(tab) or "", tab and ((tab.title or "Tab").." Copy") or "Copy", true)
+		selectTab(tabIndex)
+		scheduleTabsSave()
+		setStatus("Duplicated tab", colors.success)
+	end)
+	deleteTabButton.MouseButton1Click:Connect(function()
+		closeTab(currentTab)
+		scheduleTabsSave()
+	end)
+
+	hubOpen.MouseButton1Click:Connect(function()
+		loadSavedScriptIntoCurrent(false)
+	end)
+	hubOpenNew.MouseButton1Click:Connect(function()
+		loadSavedScriptIntoCurrent(true)
+	end)
+	hubSave.MouseButton1Click:Connect(function()
+		const target = selectedScript or getCurrentScriptName()
+		saveCurrentScriptAs(target)
+	end)
+	hubClear.MouseButton1Click:Connect(function()
+		selectSavedScript(nil)
+		setStatus("Cleared saved script selection", colors.subtle)
+	end)
+	hubNew.MouseButton1Click:Connect(function()
+		selectSavedScript(nil)
+		const tabIndex = createTab("", "Script_"..os.date("%Y%m%d_%H%M%S"))
+		selectTab(tabIndex)
+		scheduleTabsSave()
+		setStatus("Created a new script tab", colors.success)
+	end)
+	hubDelete.MouseButton1Click:Connect(function()
+		if not selectedScript then
+			setStatus("Select a saved script first", colors.warn)
+			return
+		end
+		if not (fsOk and delOk) then
+			setStatus("Delete is unavailable here", colors.error)
+			return
+		end
+		ensureExecutorFolders()
+		const deleting = selectedScript
+		const ok = pcall(delfile, scriptPath(deleting))
+		if ok then
+			removeScriptIndex(deleting)
+			selectedScript = nil
+			refreshSavedScripts()
+			selectSavedScript(nil)
+			setStatus("Deleted "..deleting, colors.warn)
+		else
+			setStatus("Failed to delete "..deleting, colors.error)
+		end
+	end)
+	hubRefresh.MouseButton1Click:Connect(function()
+		refreshSavedScripts()
+		setStatus("Refreshed saved scripts", colors.success)
+	end)
+	NAStuff.ExecutorTools.HubStopLast.MouseButton1Click:Connect(function()
+		if type(task) ~= "table" or type(task.cancel) ~= "function" then
+			setStatus("task.cancel unavailable", colors.error)
+			return
+		end
+		if NAStuff.ExecutorTools.ThreadStatus(NAStuff.ExecutorTools.LastThread) ~= "suspended" then
+			setStatus("No cancellable executor task", colors.warn)
+			return
+		end
+		local okCancel, cancelErr = pcall(task.cancel, NAStuff.ExecutorTools.LastThread)
+		if okCancel then
+			setStatus("Cancel requested for last executor task", colors.warn)
+		else
+			setStatus(tostring(cancelErr), colors.error)
+		end
+	end)
+
+	queueExecutorResponsive(true)
+	NAlib.disconnect("NAExecutorResponsive")
+	if Services.Workspace and Services.Workspace.CurrentCamera then
+		NAlib.connect("NAExecutorResponsive", Services.Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+			queueExecutorResponsive(false)
+		end))
+	end
+	if NAStuff and NAStuff.NASCREENGUI then
+		NAlib.connect("NAExecutorResponsive", NAStuff.NASCREENGUI:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			queueExecutorResponsive(false)
+		end))
+	end
+	NAlib.connect("NAExecutorResponsive", frame:GetPropertyChangedSignal("Size"):Connect(saveExecutorFrameSize))
+	NAlib.connect("NAExecutorResponsive", frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		updateBodyLayout()
+		queueRefreshEditor()
+	end))
+
+	applySettings(true)
+	NAStuff.ExecutorRefresh = queueRefreshEditor
+	NAStuff.ExecutorSaveTabs = saveTabsNow
+	setStatus("Loading executor data...", colors.warn)
+	Defer(function()
+		if not (frame and frame.Parent) then
+			return
+		end
+		NAmanage.Executor_LoadTabsFromDisk()
+		selectTab(currentTab, true, true)
+		refreshSavedScripts()
+		queueRefreshEditor()
+		setStatus("Executor ready", colors.success)
+	end)
+	return true
+end
+
+NAmanage.Executor_Toggle = NAmanage.Executor_Toggle or function(forceState)
+	if not (NAUIMANAGER and NAUIMANAGER.ExecutorFrame) then
+		local ok, err = pcall(function()
+			NAmanage.RunURL("https://raw.githubusercontent.com/ltseverydayyou/Nameless-Admin/main/NAexecutor.lua")
+		end)
+		if not ok then
+			DoNotif("Executor UI unavailable: "..tostring(err), 3)
+		end
+		return false
+	end
+	if NAUIMANAGER.ExecutorFrame.GetAttribute and NAmanage.GetAttr(NAUIMANAGER.ExecutorFrame, "NAExecutorReady") ~= true then
+		if NAmanage.pulseLoadingUI then
+			NAmanage.pulseLoadingUI("building executor on demand", 0.99)
+		end
+	end
+	NAmanage.Executor_Init()
+	const execFrame = NAUIMANAGER.ExecutorFrame
+	local nextState = forceState
+	if type(nextState) ~= "boolean" then
+		nextState = not execFrame.Visible
+	end
+	if execFrame.Visible and nextState == false then
+		if type(NAmanage.Executor_SaveFrameSize) == "function" then
+			pcall(NAmanage.Executor_SaveFrameSize)
+		end
+		if type(NAStuff.ExecutorSaveTabs) == "function" then
+			pcall(NAStuff.ExecutorSaveTabs)
+		end
+	end
+	execFrame.Visible = nextState
+	if execFrame.Visible then
+		if NAmanage.centerFrame then
+			pcall(NAmanage.centerFrame, execFrame)
+		end
+		if type(NAStuff.ExecutorRefresh) == "function" then
+			Defer(NAStuff.ExecutorRefresh)
+		end
+	end
+	return true
+end
+
+NAmanage.Notepad_Init = function()
+	if not (NAUIMANAGER and NAUIMANAGER.NotepadFrame and NAUIMANAGER.NotepadContainer) then
+		return false
+	end
+
+	const frame = NAUIMANAGER.NotepadFrame
+	const cont = NAUIMANAGER.NotepadContainer
+	const noteSizeXAttr = "NANotepadSavedSizeX"
+	const noteSizeYAttr = "NANotepadSavedSizeY"
+	const function saveNotepadFrameSize()
+		if not (frame and frame.Parent and frame.SetAttribute) then
+			return
+		end
+		if frame.GetAttribute and NAmanage.GetAttr(frame, "NAMenuMinimized") == true then
+			return
+		end
+		const w = tonumber(frame.Size.X.Offset) or 0
+		const h = tonumber(frame.Size.Y.Offset) or 0
+		if w > 0 and h > 0 then
+			NAmanage.SetAttr(frame, noteSizeXAttr, math.floor(w + 0.5))
+			NAmanage.SetAttr(frame, noteSizeYAttr, math.floor(h + 0.5))
+		end
+	end
+	const function getNotepadSavedSize()
+		if frame and frame.GetAttribute then
+			const w = tonumber(NAmanage.GetAttr(frame, noteSizeXAttr))
+			const h = tonumber(NAmanage.GetAttr(frame, noteSizeYAttr))
+			if w and h and w > 0 and h > 0 then
+				return w, h
+			end
+		end
+		return nil
+	end
+	NAmanage.Notepad_SaveFrameSize = saveNotepadFrameSize
+	const function getNotepadScale()
+		local s = (NAUIMANAGER and NAUIMANAGER.AUTOSCALER and tonumber(NAUIMANAGER.AUTOSCALER.Scale)) or 1
+		if not s or s <= 0 then
+			s = 1
+		end
+		return s
+	end
+
+	const function getNotepadViewport()
+		const sg = NAStuff and NAStuff.NASCREENGUI
+		if sg and sg.AbsoluteSize and sg.AbsoluteSize.X > 0 and sg.AbsoluteSize.Y > 0 then
+			return sg.AbsoluteSize
+		end
+		const cam = Services.Workspace and Services.Workspace.CurrentCamera
+		if cam and cam.ViewportSize and cam.ViewportSize.X > 0 and cam.ViewportSize.Y > 0 then
+			return cam.ViewportSize
+		end
+		return Vector2.new(1280, 720)
+	end
+
+	const function getNotepadPad()
+		const s = getNotepadScale()
+		local x = IsOnMobile and 8 or 16
+		local y = IsOnMobile and 8 or 18
+		if Services.GuiService and Services.GuiService.GetGuiInset then
+			local ok, a, b = pcall(function()
+				return Services.GuiService:GetGuiInset()
+			end)
+			if ok and typeof(a) == "Vector2" and typeof(b) == "Vector2" then
+				x += math.max(a.X, b.X) / s
+				y += math.max(a.Y, b.Y) / s
+			end
+		end
+		return x, y
+	end
+
+	const function getNotepadSize(wide, tall)
+		local padX, padY = getNotepadPad()
+		const maxW = math.max(1, math.floor(wide - padX * 2 + 0.5))
+		const maxH = math.max(1, math.floor(tall - padY * 2 + 0.5))
+		const small = IsOnMobile or wide < 900 or tall < 620
+		const baseW, baseH = 720, 455
+		local capW = small and math.floor(maxW * 0.90 + 0.5) or math.min(baseW, maxW)
+		local capH = small and math.floor(maxH * 0.90 + 0.5) or math.min(baseH, maxH)
+		capW = math.max(1, capW)
+		capH = math.max(1, capH)
+		local scale = math.min(capW / baseW, capH / baseH, 1)
+		if not scale or scale <= 0 then
+			scale = 1
+		end
+		local w = math.floor(baseW * scale + 0.5)
+		local h = math.floor(baseH * scale + 0.5)
+		const minW = math.min(small and 280 or 460, capW)
+		const minH = math.min(small and 230 or 340, capH)
+		w = math.clamp(w, minW, capW)
+		h = math.clamp(h, minH, capH)
+		return w, h, capW, capH, small
+	end
+
+	const function applyNotepadResponsive(center)
+		if not frame or not frame.Parent then
+			return
+		end
+		if frame.GetAttribute and NAmanage.GetAttr(frame, "NAMenuMinimized") == true then
+			return
+		end
+		const vp = getNotepadViewport()
+		const s = getNotepadScale()
+		const wide = math.max(1, vp.X / s)
+		const tall = math.max(1, vp.Y / s)
+		local defW, defH, capW, capH, small = getNotepadSize(wide, tall)
+		const minW = math.min(small and 280 or 460, capW)
+		const minH = math.min(small and 230 or 340, capH)
+		const curW = tonumber(frame.Size.X.Offset) or 0
+		const curH = tonumber(frame.Size.Y.Offset) or 0
+		local savedW, savedH = getNotepadSavedSize()
+		const initialized = frame.GetAttribute and NAmanage.GetAttr(frame, "NANotepadDefaultSized") == true
+		local targetW = defW
+		local targetH = defH
+		if savedW and savedH then
+			targetW = math.clamp(math.floor(savedW + 0.5), minW, capW)
+			targetH = math.clamp(math.floor(savedH + 0.5), minH, capH)
+		elseif initialized and curW > 0 and curH > 0 then
+			targetW = math.clamp(math.floor(curW + 0.5), minW, capW)
+			targetH = math.clamp(math.floor(curH + 0.5), minH, capH)
+			if small and (targetW >= capW * 0.96 or targetW / math.max(targetH, 1) > 1.95 or targetH < defH * 0.82) then
+				targetW = defW
+				targetH = defH
+			end
+		end
+		frame.AnchorPoint = Vector2.new(0, 0)
+		if frame.AbsoluteSize.X ~= targetW or frame.AbsoluteSize.Y ~= targetH then
+			frame.Size = UDim2.fromOffset(targetW, targetH)
+		end
+		if frame.SetAttribute then
+			NAmanage.SetAttr(frame, "NANotepadDefaultSized", true)
+		end
+		saveNotepadFrameSize()
+		if center == true and NAmanage.centerFrame then
+			NAmanage.centerFrame(frame)
+		end
+	end
+
+	NAmanage.Notepad_ApplyResponsive = applyNotepadResponsive
+	if frame.GetAttribute and NAmanage.GetAttr(frame, "NANotepadReady") then
+		if type(NAStuff.NotepadRefresh) == "function" then
+			Defer(NAStuff.NotepadRefresh)
+		end
+		return true
+	end
+	if frame.SetAttribute then
+		NAmanage.SetAttr(frame, "NANotepadReady", true)
+	end
+
+	for _, child in cont:GetChildren() do
+		child:Destroy()
+	end
+
+	const dir = (NAfiles and NAfiles.NANOTEPADPATH) or "Nameless-Admin/NA-Notepad"
+	const idx = dir.."/index.json"
+	const fsOk = type(isfolder) == "function" and type(makefolder) == "function" and type(isfile) == "function" and type(readfile) == "function" and type(writefile) == "function"
+	const delOk = type(delfile) == "function"
+	const listOk = type(listfiles) == "function"
+	local sel
+	NAStuff.NotepadSettings = type(NAStuff.NotepadSettings) == "table" and NAStuff.NotepadSettings or {}
+	NAStuff.NotepadSettings.fontSize = math.clamp(math.floor((tonumber(NAStuff.NotepadSettings.fontSize) or 15) + 0.5), 11, 24)
+	NAStuff.NotepadSettings.wrap = NAStuff.NotepadSettings.wrap == true
+
+	const col = {
+		bg = Color3.fromRGB(17, 17, 21),
+		bg2 = Color3.fromRGB(24, 24, 30),
+		bg3 = Color3.fromRGB(31, 31, 38),
+		st = Color3.fromRGB(72, 72, 82),
+		tx = Color3.fromRGB(235, 235, 242),
+		sub = Color3.fromRGB(170, 170, 180),
+		on = Color3.fromRGB(45, 45, 58),
+		ok = Color3.fromRGB(156, 235, 174),
+		warn = Color3.fromRGB(255, 214, 112),
+		err = Color3.fromRGB(255, 146, 146),
+	}
+
+	const function trim(s)
+		return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+	end
+
+	const exts = {
+		".txt",
+		".lua",
+		".json",
+		".md",
+		".log",
+		".cfg",
+		".csv",
+		".xml",
+		".ini",
+		".html",
+		".css",
+		".js",
+	}
+	local selectedExt = ".txt"
+
+	const function normExt(e)
+		e = trim(tostring(e or "")):lower()
+		e = e:gsub("^%.", "")
+		if e == "" or not e:match("^[%w]+$") or #e > 16 then
+			return ".txt"
+		end
+		return "."..e
+	end
+
+	const function cleanName(n)
+		n = trim(n)
+		n = n:gsub("\\", "/")
+		n = n:match("([^/]+)$") or n
+		n = n:gsub('[%c%z<>:"/\\|%?%*]', "_")
+		n = n:gsub("^%.*", "")
+		n = n:gsub("%s+", " ")
+		n = trim(n)
+		if n == "" then
+			n = "note"
+		end
+		return n
+	end
+
+	const function getExt(n)
+		return normExt((tostring(n or ""):match("(%.[%w]+)$")))
+	end
+
+	const function safeName(n, forcePicker)
+		n = cleanName(n)
+		local base, ext = n:match("^(.*)(%.[%w]+)$")
+		if forcePicker then
+			const pick = normExt(selectedExt)
+			n = (base and base ~= "" and base or n)..pick
+		elseif ext then
+			n = base..normExt(ext)
+		else
+			n ..= normExt(selectedExt)
+		end
+		base, ext = n:match("^(.*)(%.[%w]+)$")
+		if #n > 96 and base and ext then
+			n = base:sub(1, math.max(1, 96 - #ext))..ext
+		elseif #n > 96 then
+			n = n:sub(1, 96)
+		end
+		return n
+	end
+
+	const function filePath(n, forcePicker)
+		return dir.."/"..safeName(n, forcePicker)
+	end
+
+	const function setStatus(txt, c)
+		if NAStuff.NotepadStatusLabel then
+			NAStuff.NotepadStatusLabel.Text = tostring(txt or "Ready")
+			NAStuff.NotepadStatusLabel.TextColor3 = c or col.sub
+		end
+	end
+
+	const function ensure()
+		if not fsOk then
+			return false
+		end
+		local ok = true
+		const function mk(p)
+			if not ok then return end
+			local has = false
+			local okCheck, res = pcall(isfolder, p)
+			if okCheck and res == true then
+				has = true
+			end
+			if not has then
+				const okMake = pcall(makefolder, p)
+				if not okMake then
+					ok = false
+				end
+			end
+		end
+		mk("Nameless-Admin")
+		mk(dir)
+		return ok
+	end
+
+	const function readIdx()
+		const names = {}
+		if not (fsOk and isfile(idx)) then
+			return names
+		end
+		local ok, raw = pcall(readfile, idx)
+		if not ok or type(raw) ~= "string" or raw == "" then
+			return names
+		end
+		local okDec, data = pcall(Services.HttpService.JSONDecode, Services.HttpService, raw)
+		if okDec and type(data) == "table" then
+			for _, v in data do
+				if type(v) == "string" and v ~= "" then
+					names[#names + 1] = safeName(v)
+				end
+			end
+		end
+		return names
+	end
+
+	const function saveIdx(names)
+		if not ensure() then
+			return false
+		end
+		const seen = {}
+		const out = {}
+		for _, n in names or {} do
+			const clean = safeName(n)
+			const key = clean:lower()
+			if not seen[key] then
+				seen[key] = true
+				out[#out + 1] = clean
+			end
+		end
+		table.sort(out, function(a, b)
+			return a:lower() < b:lower()
+		end)
+		local okEnc, raw = pcall(Services.HttpService.JSONEncode, Services.HttpService, out)
+		if okEnc and raw then
+			return pcall(writefile, idx, raw)
+		end
+		return false
+	end
+
+	const function names()
+		const seen = {}
+		const out = {}
+		const function push(n)
+			if type(n) ~= "string" then return end
+			n = n:gsub("\\", "/")
+			n = n:match("([^/]+)$") or n
+			if n == "" or n:lower() == "index.json" then return end
+			const clean = safeName(n)
+			const key = clean:lower()
+			if not seen[key] then
+				seen[key] = true
+				out[#out + 1] = clean
+			end
+		end
+		if fsOk and listOk then
+			ensure()
+			local ok, files = pcall(listfiles, dir)
+			if ok and type(files) == "table" then
+				for _, f in files do
+					push(f)
+				end
+			end
+		end
+		for _, n in readIdx() do
+			push(n)
+		end
+		table.sort(out, function(a, b)
+			return a:lower() < b:lower()
+		end)
+		saveIdx(out)
+		return out
+	end
+
+	const function addIdx(n)
+		const cur = readIdx()
+		cur[#cur + 1] = safeName(n)
+		saveIdx(cur)
+	end
+
+	const function remIdx(n)
+		const rem = safeName(n):lower()
+		const cur = readIdx()
+		const out = {}
+		for _, v in cur do
+			if safeName(v):lower() ~= rem then
+				out[#out + 1] = v
+			end
+		end
+		saveIdx(out)
+	end
+
+	const function skin(obj, r, t)
+		const c = InstanceNew("UICorner")
+		c.CornerRadius = UDim.new(0, 6)
+		c.Parent = obj
+		const s = InstanceNew("UIStroke")
+		s.Color = col.st
+		s.Transparency = 0.18
+		s.Thickness = t or 1
+		s.Parent = obj
+		return obj
+	end
+
+	const function btn(par, txt, w, order)
+		const b = InstanceNew("TextButton")
+		b.AutoButtonColor = false
+		b.BackgroundColor3 = col.bg3
+		b.BorderSizePixel = 0
+		b.Font = Enum.Font.GothamSemibold
+		b.Text = txt
+		b.TextColor3 = col.tx
+		b.TextSize = 13
+		b.Size = UDim2.new(0, w or 64, 1, 0)
+		if order ~= nil then
+			b.LayoutOrder = order
+		end
+		b.Parent = par
+		skin(b, 8, 1)
+		b.MouseEnter:Connect(function()
+			if Services.TweenService then
+				Services.TweenService:Create(b, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundColor3 = col.bg3:Lerp(Color3.new(1, 1, 1), 0.06)}):Play()
+			else
+				b.BackgroundColor3 = col.bg3:Lerp(Color3.new(1, 1, 1), 0.06)
+			end
+		end)
+		b.MouseLeave:Connect(function()
+			const c = (sel and b.Name == sel) and col.on or col.bg3
+			if Services.TweenService then
+				Services.TweenService:Create(b, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundColor3 = c}):Play()
+			else
+				b.BackgroundColor3 = c
+			end
+		end)
+		return b
+	end
+
+	const root = InstanceNew("Frame")
+	root.BackgroundTransparency = 1
+	root.Size = UDim2.new(1, -14, 1, -14)
+	root.Position = UDim2.new(0, 7, 0, 7)
+	root.Parent = cont
+
+	const side = InstanceNew("Frame")
+	side.BackgroundColor3 = col.bg
+	side.BorderSizePixel = 0
+	side.Size = UDim2.new(0, 182, 1, 0)
+	side.Parent = root
+	skin(side, 10, 1)
+
+	const sideTitle = InstanceNew("TextLabel")
+	sideTitle.BackgroundTransparency = 1
+	sideTitle.Font = Enum.Font.GothamSemibold
+	sideTitle.Text = "Saved Files"
+	sideTitle.TextColor3 = col.tx
+	sideTitle.TextSize = 14
+	sideTitle.TextXAlignment = Enum.TextXAlignment.Left
+	sideTitle.Size = UDim2.new(1, -20, 0, 30)
+	sideTitle.Position = UDim2.new(0, 10, 0, 4)
+	sideTitle.Parent = side
+
+	const list = InstanceNew("ScrollingFrame")
+	list.BackgroundTransparency = 1
+	list.BorderSizePixel = 0
+	list.ScrollBarImageColor3 = Color3.fromRGB(125, 125, 135)
+	list.ScrollBarThickness = 4
+	list.Position = UDim2.new(0, 8, 0, 38)
+	list.Size = UDim2.new(1, -16, 1, -46)
+	list.CanvasSize = UDim2.new()
+	list.Parent = side
+
+	const listLay = InstanceNew("UIListLayout")
+	listLay.SortOrder = Enum.SortOrder.LayoutOrder
+	listLay.Padding = UDim.new(0, 6)
+	listLay.Parent = list
+
+	const main = InstanceNew("Frame")
+	main.BackgroundColor3 = col.bg
+	main.BorderSizePixel = 0
+	main.Position = UDim2.new(0, 192, 0, 0)
+	main.Size = UDim2.new(1, -192, 1, 0)
+	main.Parent = root
+	skin(main, 10, 1)
+
+	const tool = InstanceNew("Frame")
+	tool.BackgroundTransparency = 1
+	tool.Position = UDim2.new(0, 10, 0, 10)
+	tool.Size = UDim2.new(1, -20, 0, 30)
+	tool.Parent = main
+
+	const toolLay = InstanceNew("UIListLayout")
+	toolLay.FillDirection = Enum.FillDirection.Horizontal
+	toolLay.HorizontalAlignment = Enum.HorizontalAlignment.Left
+	toolLay.VerticalAlignment = Enum.VerticalAlignment.Center
+	toolLay.SortOrder = Enum.SortOrder.LayoutOrder
+	toolLay.Padding = UDim.new(0, 6)
+	toolLay.Parent = tool
+
+	const nameBox = InstanceNew("TextBox")
+	nameBox.BackgroundColor3 = col.bg2
+	nameBox.BorderSizePixel = 0
+	nameBox.ClearTextOnFocus = false
+	nameBox.Font = Enum.Font.Gotham
+	nameBox.PlaceholderText = "note"
+	nameBox.Text = "note.txt"
+	nameBox.TextColor3 = col.tx
+	nameBox.PlaceholderColor3 = col.sub
+	nameBox.TextSize = 13
+	nameBox.TextXAlignment = Enum.TextXAlignment.Left
+	nameBox.Size = UDim2.new(0, 135, 1, 0)
+	nameBox.LayoutOrder = 1
+	nameBox.Parent = tool
+	skin(nameBox, 8, 1)
+
+	const extBtn = btn(tool, selectedExt, 54, 2)
+	extBtn.Name = "ExtensionPicker"
+
+	const newBtn = btn(tool, "New", 40, 3)
+	const openBtn = btn(tool, "Open", 45, 4)
+	const saveBtn = btn(tool, "Save", 43, 5)
+	const clearBtn = btn(tool, "Clear", 45, 6)
+	const delBtn = btn(tool, "Del", 36, 7)
+	const refBtn = btn(tool, "Refresh", 55, 8)
+	const optBtn = btn(tool, "Options", 62, 9)
+
+	const extDrop = InstanceNew("Frame")
+	extDrop.Visible = false
+	extDrop.ClipsDescendants = true
+	extDrop.BackgroundColor3 = col.bg2
+	extDrop.BorderSizePixel = 0
+	extDrop.ZIndex = 40
+	extDrop.Position = UDim2.fromOffset(0, 0)
+	extDrop.Size = UDim2.new(0, 72, 0, math.min(#exts * 25 + 8, 160))
+	extDrop.Parent = main
+	skin(extDrop, 8, 1)
+
+	const extScroll = InstanceNew("ScrollingFrame")
+	extScroll.BackgroundTransparency = 1
+	extScroll.BorderSizePixel = 0
+	extScroll.ScrollBarThickness = 3
+	extScroll.ScrollBarImageColor3 = Color3.fromRGB(125, 125, 135)
+	extScroll.ZIndex = 41
+	extScroll.Size = UDim2.new(1, -8, 1, -8)
+	extScroll.Position = UDim2.new(0, 4, 0, 4)
+	extScroll.CanvasSize = UDim2.new()
+	extScroll.Parent = extDrop
+
+	const extLay = InstanceNew("UIListLayout")
+	extLay.Padding = UDim.new(0, 4)
+	extLay.SortOrder = Enum.SortOrder.LayoutOrder
+	extLay.Parent = extScroll
+
+	const function setPicker(ext, noRename)
+		selectedExt = normExt(ext)
+		extBtn.Text = selectedExt
+		if not noRename then
+			nameBox.Text = safeName(nameBox.Text, true)
+		end
+	end
+
+	const function setPickerFromName(n)
+		const e = tostring(n or ""):match("(%.[%w]+)$")
+		if e then
+			setPicker(e, true)
+		end
+	end
+
+	const function posExtDrop()
+		const mainPos = main.AbsolutePosition
+		const btnPos = extBtn.AbsolutePosition
+		const btnSize = extBtn.AbsoluteSize
+		const dropSize = extDrop.AbsoluteSize
+		const dropW = dropSize.X > 0 and dropSize.X or 72
+		const dropH = dropSize.Y > 0 and dropSize.Y or math.min(#exts * 25 + 8, 160)
+		local x = btnPos.X - mainPos.X
+		local y = btnPos.Y - mainPos.Y + btnSize.Y + 4
+		x = math.clamp(x, 4, math.max(4, main.AbsoluteSize.X - dropW - 8))
+		if y + dropH + 8 > main.AbsoluteSize.Y then
+			y = btnPos.Y - mainPos.Y - dropH - 4
+		end
+		extDrop.Position = UDim2.fromOffset(x, math.max(4, y))
+	end
+
+	const function toggleExt()
+		const state = not extDrop.Visible
+		if state then
+			posExtDrop()
+		end
+		extDrop.Visible = state
+	end
+
+	extBtn:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
+		if extDrop.Visible then
+			posExtDrop()
+		end
+	end)
+	main:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		if extDrop.Visible then
+			posExtDrop()
+		end
+	end)
+
+	for i, e in exts do
+		const item = btn(extScroll, e, 1, i)
+		item.Name = "Ext"..e:gsub("%.", "")
+		item.Size = UDim2.new(1, -2, 0, 23)
+		item.Text = e
+		item.TextSize = 12
+		item.ZIndex = 42
+		for _, d in NAmanage.QueryDescendants(item, "GuiObject") do
+			d.ZIndex = 42
+		end
+		MouseButtonFix(item, function()
+			setPicker(e)
+			extDrop.Visible = false
+		end)
+	end
+
+	extLay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		extScroll.CanvasSize = UDim2.new(0, 0, 0, extLay.AbsoluteContentSize.Y + 6)
+	end)
+	extScroll.CanvasSize = UDim2.new(0, 0, 0, extLay.AbsoluteContentSize.Y + 6)
+	MouseButtonFix(extBtn, toggleExt)
+
+	const body = InstanceNew("ScrollingFrame")
+	body.Active = true
+	body.BackgroundColor3 = col.bg2
+	body.BorderSizePixel = 0
+	body.CanvasSize = UDim2.new(0, 0, 0, 0)
+	body.Position = UDim2.new(0, 10, 0, 48)
+	body.ScrollBarImageColor3 = col.sub
+	body.ScrollBarThickness = 0
+	body.ScrollingDirection = Enum.ScrollingDirection.XY
+	body.Size = UDim2.new(1, -20, 1, -88)
+	body.Parent = main
+	skin(body, 10, 1)
+
+	const notepadLineScroll = InstanceNew("ScrollingFrame")
+	notepadLineScroll.Name = "LineScrollProxy"
+	notepadLineScroll.Active = false
+	notepadLineScroll.BackgroundTransparency = 1
+	notepadLineScroll.BorderSizePixel = 0
+	notepadLineScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	notepadLineScroll.Position = body.Position
+	notepadLineScroll.ScrollBarThickness = 0
+	notepadLineScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	notepadLineScroll.Size = body.Size
+	notepadLineScroll.Visible = false
+	notepadLineScroll.Parent = main
+
+	const function makeNotepadScrollBar(parent, name, axis)
+		const horizontal = axis == "X"
+		const bar = InstanceNew("Frame")
+		bar.Name = name
+		bar.BackgroundColor3 = col.bg3
+		bar.BorderSizePixel = 0
+		bar.Visible = false
+		bar.ZIndex = 35
+		bar.Parent = parent
+		skin(bar, 7, 1)
+
+		const upButton = InstanceNew("TextButton")
+		upButton.Name = horizontal and "Left" or "Up"
+		upButton.AutoButtonColor = false
+		upButton.BackgroundColor3 = col.bg2
+		upButton.BorderSizePixel = 0
+		upButton.Font = Enum.Font.GothamBold
+		upButton.Text = horizontal and "<" or "^"
+		upButton.TextColor3 = col.tx
+		upButton.TextSize = 10
+		upButton.ZIndex = 36
+		upButton.Parent = bar
+		skin(upButton, 5, 1)
+
+		const downButton = InstanceNew("TextButton")
+		downButton.Name = horizontal and "Right" or "Down"
+		downButton.AutoButtonColor = false
+		downButton.BackgroundColor3 = col.bg2
+		downButton.BorderSizePixel = 0
+		downButton.Font = Enum.Font.GothamBold
+		downButton.Text = horizontal and ">" or "v"
+		downButton.TextColor3 = col.tx
+		downButton.TextSize = 10
+		downButton.ZIndex = 36
+		downButton.Parent = bar
+		skin(downButton, 5, 1)
+
+		const track = InstanceNew("Frame")
+		track.Name = "Track"
+		track.BackgroundColor3 = col.bg
+		track.BorderSizePixel = 0
+		track.ZIndex = 36
+		track.Parent = bar
+		skin(track, 5, 1)
+
+		const thumb = InstanceNew("Frame")
+		thumb.Name = "Thumb"
+		thumb.BackgroundColor3 = col.sub
+		thumb.BorderSizePixel = 0
+		thumb.ZIndex = 37
+		thumb.Parent = track
+		skin(thumb, 5, 1)
+
+		if horizontal then
+			upButton.Position = UDim2.new(0, 0, 0, 0)
+			upButton.Size = UDim2.new(0, 16, 1, 0)
+			downButton.AnchorPoint = Vector2.new(1, 0)
+			downButton.Position = UDim2.new(1, 0, 0, 0)
+			downButton.Size = UDim2.new(0, 16, 1, 0)
+			track.Position = UDim2.new(0, 18, 0, 0)
+			track.Size = UDim2.new(1, -36, 1, 0)
+		else
+			upButton.Position = UDim2.new(0, 0, 0, 0)
+			upButton.Size = UDim2.new(1, 0, 0, 16)
+			downButton.AnchorPoint = Vector2.new(0, 1)
+			downButton.Position = UDim2.new(0, 0, 1, 0)
+			downButton.Size = UDim2.new(1, 0, 0, 16)
+			track.Position = UDim2.new(0, 0, 0, 18)
+			track.Size = UDim2.new(1, 0, 1, -36)
+		end
+
+		return {
+			bar = bar,
+			upButton = upButton,
+			downButton = downButton,
+			track = track,
+			thumb = thumb,
+		}
+	end
+
+	const notepadVScroll = makeNotepadScrollBar(main, "CustomScrollBar", "Y")
+	const notepadHScroll = makeNotepadScrollBar(main, "CustomHorizontalScrollBar", "X")
+	local notepadGetVisibleLines
+	local notepadGetTotalLines
+	local notepadGetViewLine
+	local notepadSetViewLine
+	const function layoutNotepadScrollBar(_, target, widgets)
+		const bar = widgets and widgets.bar
+		if not (target and bar and bar.Parent) then
+			return
+		end
+		const parentPos = bar.Parent.AbsolutePosition
+		const relX = math.floor(target.AbsolutePosition.X - parentPos.X + 0.5)
+		const relY = math.floor(target.AbsolutePosition.Y - parentPos.Y + 0.5)
+		const w = math.floor(target.AbsoluteSize.X + 0.5)
+		const h = math.floor(target.AbsoluteSize.Y + 0.5)
+		if bar == notepadHScroll.bar then
+			bar.Position = UDim2.new(0, relX, 0, relY + h - 16)
+			bar.Size = UDim2.new(0, math.max(48, w - 18), 0, 16)
+		else
+			bar.Position = UDim2.new(0, relX + w - 16, 0, relY)
+			bar.Size = UDim2.new(0, 16, 0, math.max(48, h - 18))
+		end
+	end
+
+	const notepadVerticalScroll = NAmanage.CustomScroll and NAmanage.CustomScroll.create and NAmanage.CustomScroll.create("notepad_editor_v", {
+		getWidgets = function()
+			return notepadVScroll
+		end,
+		getTarget = function()
+			return body
+		end,
+		getVisibleSpace = function()
+			return notepadGetVisibleLines and notepadGetVisibleLines() or 1
+		end,
+		getTotalSpace = function()
+			return notepadGetTotalLines and notepadGetTotalLines() or 1
+		end,
+		getPosition = function()
+			return math.max(0, (notepadGetViewLine and notepadGetViewLine() or 1) - 1)
+		end,
+		setPosition = function(_, _, pos)
+			if notepadSetViewLine then
+				notepadSetViewLine(math.floor((tonumber(pos) or 0) + 1.5))
+			end
+		end,
+		layoutForTarget = layoutNotepadScrollBar,
+		step = 3,
+	})
+	const notepadHorizontalScroll = NAmanage.CustomScroll and NAmanage.CustomScroll.create and NAmanage.CustomScroll.create("notepad_editor_h", {
+		axis = "X",
+		getWidgets = function()
+			return notepadHScroll
+		end,
+		getTarget = function()
+			return body
+		end,
+		layoutForTarget = layoutNotepadScrollBar,
+		step = 96,
+	})
+	if notepadVerticalScroll and notepadVerticalScroll.install then
+		notepadVerticalScroll.install()
+	end
+	if notepadHorizontalScroll and notepadHorizontalScroll.install then
+		notepadHorizontalScroll.install()
+	end
+
+	const box = InstanceNew("TextBox")
+	box.BackgroundTransparency = 1
+	box.ClearTextOnFocus = false
+	box.Font = Enum.Font.Code
+	box.MultiLine = true
+	box.RichText = false
+	box.PlaceholderText = "type here..."
+	box.PlaceholderColor3 = col.sub
+	box.Text = ""
+	box.TextColor3 = col.tx
+	box.TextSize = 15
+	box.TextXAlignment = Enum.TextXAlignment.Left
+	box.TextYAlignment = Enum.TextYAlignment.Top
+	box.TextWrapped = false
+	box.Size = UDim2.new(0, 320, 0, 200)
+	box.Position = UDim2.new(0, 8, 0, 8)
+	box.Parent = body
+
+
+	const fmt = {
+		popups = {},
+		headingSizes = { 28, 22, 19, 17, 15, 13 },
+	}
+
+	fmt.stripRich = function(source)
+		source = tostring(source or "")
+		source = source:gsub("<!%-%-NA_LINK:.-%-%->", "")
+		source = source:gsub("<font%s+[^>]->", "")
+		source = source:gsub("</font>", "")
+		source = source:gsub("<b>", ""):gsub("</b>", "")
+		source = source:gsub("<i>", ""):gsub("</i>", "")
+		source = source:gsub("<s>", ""):gsub("</s>", "")
+		source = source:gsub("<u>", ""):gsub("</u>", "")
+		return source
+	end
+
+	fmt.bar = InstanceNew("Frame")
+	fmt.bar.Name = "FormattingBar"
+	fmt.bar.BackgroundColor3 = col.bg2
+	fmt.bar.BackgroundTransparency = 0.1
+	fmt.bar.BorderSizePixel = 0
+	fmt.bar.ZIndex = 25
+	fmt.bar.Parent = main
+	skin(fmt.bar, 8, 1)
+
+	fmt.scroll = InstanceNew("ScrollingFrame")
+	fmt.scroll.Name = "FormattingTools"
+	fmt.scroll.Active = true
+	fmt.scroll.BackgroundTransparency = 1
+	fmt.scroll.BorderSizePixel = 0
+	fmt.scroll.CanvasSize = UDim2.new()
+	fmt.scroll.ScrollBarThickness = 0
+	fmt.scroll.ScrollingDirection = Enum.ScrollingDirection.X
+	fmt.scroll.Position = UDim2.new(0, 4, 0, 2)
+	fmt.scroll.Size = UDim2.new(1, -8, 1, -4)
+	fmt.scroll.ZIndex = 26
+	fmt.scroll.Parent = fmt.bar
+
+	fmt.layout = InstanceNew("UIListLayout")
+	fmt.layout.FillDirection = Enum.FillDirection.Horizontal
+	fmt.layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+	fmt.layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	fmt.layout.SortOrder = Enum.SortOrder.LayoutOrder
+	fmt.layout.Padding = UDim.new(0, 5)
+	fmt.layout.Parent = fmt.scroll
+
+	fmt.tip = InstanceNew("TextLabel")
+	fmt.tip.Name = "FormattingTooltip"
+	fmt.tip.Visible = false
+	fmt.tip.BackgroundColor3 = col.bg3
+	fmt.tip.BackgroundTransparency = 0.02
+	fmt.tip.BorderSizePixel = 0
+	fmt.tip.Font = Enum.Font.Gotham
+	fmt.tip.TextColor3 = col.tx
+	fmt.tip.TextSize = 11
+	fmt.tip.TextWrapped = false
+	fmt.tip.TextXAlignment = Enum.TextXAlignment.Center
+	fmt.tip.TextYAlignment = Enum.TextYAlignment.Center
+	fmt.tip.ZIndex = 95
+	fmt.tip.Parent = main
+	skin(fmt.tip, 6, 1)
+
+	fmt.hideTip = function()
+		fmt.tip.Visible = false
+	end
+
+	fmt.showTip = function(button, text)
+		if not (button and button.Parent and fmt.tip and fmt.tip.Parent) then
+			return
+		end
+		fmt.tip.Text = tostring(text or "")
+		local width = math.clamp(#fmt.tip.Text * 6 + 18, 70, 220)
+		fmt.tip.Size = UDim2.fromOffset(width, 24)
+		const mainPos = main.AbsolutePosition
+		const pos = button.AbsolutePosition
+		const size = button.AbsoluteSize
+		local x = pos.X - mainPos.X + size.X * 0.5 - width * 0.5
+		local y = pos.Y - mainPos.Y - 28
+		if y < 4 then
+			y = pos.Y - mainPos.Y + size.Y + 4
+		end
+		x = math.clamp(x, 4, math.max(4, main.AbsoluteSize.X - width - 4))
+		fmt.tip.Position = UDim2.fromOffset(math.floor(x + 0.5), math.floor(y + 0.5))
+		fmt.tip.Visible = true
+	end
+
+	fmt.makeTool = function(text, width, order, tooltip)
+		const b = btn(fmt.scroll, text, width, order)
+		b.Name = "Format"..tostring(order)
+		b.Size = UDim2.new(0, width, 1, 0)
+		b.TextSize = 12
+		b.ZIndex = 27
+		b.MouseEnter:Connect(function()
+			fmt.showTip(b, tooltip)
+		end)
+		b.MouseLeave:Connect(fmt.hideTip)
+		return b
+	end
+
+	fmt.heading = fmt.makeTool("Body v", 62, 1, "Headings")
+	fmt.list = fmt.makeTool("List v", 52, 2, "Lists")
+	fmt.bold = fmt.makeTool("B", 30, 3, "Bold (Ctrl+B)")
+	fmt.bold.Font = Enum.Font.GothamBold
+	fmt.italic = fmt.makeTool("I", 30, 4, "Italic (Ctrl+I)")
+	fmt.strike = fmt.makeTool("S", 30, 5, "Strikethrough (Ctrl+Shift+X)")
+	fmt.link = fmt.makeTool("Link", 42, 6, "Link (Ctrl+K)")
+	fmt.clear = fmt.makeTool("Clear", 48, 7, "Clear formatting (Ctrl+Space)")
+
+	fmt.strikeLine = InstanceNew("Frame")
+	fmt.strikeLine.AnchorPoint = Vector2.new(0.5, 0.5)
+	fmt.strikeLine.BackgroundColor3 = col.tx
+	fmt.strikeLine.BorderSizePixel = 0
+	fmt.strikeLine.Position = UDim2.new(0.5, 0, 0.5, 0)
+	fmt.strikeLine.Size = UDim2.new(0, 12, 0, 1)
+	fmt.strikeLine.ZIndex = 28
+	fmt.strikeLine.Parent = fmt.strike
+
+	fmt.layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		fmt.scroll.CanvasSize = UDim2.new(0, fmt.layout.AbsoluteContentSize.X + 8, 0, 0)
+	end)
+
+	fmt.positionPopup = function(popup, anchorButton)
+		if not (popup and anchorButton and popup.Parent and anchorButton.Parent) then
+			return
+		end
+		const mainPos = main.AbsolutePosition
+		const buttonPos = anchorButton.AbsolutePosition
+		const buttonSize = anchorButton.AbsoluteSize
+		const popupSize = popup.AbsoluteSize
+		local x = buttonPos.X - mainPos.X
+		local y = buttonPos.Y - mainPos.Y + buttonSize.Y + 5
+		local width = popupSize.X > 0 and popupSize.X or popup.Size.X.Offset
+		local height = popupSize.Y > 0 and popupSize.Y or popup.Size.Y.Offset
+		x = math.clamp(x, 4, math.max(4, main.AbsoluteSize.X - width - 6))
+		if y + height + 6 > main.AbsoluteSize.Y then
+			y = buttonPos.Y - mainPos.Y - height - 5
+		end
+		popup.Position = UDim2.fromOffset(math.floor(x + 0.5), math.max(4, math.floor(y + 0.5)))
+	end
+
+	fmt.hidePopups = function(except)
+		for _, popup in fmt.popups do
+			if popup ~= except then
+				popup.Visible = false
+			end
+		end
+		fmt.hideTip()
+	end
+
+	fmt.newPopup = function(name, width, height)
+		const popup = InstanceNew("Frame")
+		popup.Name = name
+		popup.Visible = false
+		popup.ClipsDescendants = true
+		popup.BackgroundColor3 = col.bg2
+		popup.BorderSizePixel = 0
+		popup.Size = UDim2.fromOffset(width, height)
+		popup.ZIndex = 70
+		popup.Parent = main
+		skin(popup, 8, 1)
+		fmt.popups[#fmt.popups + 1] = popup
+		return popup
+	end
+
+	fmt.headingPopup = fmt.newPopup("HeadingMenu", 166, 218)
+	fmt.headingPad = InstanceNew("UIPadding")
+	fmt.headingPad.PaddingTop = UDim.new(0, 6)
+	fmt.headingPad.PaddingBottom = UDim.new(0, 6)
+	fmt.headingPad.PaddingLeft = UDim.new(0, 6)
+	fmt.headingPad.PaddingRight = UDim.new(0, 6)
+	fmt.headingPad.Parent = fmt.headingPopup
+	fmt.headingLayout = InstanceNew("UIListLayout")
+	fmt.headingLayout.Padding = UDim.new(0, 3)
+	fmt.headingLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	fmt.headingLayout.Parent = fmt.headingPopup
+	fmt.headingOptions = {
+		{ "Title", 1 },
+		{ "Subtitle", 2 },
+		{ "Heading", 3 },
+		{ "Subheading", 4 },
+		{ "Section", 5 },
+		{ "Subsection", 6 },
+		{ "Body", 0 },
+	}
+
+	fmt.listPopup = fmt.newPopup("ListMenu", 180, 132)
+	fmt.listPad = InstanceNew("UIPadding")
+	fmt.listPad.PaddingTop = UDim.new(0, 6)
+	fmt.listPad.PaddingBottom = UDim.new(0, 6)
+	fmt.listPad.PaddingLeft = UDim.new(0, 6)
+	fmt.listPad.PaddingRight = UDim.new(0, 6)
+	fmt.listPad.Parent = fmt.listPopup
+	fmt.listLayout = InstanceNew("UIListLayout")
+	fmt.listLayout.Padding = UDim.new(0, 4)
+	fmt.listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	fmt.listLayout.Parent = fmt.listPopup
+
+	fmt.linkPopup = fmt.newPopup("LinkMenu", 246, 112)
+	fmt.linkLabel = InstanceNew("TextLabel")
+	fmt.linkLabel.BackgroundTransparency = 1
+	fmt.linkLabel.Font = Enum.Font.GothamSemibold
+	fmt.linkLabel.Position = UDim2.new(0, 10, 0, 7)
+	fmt.linkLabel.Size = UDim2.new(1, -20, 0, 20)
+	fmt.linkLabel.Text = "Insert link"
+	fmt.linkLabel.TextColor3 = col.tx
+	fmt.linkLabel.TextSize = 12
+	fmt.linkLabel.TextXAlignment = Enum.TextXAlignment.Left
+	fmt.linkLabel.ZIndex = 71
+	fmt.linkLabel.Parent = fmt.linkPopup
+	fmt.linkUrl = InstanceNew("TextBox")
+	fmt.linkUrl.BackgroundColor3 = col.bg3
+	fmt.linkUrl.BorderSizePixel = 0
+	fmt.linkUrl.ClearTextOnFocus = false
+	fmt.linkUrl.Font = Enum.Font.Gotham
+	fmt.linkUrl.PlaceholderText = "https://example.com"
+	fmt.linkUrl.PlaceholderColor3 = col.sub
+	fmt.linkUrl.Position = UDim2.new(0, 10, 0, 31)
+	fmt.linkUrl.Size = UDim2.new(1, -20, 0, 30)
+	fmt.linkUrl.Text = ""
+	fmt.linkUrl.TextColor3 = col.tx
+	fmt.linkUrl.TextSize = 12
+	fmt.linkUrl.TextXAlignment = Enum.TextXAlignment.Left
+	fmt.linkUrl.ZIndex = 71
+	fmt.linkUrl.Parent = fmt.linkPopup
+	skin(fmt.linkUrl, 6, 1)
+	fmt.linkApply = btn(fmt.linkPopup, "Apply", 74, 1)
+	fmt.linkApply.Position = UDim2.new(1, -158, 1, -38)
+	fmt.linkApply.Size = UDim2.fromOffset(70, 28)
+	fmt.linkApply.ZIndex = 71
+	fmt.linkCancel = btn(fmt.linkPopup, "Cancel", 74, 2)
+	fmt.linkCancel.Position = UDim2.new(1, -80, 1, -38)
+	fmt.linkCancel.Size = UDim2.fromOffset(70, 28)
+	fmt.linkCancel.ZIndex = 71
+
+
+	fmt.savedCursor = 1
+	fmt.savedSelectionStart = -1
+	fmt.captureSelection = function()
+		const liveCursor = tonumber(box.CursorPosition) or -1
+		const liveAnchor = tonumber(box.SelectionStart) or -1
+		if liveCursor > 0 then
+			fmt.savedCursor = liveCursor
+			if liveAnchor > 0 and liveAnchor ~= liveCursor then
+				fmt.savedSelectionStart = liveAnchor
+			elseif box:IsFocused() then
+				fmt.savedSelectionStart = -1
+			end
+		end
+	end
+
+	fmt.getSelection = function()
+		const text = tostring(box.Text or "")
+		fmt.captureSelection()
+		local cursor = tonumber(box.CursorPosition) or -1
+		local anchor = tonumber(box.SelectionStart) or -1
+		if cursor < 1 then
+			cursor = tonumber(fmt.savedCursor) or (#text + 1)
+		end
+		if anchor < 1 then
+			anchor = tonumber(fmt.savedSelectionStart) or -1
+		end
+		cursor = math.clamp(cursor, 1, #text + 1)
+		if anchor and anchor > 0 then
+			anchor = math.clamp(anchor, 1, #text + 1)
+		end
+		if anchor and anchor > 0 and anchor ~= cursor then
+			return text, math.min(anchor, cursor), math.max(anchor, cursor), true
+		end
+		return text, cursor, cursor, false
+	end
+
+	fmt.setSelection = function(startPos, endPos)
+		const limitNow = #tostring(box.Text or "") + 1
+		startPos = math.clamp(math.floor(tonumber(startPos) or 1), 1, limitNow)
+		endPos = math.clamp(math.floor(tonumber(endPos) or startPos), 1, limitNow)
+		fmt.savedCursor = endPos
+		fmt.savedSelectionStart = startPos ~= endPos and startPos or -1
+		Defer(function()
+			if not (box and box.Parent) then
+				return
+			end
+			const limit = #tostring(box.Text or "") + 1
+			startPos = math.clamp(startPos, 1, limit)
+			endPos = math.clamp(endPos, 1, limit)
+			pcall(function()
+				box:CaptureFocus()
+				box.SelectionStart = startPos
+				box.CursorPosition = endPos
+			end)
+		end)
+	end
+
+	fmt.replaceRange = function(firstPos, lastPos, replacement, selectFirst, selectLast)
+		const text = tostring(box.Text or "")
+		firstPos = math.clamp(math.floor(tonumber(firstPos) or 1), 1, #text + 1)
+		lastPos = math.clamp(math.floor(tonumber(lastPos) or firstPos), firstPos, #text + 1)
+		replacement = tostring(replacement or "")
+		box.Text = text:sub(1, firstPos - 1)..replacement..text:sub(lastPos)
+		if selectFirst ~= nil then
+			fmt.setSelection(selectFirst, selectLast or selectFirst)
+		else
+			fmt.setSelection(firstPos + #replacement, firstPos + #replacement)
+		end
+	end
+
+	fmt.wrapInline = function(openMark, closeMark, placeholder, statusName)
+		local text, firstPos, lastPos, selected = fmt.getSelection()
+		const chosen = selected and text:sub(firstPos, lastPos - 1) or ""
+		if selected and #chosen >= (#openMark + #closeMark) and chosen:sub(1, #openMark) == openMark and chosen:sub(-#closeMark) == closeMark then
+			const inner = chosen:sub(#openMark + 1, #chosen - #closeMark)
+			fmt.replaceRange(firstPos, lastPos, inner, firstPos, firstPos + #inner)
+			setStatus("Removed "..statusName.." formatting", col.sub)
+			return
+		end
+		if selected and firstPos > #openMark and text:sub(firstPos - #openMark, firstPos - 1) == openMark and text:sub(lastPos, lastPos + #closeMark - 1) == closeMark then
+			fmt.replaceRange(firstPos - #openMark, lastPos + #closeMark, chosen, firstPos - #openMark, firstPos - #openMark + #chosen)
+			setStatus("Removed "..statusName.." formatting", col.sub)
+			return
+		end
+		const inner = selected and chosen or tostring(placeholder or "text")
+		const replacement = openMark..inner..closeMark
+		fmt.replaceRange(firstPos, lastPos, replacement, firstPos + #openMark, firstPos + #openMark + #inner)
+		setStatus("Applied "..statusName.." formatting", col.ok)
+	end
+
+	fmt.getLineRange = function()
+		local text, firstPos, lastPos, selected = fmt.getSelection()
+		local before = text:sub(1, math.max(firstPos - 1, 0))
+		local lineStart = before:match(".*()\n")
+		lineStart = lineStart and (lineStart + 1) or 1
+		local probe = selected and math.max(firstPos, lastPos - 1) or firstPos
+		local nextBreak = text:find("\n", probe, true)
+		local lineEnd = nextBreak and (nextBreak - 1) or #text
+		return text, lineStart, lineEnd + 1
+	end
+
+	fmt.transformLines = function(transform)
+		local text, firstPos, lastPos = fmt.getLineRange()
+		const block = text:sub(firstPos, lastPos - 1)
+		const lines = {}
+		for line in (block.."\n"):gmatch("(.-)\n") do
+			lines[#lines + 1] = line
+		end
+		if #lines == 0 then
+			lines[1] = ""
+		end
+		for i, line in lines do
+			lines[i] = tostring(transform(line, i, lines) or "")
+		end
+		const replacement = Concat(lines, "\n")
+		fmt.replaceRange(firstPos, lastPos, replacement, firstPos, firstPos + #replacement)
+		return replacement
+	end
+
+	fmt.removeHeadingPrefix = function(content)
+		content = tostring(content or "")
+		local _, inner = content:match('^<font size="(%d+)"><b>(.*)</b></font>$')
+		if inner ~= nil then
+			return inner
+		end
+		local hashes, rest = content:match("^(#+)%s+(.*)$")
+		if hashes and #hashes <= 6 then
+			return rest
+		end
+		return content
+	end
+
+	fmt.stripLinePrefix = function(line)
+		local indent, content = tostring(line or ""):match("^(%s*)(.*)$")
+		indent = indent or ""
+		content = fmt.removeHeadingPrefix(content or "")
+		content = content:gsub("^•%s+", "")
+		content = content:gsub("^[-%*+]%s+", "")
+		content = content:gsub("^%d+[%.%)]%s+", "")
+		return indent, content
+	end
+
+	fmt.applyHeading = function(level)
+		level = math.clamp(math.floor(tonumber(level) or 0), 0, 6)
+		fmt.transformLines(function(line)
+			local indent, content = tostring(line or ""):match("^(%s*)(.*)$")
+			indent = indent or ""
+			content = fmt.removeHeadingPrefix(content or "")
+			if level == 0 then
+				return indent..content
+			end
+			return indent..string.rep("#", level).." "..content
+		end)
+		fmt.heading.Text = level == 0 and "Body v" or ("H"..tostring(level).." v")
+		fmt.headingPopup.Visible = false
+		setStatus(level == 0 and "Changed to body text" or ("Applied heading H"..tostring(level)), col.ok)
+	end
+
+	fmt.applyList = function(kind)
+		local number = 0
+		fmt.transformLines(function(line)
+			local indent, content = fmt.stripLinePrefix(line)
+			if kind == "bullet" then
+				return indent.."- "..content
+			end
+			number += 1
+			return indent..tostring(number)..". "..content
+		end)
+		fmt.listPopup.Visible = false
+		setStatus(kind == "bullet" and "Applied bulleted list" or "Applied numbered list", col.ok)
+	end
+
+	fmt.indentLines = function(direction)
+		fmt.transformLines(function(line)
+			line = tostring(line or "")
+			if direction > 0 then
+				return "    "..line
+			end
+			if line:sub(1, 1) == "\t" then
+				return line:sub(2)
+			end
+			local spaces = line:match("^( +)")
+			if spaces then
+				const remove = math.min(#spaces, 4)
+				return line:sub(remove + 1)
+			end
+			return line
+		end)
+		setStatus(direction > 0 and "Increased indent" or "Decreased indent", col.sub)
+	end
+
+	fmt.stripInline = function(source)
+		source = fmt.stripRich(source)
+		source = source:gsub("%[([^%]]-)%]%([^%)]-%)", "%1")
+		source = source:gsub("%*%*", "")
+		source = source:gsub("__", "")
+		source = source:gsub("~~", "")
+		source = source:gsub("`", "")
+		source = source:gsub("_", "")
+		source = source:gsub("%*", "")
+		return source
+	end
+
+	fmt.clearFormatting = function()
+		local text, firstPos, lastPos, selected = fmt.getSelection()
+		if selected then
+			local chosen = text:sub(firstPos, lastPos - 1)
+			const cleaned = fmt.stripInline(chosen:gsub("(^[^\n]*)", function(line)
+				local indent, content = fmt.stripLinePrefix(line)
+				return indent..content
+			end):gsub("\n([^\n]*)", function(line)
+				local indent, content = fmt.stripLinePrefix(line)
+				return "\n"..indent..content
+			end))
+			fmt.replaceRange(firstPos, lastPos, cleaned, firstPos, firstPos + #cleaned)
+		else
+			fmt.transformLines(function(line)
+				local indent, content = fmt.stripLinePrefix(line)
+				return indent..fmt.stripInline(content)
+			end)
+		end
+		setStatus("Cleared formatting", col.sub)
+	end
+
+	fmt.currentLine = function()
+		local text, firstPos = fmt.getSelection()
+		local before = text:sub(1, math.max(firstPos - 1, 0))
+		local lineStart = before:match(".*()\n")
+		lineStart = lineStart and lineStart + 1 or 1
+		local nextBreak = text:find("\n", firstPos, true)
+		return text:sub(lineStart, nextBreak and nextBreak - 1 or #text)
+	end
+
+	fmt.syncContext = function()
+		const line = fmt.currentLine()
+		const richSize = tonumber(line:match('^%s*<font size="(%d+)"><b>'))
+		if richSize then
+			local level = 0
+			for i, size in fmt.headingSizes do
+				if tonumber(size) == richSize then
+					level = i
+					break
+				end
+			end
+			fmt.heading.Text = level > 0 and ("H"..tostring(level).." v") or "Body v"
+			return
+		end
+		const hashes = line:match("^%s*(#+)%s+")
+		fmt.heading.Text = hashes and #hashes <= 6 and ("H"..tostring(#hashes).." v") or "Body v"
+	end
+
+	fmt.hasListContext = function()
+		const line = fmt.currentLine()
+		return line:match("^%s*•%s+") ~= nil or line:match("^%s*[-%*+]%s+") ~= nil or line:match("^%s*%d+[%.%)]%s+") ~= nil
+	end
+
+	fmt.setListIndentEnabled = function(enabled)
+		for _, b in { fmt.indentMore, fmt.indentLess } do
+			if b then
+				b.Active = enabled
+				b.TextColor3 = enabled and col.tx or col.sub:Lerp(col.bg2, 0.25)
+				b.BackgroundColor3 = enabled and col.bg3 or col.bg2
+			end
+		end
+	end
+
+	for order, entry in fmt.headingOptions do
+		const item = btn(fmt.headingPopup, entry[1], 1, order)
+		item.Size = UDim2.new(1, 0, 0, 26)
+		item.TextXAlignment = Enum.TextXAlignment.Left
+		item.TextSize = order == 1 and 18 or (order == 2 and 16 or (order == 3 and 14 or 12))
+		item.ZIndex = 71
+		MouseButtonFix(item, function()
+			fmt.applyHeading(entry[2])
+		end)
+	end
+
+	fmt.bulletItem = btn(fmt.listPopup, "Bulleted list", 1, 1)
+	fmt.bulletItem.Size = UDim2.new(1, 0, 0, 27)
+	fmt.bulletItem.TextXAlignment = Enum.TextXAlignment.Left
+	fmt.bulletItem.ZIndex = 71
+	fmt.numberItem = btn(fmt.listPopup, "Numbered list", 1, 2)
+	fmt.numberItem.Size = UDim2.new(1, 0, 0, 27)
+	fmt.numberItem.TextXAlignment = Enum.TextXAlignment.Left
+	fmt.numberItem.ZIndex = 71
+	fmt.indentMore = btn(fmt.listPopup, "Increase indent", 1, 3)
+	fmt.indentMore.Size = UDim2.new(1, 0, 0, 27)
+	fmt.indentMore.TextXAlignment = Enum.TextXAlignment.Left
+	fmt.indentMore.ZIndex = 71
+	fmt.indentLess = btn(fmt.listPopup, "Decrease indent", 1, 4)
+	fmt.indentLess.Size = UDim2.new(1, 0, 0, 27)
+	fmt.indentLess.TextXAlignment = Enum.TextXAlignment.Left
+	fmt.indentLess.ZIndex = 71
+
+	fmt.showLink = function()
+		fmt.hidePopups(fmt.linkPopup)
+		fmt.positionPopup(fmt.linkPopup, fmt.link)
+		fmt.linkPopup.Visible = true
+		if type(getclipboard) == "function" then
+			local ok, clip = pcall(getclipboard)
+			if ok and type(clip) == "string" and clip:match("^https?://") then
+				fmt.linkUrl.Text = clip
+			end
+		end
+		Defer(function()
+			if fmt.linkPopup.Visible then
+				pcall(function() fmt.linkUrl:CaptureFocus() end)
+			end
+		end)
+	end
+
+	fmt.applyLink = function()
+		const url = trim(fmt.linkUrl.Text)
+		if url == "" then
+			setStatus("Enter a link URL", col.err)
+			return
+		end
+		local text, firstPos, lastPos, selected = fmt.getSelection()
+		const chosen = selected and text:sub(firstPos, lastPos - 1) or "link text"
+		const replacement = "["..chosen.."]("..url..")"
+		fmt.replaceRange(firstPos, lastPos, replacement, firstPos + 1, firstPos + 1 + #chosen)
+		fmt.linkPopup.Visible = false
+		setStatus("Inserted Markdown link", col.ok)
+	end
+
+
+	MouseButtonFix(fmt.heading, function()
+		const nextState = not fmt.headingPopup.Visible
+		fmt.hidePopups(fmt.headingPopup)
+		if nextState then
+			fmt.positionPopup(fmt.headingPopup, fmt.heading)
+		end
+		fmt.headingPopup.Visible = nextState
+	end)
+	MouseButtonFix(fmt.list, function()
+		const nextState = not fmt.listPopup.Visible
+		fmt.hidePopups(fmt.listPopup)
+		if nextState then
+			fmt.setListIndentEnabled(fmt.hasListContext())
+			fmt.positionPopup(fmt.listPopup, fmt.list)
+		end
+		fmt.listPopup.Visible = nextState
+	end)
+	MouseButtonFix(fmt.bold, function()
+		fmt.hidePopups()
+		fmt.wrapInline("**", "**", "bold text", "bold")
+	end)
+	MouseButtonFix(fmt.italic, function()
+		fmt.hidePopups()
+		fmt.wrapInline("*", "*", "italic text", "italic")
+	end)
+	MouseButtonFix(fmt.strike, function()
+		fmt.hidePopups()
+		fmt.wrapInline("~~", "~~", "strikethrough text", "strikethrough")
+	end)
+	MouseButtonFix(fmt.link, fmt.showLink)
+	MouseButtonFix(fmt.clear, function()
+		fmt.hidePopups()
+		fmt.clearFormatting()
+	end)
+	MouseButtonFix(fmt.bulletItem, function()
+		fmt.applyList("bullet")
+	end)
+	MouseButtonFix(fmt.numberItem, function()
+		fmt.applyList("number")
+	end)
+	MouseButtonFix(fmt.indentMore, function()
+		if fmt.hasListContext() then
+			fmt.indentLines(1)
+		end
+	end)
+	MouseButtonFix(fmt.indentLess, function()
+		if fmt.hasListContext() then
+			fmt.indentLines(-1)
+		end
+	end)
+	MouseButtonFix(fmt.linkApply, fmt.applyLink)
+	MouseButtonFix(fmt.linkCancel, function()
+		fmt.linkPopup.Visible = false
+	end)
+
+	box:GetPropertyChangedSignal("CursorPosition"):Connect(function()
+		fmt.captureSelection()
+		fmt.syncContext()
+	end)
+	pcall(function()
+		box:GetPropertyChangedSignal("SelectionStart"):Connect(function()
+			fmt.captureSelection()
+			fmt.syncContext()
+		end)
+	end)
+
+	const optionsDrop = InstanceNew("Frame")
+	optionsDrop.Visible = false
+	optionsDrop.ClipsDescendants = true
+	optionsDrop.BackgroundColor3 = col.bg2
+	optionsDrop.BorderSizePixel = 0
+	optionsDrop.ZIndex = 43
+	optionsDrop.Size = UDim2.new(0, 188, 0, 118)
+	optionsDrop.Parent = main
+	skin(optionsDrop, 8, 1)
+
+	const optionsPad = InstanceNew("UIPadding")
+	optionsPad.PaddingBottom = UDim.new(0, 8)
+	optionsPad.PaddingLeft = UDim.new(0, 8)
+	optionsPad.PaddingRight = UDim.new(0, 8)
+	optionsPad.PaddingTop = UDim.new(0, 8)
+	optionsPad.Parent = optionsDrop
+
+	const optionsLay = InstanceNew("UIListLayout")
+	optionsLay.Padding = UDim.new(0, 6)
+	optionsLay.SortOrder = Enum.SortOrder.LayoutOrder
+	optionsLay.Parent = optionsDrop
+
+	const fontRow = InstanceNew("Frame")
+	fontRow.BackgroundTransparency = 1
+	fontRow.BorderSizePixel = 0
+	fontRow.LayoutOrder = 1
+	fontRow.Size = UDim2.new(1, 0, 0, 25)
+	fontRow.ZIndex = 44
+	fontRow.Parent = optionsDrop
+
+	const fontLabel = InstanceNew("TextLabel")
+	fontLabel.BackgroundTransparency = 1
+	fontLabel.BorderSizePixel = 0
+	fontLabel.Font = Enum.Font.Gotham
+	fontLabel.Size = UDim2.new(1, -96, 1, 0)
+	fontLabel.Text = "Font"
+	fontLabel.TextColor3 = col.tx
+	fontLabel.TextSize = 12
+	fontLabel.TextXAlignment = Enum.TextXAlignment.Left
+	fontLabel.ZIndex = 44
+	fontLabel.Parent = fontRow
+
+	const fontMinus = btn(fontRow, "-", 28, 1)
+	fontMinus.AnchorPoint = Vector2.new(1, 0)
+	fontMinus.Position = UDim2.new(1, -64, 0, 0)
+	fontMinus.Size = UDim2.new(0, 28, 1, 0)
+	fontMinus.ZIndex = 44
+	const fontValue = InstanceNew("TextLabel")
+	fontValue.BackgroundTransparency = 1
+	fontValue.BorderSizePixel = 0
+	fontValue.Font = Enum.Font.GothamSemibold
+	fontValue.Position = UDim2.new(1, -62, 0, 0)
+	fontValue.Size = UDim2.new(0, 30, 1, 0)
+	fontValue.Text = ""
+	fontValue.TextColor3 = col.sub
+	fontValue.TextSize = 12
+	fontValue.TextXAlignment = Enum.TextXAlignment.Center
+	fontValue.ZIndex = 44
+	fontValue.Parent = fontRow
+	const fontPlus = btn(fontRow, "+", 28, 2)
+	fontPlus.AnchorPoint = Vector2.new(1, 0)
+	fontPlus.Position = UDim2.new(1, 0, 0, 0)
+	fontPlus.Size = UDim2.new(0, 28, 1, 0)
+	fontPlus.ZIndex = 44
+
+	const wrapBtn = btn(optionsDrop, "Wrap: Off", 1, 2)
+	wrapBtn.Size = UDim2.new(1, 0, 0, 25)
+	wrapBtn.ZIndex = 44
+	const copyBtn = btn(optionsDrop, "Copy Text", 1, 3)
+	copyBtn.Size = UDim2.new(1, 0, 0, 25)
+	copyBtn.ZIndex = 44
+	const pasteBtn = btn(optionsDrop, "Paste Clipboard", 1, 4)
+	pasteBtn.Size = UDim2.new(1, 0, 0, 25)
+	pasteBtn.ZIndex = 44
+
+	const function applyNotepadOptions()
+		NAStuff.NotepadSettings.fontSize = math.clamp(math.floor((tonumber(NAStuff.NotepadSettings.fontSize) or 15) + 0.5), 11, 24)
+		box.TextSize = NAStuff.NotepadSettings.fontSize
+		box.TextWrapped = NAStuff.NotepadSettings.wrap == true
+		fontValue.Text = tostring(NAStuff.NotepadSettings.fontSize)
+		wrapBtn.Text = "Wrap: "..(NAStuff.NotepadSettings.wrap and "On" or "Off")
+		wrapBtn.BackgroundColor3 = NAStuff.NotepadSettings.wrap and col.on or col.bg3
+	end
+
+	const function posOptionsDrop()
+		const mainPos = main.AbsolutePosition
+		const btnPos = optBtn.AbsolutePosition
+		const btnSize = optBtn.AbsoluteSize
+		const dropW = optionsDrop.AbsoluteSize.X > 0 and optionsDrop.AbsoluteSize.X or 188
+		const dropH = optionsDrop.AbsoluteSize.Y > 0 and optionsDrop.AbsoluteSize.Y or 118
+		local x = btnPos.X - mainPos.X
+		local y = btnPos.Y - mainPos.Y + btnSize.Y + 4
+		x = math.clamp(x, 4, math.max(4, main.AbsoluteSize.X - dropW - 8))
+		if y + dropH + 8 > main.AbsoluteSize.Y then
+			y = btnPos.Y - mainPos.Y - dropH - 4
+		end
+		optionsDrop.Position = UDim2.fromOffset(x, math.max(4, y))
+	end
+
+	const bottom = InstanceNew("Frame")
+	bottom.BackgroundTransparency = 1
+	bottom.Position = UDim2.new(0, 10, 1, -32)
+	bottom.Size = UDim2.new(1, -20, 0, 24)
+	bottom.Parent = main
+
+	const status = InstanceNew("TextLabel")
+	status.BackgroundTransparency = 1
+	status.Font = Enum.Font.Gotham
+	status.Text = fsOk and ("Ready | "..dir) or "Filesystem unavailable"
+	status.TextColor3 = fsOk and col.sub or col.err
+	status.TextSize = 12
+	status.TextXAlignment = Enum.TextXAlignment.Left
+	status.Size = UDim2.new(1, -180, 1, 0)
+	status.Parent = bottom
+	NAStuff.NotepadStatusLabel = status
+
+	const count = InstanceNew("TextLabel")
+	count.BackgroundTransparency = 1
+	count.Font = Enum.Font.Gotham
+	count.Text = "0 chars | 0 lines"
+	count.TextColor3 = col.sub
+	count.TextSize = 12
+	count.TextXAlignment = Enum.TextXAlignment.Right
+	count.AnchorPoint = Vector2.new(1, 0)
+	count.Position = UDim2.new(1, 0, 0, 0)
+	count.Size = UDim2.new(0, 170, 1, 0)
+	count.Parent = bottom
+
+	const pageBar = InstanceNew("Frame")
+	pageBar.BackgroundTransparency = 1
+	pageBar.BorderSizePixel = 0
+	pageBar.AnchorPoint = Vector2.new(0.5, 0)
+	pageBar.Position = UDim2.new(0.5, 30, 0, 0)
+	pageBar.Size = UDim2.new(0, 174, 1, 0)
+	pageBar.Parent = bottom
+
+	const pageLay = InstanceNew("UIListLayout")
+	pageLay.FillDirection = Enum.FillDirection.Horizontal
+	pageLay.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	pageLay.VerticalAlignment = Enum.VerticalAlignment.Center
+	pageLay.SortOrder = Enum.SortOrder.LayoutOrder
+	pageLay.Padding = UDim.new(0, 5)
+	pageLay.Parent = pageBar
+
+	const pagePrev = btn(pageBar, "<", 34, 1)
+	const pageText = InstanceNew("TextLabel")
+	pageText.BackgroundTransparency = 1
+	pageText.BorderSizePixel = 0
+	pageText.Font = Enum.Font.GothamSemibold
+	pageText.LayoutOrder = 2
+	pageText.Size = UDim2.new(0, 86, 1, 0)
+	pageText.Text = "Lines 1-1/1"
+	pageText.TextColor3 = col.sub
+	pageText.TextSize = 12
+	pageText.Parent = pageBar
+	const pageNext = btn(pageBar, ">", 34, 3)
+
+	const function setBtnSize(b, w, s)
+		if not b then
+			return
+		end
+		b.Size = UDim2.new(0, w, 1, 0)
+		b.TextSize = s
+	end
+
+	const function updateNotepadLayout()
+		const w = frame.AbsoluteSize.X
+		const h = frame.AbsoluteSize.Y
+		const compact = w < 720 or h < 390
+		const tiny = w < 590
+		const micro = w < 430
+		const pad = compact and 6 or 7
+		const gap = compact and 8 or 10
+		root.Position = UDim2.new(0, pad, 0, pad)
+		root.Size = UDim2.new(1, -pad * 2, 1, -pad * 2)
+		if tiny then
+			side.Visible = false
+			main.Position = UDim2.new(0, 0, 0, 0)
+			main.Size = UDim2.new(1, 0, 1, 0)
+		else
+			const sideW = compact and 150 or 182
+			side.Visible = true
+			side.Size = UDim2.new(0, sideW, 1, 0)
+			main.Position = UDim2.new(0, sideW + gap, 0, 0)
+			main.Size = UDim2.new(1, -(sideW + gap), 1, 0)
+		end
+		const inner = compact and 8 or 10
+		const toolH = compact and 28 or 30
+		const txtSize = compact and 12 or 13
+		tool.Position = UDim2.new(0, inner, 0, inner)
+		tool.Size = UDim2.new(1, -inner * 2, 0, toolH)
+		toolLay.Padding = UDim.new(0, compact and 4 or 6)
+		nameBox.TextSize = txtSize
+		nameBox.Size = UDim2.new(0, micro and 82 or (tiny and 100 or (compact and 110 or 135)), 1, 0)
+		setBtnSize(extBtn, micro and 42 or (tiny and 44 or (compact and 46 or 54)), txtSize)
+		setBtnSize(newBtn, micro and 32 or (tiny and 34 or (compact and 36 or 40)), txtSize)
+		setBtnSize(openBtn, micro and 36 or (tiny and 40 or (compact and 42 or 45)), txtSize)
+		setBtnSize(saveBtn, micro and 34 or (tiny and 36 or (compact and 38 or 43)), txtSize)
+		setBtnSize(clearBtn, micro and 36 or (tiny and 40 or (compact and 42 or 45)), txtSize)
+		setBtnSize(delBtn, micro and 28 or (tiny and 30 or (compact and 32 or 36)), txtSize)
+		if micro then
+			refBtn.Visible = false
+			refBtn.Size = UDim2.new(0, 0, 1, 0)
+			optBtn.Visible = false
+			optBtn.Size = UDim2.new(0, 0, 1, 0)
+			optionsDrop.Visible = false
+		else
+			refBtn.Visible = true
+			setBtnSize(refBtn, tiny and 44 or (compact and 50 or 55), txtSize)
+			optBtn.Visible = true
+			setBtnSize(optBtn, tiny and 50 or (compact and 56 or 62), txtSize)
+		end
+		const fmtH = compact and 28 or 30
+		fmt.bar.Position = UDim2.new(0, inner, 0, inner + toolH + 6)
+		fmt.bar.Size = UDim2.new(1, -inner * 2, 0, fmtH)
+		fmt.scroll.CanvasSize = UDim2.new(0, fmt.layout.AbsoluteContentSize.X + 8, 0, 0)
+		const bodyTop = inner + toolH + fmtH + 14
+		body.Position = UDim2.new(0, inner, 0, bodyTop)
+		body.Size = UDim2.new(1, -inner * 2, 1, -(bodyTop + (compact and 36 or 40)))
+		body.ScrollBarThickness = 0
+		notepadLineScroll.Position = body.Position
+		notepadLineScroll.Size = body.Size
+		bottom.Position = UDim2.new(0, inner, 1, compact and -28 or -32)
+		bottom.Size = UDim2.new(1, -inner * 2, 0, 24)
+		status.TextSize = compact and 11 or 12
+		count.TextSize = compact and 11 or 12
+		count.Size = UDim2.new(0, micro and 112 or 170, 1, 0)
+		status.Size = UDim2.new(1, -(micro and 116 or 180), 1, 0)
+		pageBar.Position = UDim2.new(0.5, tiny and 0 or 30, 0, 0)
+		pageBar.Size = UDim2.new(0, micro and 142 or 174, 1, 0)
+		pageText.Size = UDim2.new(0, micro and 74 or 86, 1, 0)
+		pageText.TextSize = compact and 11 or 12
+		setBtnSize(pagePrev, micro and 28 or 34, compact and 11 or 12)
+		setBtnSize(pageNext, micro and 28 or 34, compact and 11 or 12)
+		applyNotepadOptions()
+		if extDrop.Visible then
+			posExtDrop()
+		end
+		if optionsDrop.Visible then
+			posOptionsDrop()
+		end
+		for _, popup in fmt.popups do
+			if popup.Visible then
+				if popup == fmt.headingPopup then
+					fmt.positionPopup(popup, fmt.heading)
+				elseif popup == fmt.listPopup then
+					fmt.positionPopup(popup, fmt.list)
+				elseif popup == fmt.linkPopup then
+					fmt.positionPopup(popup, fmt.link)
+				end
+			end
+		end
+	end
+
+	const function lineCount(s)
+
+		s = tostring(s or "")
+		if s == "" then
+			return 0
+		end
+		return select(2, s:gsub("\n", "")) + 1
+	end
+
+	const notepadLineBuffer = 24
+	local chunks = { "" }
+	local page = 1
+	local visibleEndLine = 1
+	local notepadLineHeight = 19
+	local loadingText = false
+
+	const function splitText(source)
+		source = tostring(source or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+		const out = {}
+		for line in (source.."\n"):gmatch("(.-)\n") do
+			out[#out + 1] = line
+		end
+		if #out == 0 then
+			out[1] = ""
+		end
+		return out
+	end
+
+	const function joinText(lines)
+		if type(lines) ~= "table" or #lines == 0 then
+			return ""
+		end
+		return Concat(lines, "\n")
+	end
+
+	const function sliceText(lines, firstLine, lastLine)
+		const out = {}
+		firstLine = math.max(1, tonumber(firstLine) or 1)
+		lastLine = math.max(firstLine, tonumber(lastLine) or firstLine)
+		for line = firstLine, lastLine do
+			out[#out + 1] = tostring(lines[line] or "")
+		end
+		if #out == 0 then
+			out[1] = ""
+		end
+		return Concat(out, "\n")
+	end
+
+	const function replaceTextRange(lines, firstLine, lastLine, text)
+		lines = type(lines) == "table" and lines or { "" }
+		const inserted = splitText(text)
+		const rebuilt = {}
+		firstLine = math.clamp(tonumber(firstLine) or 1, 1, math.max(#lines + 1, 1))
+		lastLine = math.clamp(tonumber(lastLine) or (firstLine - 1), firstLine - 1, math.max(#lines, firstLine - 1))
+		for line = 1, firstLine - 1 do
+			rebuilt[#rebuilt + 1] = tostring(lines[line] or "")
+		end
+		for _, lineText in inserted do
+			rebuilt[#rebuilt + 1] = tostring(lineText or "")
+		end
+		for line = lastLine + 1, #lines do
+			rebuilt[#rebuilt + 1] = tostring(lines[line] or "")
+		end
+		if #rebuilt == 0 then
+			rebuilt[1] = ""
+		end
+		return rebuilt
+	end
+
+	const function syncVisibleNotepadText()
+		if not loadingText then
+			const oldEnd = visibleEndLine
+			chunks = replaceTextRange(chunks, page, oldEnd, box.Text or "")
+			visibleEndLine = page + #splitText(box.Text or "") - 1
+		end
+	end
+
+	const function countNotepadChars()
+		local total = math.max(#chunks - 1, 0)
+		for _, line in chunks do
+			total += #tostring(line or "")
+		end
+		return total
+	end
+
+	const function buildFullText(useBox)
+		if useBox and not loadingText then
+			syncVisibleNotepadText()
+		end
+		return joinText(chunks)
+	end
+
+	const function getNotepadLineHeight()
+		const fallback = tonumber(box.TextSize) or 15
+		const widthService = Services.TextService or TextServiceRef
+		if widthService and widthService.GetTextSize then
+			local ok, measured = pcall(function()
+				return widthService:GetTextSize("M", box.TextSize, box.Font, Vector2.new(1000, 1000)).Y
+			end)
+			if ok and type(measured) == "number" then
+				return math.max(1, math.ceil(measured))
+			end
+		end
+		return math.max(1, math.ceil(fallback))
+	end
+
+	const function measureNotepadText(source)
+		const lineHeight = getNotepadLineHeight()
+		local longest = 0
+		local lines = 0
+		for line in ((source or "").."\n"):gmatch("(.-)\n") do
+			lines += 1
+			local width = 0
+			if Services.TextService and Services.TextService.GetTextSize then
+				local ok, res = pcall(function()
+					return Services.TextService:GetTextSize((line ~= "" and line or " "), box.TextSize, box.Font, Vector2.new(10000, 10000)).X
+				end)
+				if ok and type(res) == "number" then
+					width = res
+				end
+			end
+			if width <= 0 then
+				width = #line * math.max(box.TextSize * 0.62, 8)
+			end
+			if width > longest then
+				longest = width
+			end
+		end
+		if lines <= 0 then
+			lines = 1
+		end
+		const viewWidth = math.max(1, (body.AbsoluteSize.X or 0) - 18)
+		const w = math.max(viewWidth, longest + 12)
+		const h = math.max(math.max(body.AbsoluteSize.Y - 30, 1), lines * lineHeight + 18)
+		return w, h
+	end
+
+	const function getNotepadViewportHeight()
+		local h = (body.AbsoluteSize.Y or 0) - 30
+		if NAmanage.virtView then
+			h = NAmanage.virtView(notepadLineScroll, h, notepadLineScroll.CanvasSize.Y.Offset, getNotepadLineHeight() * 3)
+		end
+		return math.max(1, h)
+	end
+
+	const function getNotepadWindowMetrics()
+		const lineHeight = getNotepadLineHeight()
+		const visible = math.max(1, math.floor(getNotepadViewportHeight() / math.max(lineHeight, 1)))
+		return lineHeight, visible
+	end
+
+	const function getNotepadVisibleLine(totalLines)
+		const lineHeight = getNotepadWindowMetrics()
+		const total = math.max(tonumber(totalLines) or 1, 1)
+		const notepadLinePos = NAmanage.GetLogicalCanvasPosition and NAmanage.GetLogicalCanvasPosition(notepadLineScroll) or notepadLineScroll.CanvasPosition
+		return math.clamp(math.floor(math.max(notepadLinePos.Y, 0) / math.max(lineHeight, 1)) + 1, 1, total)
+	end
+
+	const function getNotepadWindowRange(totalLines, firstVisibleLine)
+		local _, visibleLines = getNotepadWindowMetrics()
+		const total = math.max(tonumber(totalLines) or 1, 1)
+		const firstVisible = math.clamp(tonumber(firstVisibleLine) or getNotepadVisibleLine(total), 1, total)
+		const lastVisible = math.clamp(firstVisible + visibleLines - 1, firstVisible, total)
+		const firstRender = firstVisible
+		const lastRender = lastVisible
+		return firstRender, lastRender, firstVisible, lastVisible
+	end
+
+	const function updEditorSize()
+		local w, h = measureNotepadText((box.RichText and box.ContentText) or box.Text or "")
+		if box.RichText and box.TextBounds then
+			w = math.max(w, math.ceil(box.TextBounds.X + 18))
+			h = math.max(h, math.ceil(box.TextBounds.Y + 18))
+		end
+		notepadLineHeight = getNotepadLineHeight()
+		const fullHeight = math.max(getNotepadViewportHeight(), math.max(#chunks, 1) * notepadLineHeight + 18)
+		local _, visibleLines = getNotepadWindowMetrics()
+		const virtualTotal = math.max(#chunks + 1, visibleLines)
+		const maxTopY = math.max(0, (virtualTotal - visibleLines) * notepadLineHeight)
+		const proxyHeight = math.max(fullHeight + notepadLineHeight + 16, (body.AbsoluteSize.Y or 0) + maxTopY + notepadLineHeight)
+		box.Position = UDim2.new(0, 8, 0, 8)
+		box.Size = UDim2.new(0, w, 0, h)
+		const canvasWidth = math.max(body.AbsoluteSize.X or 1, 8 + w + 2)
+		body.CanvasSize = UDim2.new(0, canvasWidth, 0, math.max(body.AbsoluteSize.Y, 1))
+		notepadLineScroll.Position = body.Position
+		notepadLineScroll.Size = body.Size
+		notepadLineScroll.CanvasSize = UDim2.new(0, 0, 0, proxyHeight)
+		if NAmanage.CustomScroll and NAmanage.CustomScroll.refreshByTarget then
+			NAmanage.CustomScroll.refreshByTarget(body)
+			NAmanage.CustomScroll.refreshByTarget(notepadLineScroll)
+		end
+	end
+
+	const function updCount()
+		syncVisibleNotepadText()
+		count.Text = tostring(countNotepadChars()).." chars | "..tostring(math.max(#chunks, 1)).." lines"
+		page = math.clamp(tonumber(page) or 1, 1, math.max(#chunks, 1))
+		visibleEndLine = math.clamp(visibleEndLine, page, math.max(#chunks, 1))
+		local _, _, firstVisible, lastVisible = getNotepadWindowRange(math.max(#chunks, 1))
+		pageText.Text = "Lines "..tostring(firstVisible).."-"..tostring(lastVisible).."/"..tostring(math.max(#chunks, 1))
+		pageBar.Visible = #chunks > math.max(1, lastVisible - firstVisible + 1)
+		pagePrev.Visible = false
+		pageNext.Visible = false
+		updEditorSize()
+	end
+
+	const function loadPage(nextPage, preserveScroll)
+		const total = math.max(#chunks, 1)
+		const lineHeight = getNotepadWindowMetrics()
+		const visibleLine = preserveScroll == true and getNotepadVisibleLine(total) or math.clamp(tonumber(nextPage) or page or 1, 1, total)
+		local firstRender, lastRender, firstVisible = getNotepadWindowRange(total, visibleLine)
+		page = firstRender
+		visibleEndLine = lastRender
+		loadingText = true
+		if preserveScroll ~= true then
+			if NAmanage.SetLogicalCanvasPosition then
+				NAmanage.SetLogicalCanvasPosition(notepadLineScroll, 0, math.max(0, (firstVisible - 1) * lineHeight))
+			else
+				notepadLineScroll.CanvasPosition = Vector2.new(0, math.max(0, (firstVisible - 1) * lineHeight))
+			end
+		end
+		box.Text = sliceText(chunks, page, visibleEndLine)
+		loadingText = false
+		updCount()
+	end
+
+	const function commitPage()
+		if loadingText then
+			return
+		end
+		const oldEnd = visibleEndLine
+		chunks = replaceTextRange(chunks, page, oldEnd, box.Text or "")
+		visibleEndLine = page + #splitText(box.Text or "") - 1
+		updCount()
+	end
+
+	const function refreshNotepadViewport()
+		if loadingText then
+			return
+		end
+		commitPage()
+		loadPage(getNotepadVisibleLine(math.max(#chunks, 1)), true)
+	end
+
+	notepadGetVisibleLines = function()
+		local _, visibleLines = getNotepadWindowMetrics()
+		return math.max(1, visibleLines)
+	end
+	notepadGetTotalLines = function()
+		return math.max(#chunks + 1, notepadGetVisibleLines())
+	end
+	notepadGetViewLine = function()
+		return getNotepadVisibleLine(math.max(#chunks, 1))
+	end
+	notepadSetViewLine = function(line)
+		commitPage()
+		const total = math.max(#chunks, 1)
+		const lineHeight = getNotepadWindowMetrics()
+		const nextLine = math.clamp(tonumber(line) or 1, 1, total)
+		if NAmanage.SetLogicalCanvasPosition then
+			NAmanage.SetLogicalCanvasPosition(notepadLineScroll, 0, math.max(0, (nextLine - 1) * lineHeight))
+		else
+			notepadLineScroll.CanvasPosition = Vector2.new(0, math.max(0, (nextLine - 1) * lineHeight))
+		end
+		loadPage(nextLine, true)
+	end
+
+	const function setFullText(source)
+		source = tostring(source or "")
+		loadingText = true
+		chunks = splitText(source)
+		page = 1
+		visibleEndLine = 1
+		notepadLineScroll.CanvasPosition = Vector2.new(0, 0)
+		body.CanvasPosition = Vector2.new(0, 0)
+		loadingText = false
+		loadPage(1)
+	end
+
+	const function getFullText()
+		commitPage()
+		return buildFullText(false)
+	end
+
+	const function refreshList()
+		for _, child in list:GetChildren() do
+			if child ~= listLay then
+				child:Destroy()
+			end
+		end
+		for i, n in names() do
+			const item = btn(list, n, 1, i)
+			item.Name = n
+			item.Size = UDim2.new(1, -2, 0, 28)
+			item.Text = n
+			item.TextSize = 12
+			item.TextXAlignment = Enum.TextXAlignment.Left
+			item.BackgroundColor3 = (sel and sel:lower() == n:lower()) and col.on or col.bg3
+			MouseButtonFix(item, function()
+				sel = n
+				nameBox.Text = n
+				setPickerFromName(n)
+				refreshList()
+				setStatus("Selected "..n, col.sub)
+			end)
+		end
+		list.CanvasSize = UDim2.new(0, 0, 0, listLay.AbsoluteContentSize.Y + 8)
+	end
+
+	listLay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		list.CanvasSize = UDim2.new(0, 0, 0, listLay.AbsoluteContentSize.Y + 8)
+	end)
+
+	const function loadFile(n)
+		if not fsOk then
+			setStatus("Filesystem unavailable", col.err)
+			return false
+		end
+		ensure()
+		n = safeName(n or nameBox.Text, false)
+		const path = filePath(n, false)
+		if not isfile(path) then
+			setStatus("No such file: "..n, col.err)
+			return false
+		end
+		local ok, raw = pcall(readfile, path)
+		if ok then
+			sel = n
+			nameBox.Text = n
+			setPickerFromName(n)
+			setFullText(tostring(raw or ""))
+			refreshList()
+			setStatus("Opened "..n, col.ok)
+			return true
+		end
+		setStatus("Open failed: "..n, col.err)
+		return false
+	end
+
+	const function saveFile(n)
+		if not fsOk then
+			setStatus("Filesystem unavailable", col.err)
+			return false
+		end
+		if not ensure() then
+			setStatus("Failed to create "..dir, col.err)
+			return false
+		end
+		n = safeName(n or nameBox.Text, true)
+		const path = filePath(n, false)
+		local ok, err = pcall(writefile, path, getFullText())
+		if ok and (type(isfile) ~= "function" or isfile(path)) then
+			sel = n
+			nameBox.Text = n
+			setPickerFromName(n)
+			addIdx(n)
+			refreshList()
+			setStatus("Saved "..n, col.ok)
+			return true
+		end
+		setStatus("Save failed: "..tostring(err or n), col.err)
+		return false
+	end
+
+	const function delFile(n)
+		if not fsOk then
+			setStatus("Filesystem unavailable", col.err)
+			return false
+		end
+		if not delOk then
+			setStatus("Delete unavailable", col.err)
+			return false
+		end
+		ensure()
+		n = safeName(n or nameBox.Text, false)
+		const path = filePath(n, false)
+		if not isfile(path) then
+			remIdx(n)
+			refreshList()
+			setStatus("No such file: "..n, col.err)
+			return false
+		end
+		const ok = pcall(delfile, path)
+		if ok then
+			remIdx(n)
+			if sel and sel:lower() == n:lower() then
+				sel = nil
+			end
+			refreshList()
+			setStatus("Deleted "..n, col.warn)
+			return true
+		end
+		setStatus("Delete failed: "..n, col.err)
+		return false
+	end
+
+	MouseButtonFix(newBtn, function()
+		sel = nil
+		setPicker(".txt", true)
+		nameBox.Text = "note.txt"
+		setFullText("")
+		refreshList()
+		setStatus("New note", col.ok)
+	end)
+
+	MouseButtonFix(openBtn, function()
+		loadFile(sel or nameBox.Text)
+	end)
+
+	MouseButtonFix(saveBtn, function()
+		saveFile(nameBox.Text)
+	end)
+
+	MouseButtonFix(clearBtn, function()
+		setFullText("")
+		setStatus("Cleared notepad", col.warn)
+	end)
+
+	MouseButtonFix(delBtn, function()
+		delFile(sel or nameBox.Text)
+	end)
+
+	MouseButtonFix(refBtn, function()
+		refreshList()
+		setStatus("Refreshed", col.ok)
+	end)
+
+	MouseButtonFix(optBtn, function()
+		if not optBtn.Visible then
+			return
+		end
+		const nextState = not optionsDrop.Visible
+		if nextState then
+			posOptionsDrop()
+			extDrop.Visible = false
+		end
+		optionsDrop.Visible = nextState
+	end)
+
+	MouseButtonFix(fontMinus, function()
+		NAStuff.NotepadSettings.fontSize = math.clamp((tonumber(NAStuff.NotepadSettings.fontSize) or 15) - 1, 11, 24)
+		applyNotepadOptions()
+		refreshNotepadViewport()
+		setStatus("Font size "..tostring(NAStuff.NotepadSettings.fontSize), col.sub)
+	end)
+
+	MouseButtonFix(fontPlus, function()
+		NAStuff.NotepadSettings.fontSize = math.clamp((tonumber(NAStuff.NotepadSettings.fontSize) or 15) + 1, 11, 24)
+		applyNotepadOptions()
+		refreshNotepadViewport()
+		setStatus("Font size "..tostring(NAStuff.NotepadSettings.fontSize), col.sub)
+	end)
+
+	MouseButtonFix(wrapBtn, function()
+		NAStuff.NotepadSettings.wrap = not NAStuff.NotepadSettings.wrap
+		applyNotepadOptions()
+		refreshNotepadViewport()
+		setStatus("Wrap "..(NAStuff.NotepadSettings.wrap and "enabled" or "disabled"), col.sub)
+	end)
+
+	MouseButtonFix(copyBtn, function()
+		const ok = type(setclipboard) == "function" and pcall(setclipboard, getFullText())
+		setStatus(ok and "Copied notepad text" or "Clipboard unavailable", ok and col.ok or col.err)
+	end)
+
+	MouseButtonFix(pasteBtn, function()
+		if type(getclipboard) ~= "function" then
+			setStatus("Clipboard unavailable", col.err)
+			return
+		end
+		local ok, clip = pcall(getclipboard)
+		if not ok or type(clip) ~= "string" then
+			setStatus("Clipboard unavailable", col.err)
+			return
+		end
+		const pos = tonumber(box.CursorPosition) or -1
+		const tx = tostring(box.Text or "")
+		if pos and pos > 0 then
+			box.Text = tx:sub(1, pos - 1)..clip..tx:sub(pos)
+			box.CursorPosition = pos + #clip
+		else
+			box.Text = tx..clip
+		end
+		commitPage()
+		setStatus("Pasted clipboard", col.ok)
+	end)
+
+	box:GetPropertyChangedSignal("Text"):Connect(function()
+		if not loadingText then
+			commitPage()
+		else
+			updCount()
+		end
+	end)
+	notepadLineScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+		if loadingText then
+			return
+		end
+		const total = math.max(#chunks, 1)
+		local _, _, firstVisible, lastVisible = getNotepadWindowRange(total)
+		const edgeBuffer = math.max(1, math.floor(notepadLineBuffer / 3))
+		if firstVisible < page or lastVisible > visibleEndLine or (firstVisible - page) < edgeBuffer or (visibleEndLine - lastVisible) < edgeBuffer then
+			commitPage()
+			loadPage(firstVisible, true)
+		end
+	end)
+	local redirectingNotepadScroll = false
+	body:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+		if loadingText or redirectingNotepadScroll then
+			return
+		end
+		const bodyPos = NAmanage.GetLogicalCanvasPosition and NAmanage.GetLogicalCanvasPosition(body) or body.CanvasPosition
+		const y = tonumber(bodyPos.Y) or 0
+		if math.abs(y) <= 0.5 then
+			return
+		end
+		redirectingNotepadScroll = true
+		if notepadVerticalScroll and notepadVerticalScroll.scrollBy then
+			local lineDelta = y / math.max(notepadLineHeight, 1)
+			if math.abs(lineDelta) < 1 then
+				lineDelta = y > 0 and 1 or -1
+			end
+			notepadVerticalScroll.scrollBy(lineDelta)
+		else
+			if NAmanage.GetLogicalCanvasPosition and NAmanage.SetLogicalCanvasPosition then
+				const notepadLinePos = NAmanage.GetLogicalCanvasPosition(notepadLineScroll)
+				NAmanage.SetLogicalCanvasPosition(notepadLineScroll, 0, math.max(0, notepadLinePos.Y + y))
+			else
+				notepadLineScroll.CanvasPosition = Vector2.new(0, math.max(0, notepadLineScroll.CanvasPosition.Y + y))
+			end
+		end
+		if NAmanage.SetLogicalCanvasPosition then
+			NAmanage.SetLogicalCanvasPosition(body, bodyPos.X, 0)
+		else
+			body.CanvasPosition = Vector2.new(body.CanvasPosition.X, 0)
+		end
+		redirectingNotepadScroll = false
+	end)
+	const function handleNotepadWheel(input)
+		if not input or input.UserInputType ~= Enum.UserInputType.MouseWheel then
+			return
+		end
+		const wheel = input.Position and input.Position.Z or 0
+		if wheel == 0 then
+			return
+		end
+		const step = math.max(24, getNotepadLineHeight() * 3)
+		const horizontal = Services.UserInputService and (Services.UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or Services.UserInputService:IsKeyDown(Enum.KeyCode.RightShift))
+		if horizontal and notepadHorizontalScroll and notepadHorizontalScroll.scrollBy then
+			notepadHorizontalScroll.scrollBy(-wheel * step)
+		elseif notepadVerticalScroll and notepadVerticalScroll.scrollBy then
+			notepadVerticalScroll.scrollBy(-wheel * 3)
+		end
+	end
+	body.InputChanged:Connect(handleNotepadWheel)
+	box.InputChanged:Connect(handleNotepadWheel)
+	body:GetPropertyChangedSignal("AbsoluteSize"):Connect(refreshNotepadViewport)
+	frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		updateNotepadLayout()
+		refreshNotepadViewport()
+	end)
+	cont:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		updateNotepadLayout()
+		refreshNotepadViewport()
+	end)
+	NAStuff.NotepadRefresh = function()
+		updateNotepadLayout()
+		refreshNotepadViewport()
+	end
+	MouseButtonFix(pagePrev, function()
+
+		commitPage()
+		local _, visibleLines = getNotepadWindowMetrics()
+		const nextLine = math.clamp(getNotepadVisibleLine(math.max(#chunks, 1)) - visibleLines, 1, math.max(#chunks, 1))
+		loadPage(nextLine)
+		setStatus("Line "..tostring(nextLine).."/"..tostring(math.max(#chunks, 1)), col.sub)
+	end)
+	MouseButtonFix(pageNext, function()
+		commitPage()
+		local _, visibleLines = getNotepadWindowMetrics()
+		const nextLine = math.clamp(getNotepadVisibleLine(math.max(#chunks, 1)) + visibleLines, 1, math.max(#chunks, 1))
+		loadPage(nextLine)
+		setStatus("Line "..tostring(nextLine).."/"..tostring(math.max(#chunks, 1)), col.sub)
+	end)
+	nameBox.FocusLost:Connect(function()
+		const e = tostring(nameBox.Text or ""):match("(%.[%w]+)$")
+		if e then
+			setPicker(e, true)
+		end
+	end)
+
+	if Services.UserInputService then
+		Services.UserInputService.InputBegan:Connect(function(input, gp)
+			const focused = box:IsFocused()
+			const ctrl = Services.UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or Services.UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
+			const shift = Services.UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or Services.UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+			if focused and ctrl and input.KeyCode == Enum.KeyCode.B then
+				fmt.wrapInline("**", "**", "bold text", "bold")
+			elseif focused and ctrl and input.KeyCode == Enum.KeyCode.I then
+				fmt.wrapInline("*", "*", "italic text", "italic")
+			elseif focused and ctrl and shift and input.KeyCode == Enum.KeyCode.X then
+				fmt.wrapInline("~~", "~~", "strikethrough text", "strikethrough")
+			elseif focused and ctrl and input.KeyCode == Enum.KeyCode.K then
+				fmt.showLink()
+			elseif focused and ctrl and input.KeyCode == Enum.KeyCode.Space then
+				fmt.clearFormatting()
+			elseif input.KeyCode == Enum.KeyCode.Tab and focused then
+				const pos = box.CursorPosition
+				if pos and pos > 0 then
+					const tx = box.Text or ""
+					box.Text = tx:sub(1, pos - 1).."    "..tx:sub(pos)
+					box.CursorPosition = pos + 4
+				end
+			elseif focused and ctrl and input.KeyCode == Enum.KeyCode.S then
+				saveFile(nameBox.Text)
+			end
+		end)
+	end
+
+	ensure()
+	refreshList()
+	applyNotepadResponsive(false)
+	updateNotepadLayout()
+	updEditorSize()
+	updCount()
+	NAlib.disconnect("NANotepadResponsive")
+	NAlib.connect("NANotepadResponsive", frame:GetPropertyChangedSignal("Size"):Connect(saveNotepadFrameSize))
+	if Services.Workspace and Services.Workspace.CurrentCamera then
+		NAlib.connect("NANotepadResponsive", Services.Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+			Defer(function()
+				if frame and frame.Parent then
+					updateNotepadLayout()
+					refreshNotepadViewport()
+				end
+			end)
+		end))
+	end
+	if NAStuff and NAStuff.NASCREENGUI then
+		NAlib.connect("NANotepadResponsive", NAStuff.NASCREENGUI:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			Defer(function()
+				if frame and frame.Parent then
+					updateNotepadLayout()
+					refreshNotepadViewport()
+				end
+			end)
+		end))
+	end
+	if NAUIMANAGER and NAUIMANAGER.AUTOSCALER then
+		NAlib.connect("NANotepadResponsive", NAUIMANAGER.AUTOSCALER:GetPropertyChangedSignal("Scale"):Connect(function()
+			Defer(function()
+				if frame and frame.Parent then
+					updateNotepadLayout()
+					refreshNotepadViewport()
+				end
+			end)
+		end))
+	end
+	fmt.syncContext()
+	setStatus(fsOk and ("Ready | "..dir.." | formatting uses Markdown") or "Filesystem unavailable", fsOk and col.sub or col.err)
+	return true
+end
+
+
+NAmanage.SubplaceViewer = type(NAmanage.SubplaceViewer) == "table" and NAmanage.SubplaceViewer or {}
+NAmanage.SubplaceViewer.root = "Nameless-Admin/SubplaceViewer"
+NAmanage.SubplaceViewer.favoritesPath = NAmanage.SubplaceViewer.root.."/Favorites.json"
+NAmanage.SubplaceViewer.favorites = type(NAmanage.SubplaceViewer.favorites) == "table" and NAmanage.SubplaceViewer.favorites or {}
+NAmanage.SubplaceViewer.places = type(NAmanage.SubplaceViewer.places) == "table" and NAmanage.SubplaceViewer.places or {}
+NAmanage.SubplaceViewer.placeIconAssets = type(NAmanage.SubplaceViewer.placeIconAssets) == "table" and NAmanage.SubplaceViewer.placeIconAssets or {}
+NAmanage.SubplaceViewer.placeIconRequests = type(NAmanage.SubplaceViewer.placeIconRequests) == "table" and NAmanage.SubplaceViewer.placeIconRequests or {}
+NAmanage.SubplaceViewer.filter = NAmanage.SubplaceViewer.filter or "all"
+NAmanage.SubplaceViewer.sort = NAmanage.SubplaceViewer.sort == "id" and "id" or "name"
+NAmanage.SubplaceViewer.loaded = false
+NAmanage.SubplaceViewer.loading = false
+NAmanage.SubplaceViewer.fetchToken = tonumber(NAmanage.SubplaceViewer.fetchToken) or 0
+NAmanage.SubplaceViewer.serverToken = tonumber(NAmanage.SubplaceViewer.serverToken) or 0
+NAmanage.SubplaceViewer.serverBases = type(NAmanage.SubplaceViewer.serverBases) == "table" and NAmanage.SubplaceViewer.serverBases or {
+	"https://games.roproxy.com";
+	"https://games.rotunnel.com";
+	"https://games.roblox.com";
+}
+NAmanage.SubplaceViewer.serverWorker = NAmanage.SubplaceViewer.serverWorker or "https://solaraserverhop.ltseverydayyou.workers.dev"
+NAmanage.SubplaceViewer.viewMode = NAmanage.SubplaceViewer.viewMode or "places"
+
+NAmanage.SubplaceViewer.teleportGuiToken = tonumber(NAmanage.SubplaceViewer.teleportGuiToken) or 0
+NAmanage.SubplaceViewer.teleportGui = nil
+NAmanage.SubplaceViewer.teleportHandoffGui = nil
+
+NAmanage.SubplaceViewer_GetPlaceThumbnail = function(placeId, width, height)
+	const destinationId = tonumber(placeId) or tonumber(game.PlaceId) or 0
+	return "rbxthumb://type=Asset&id="..tostring(destinationId)
+		.."&w="..tostring(tonumber(width) or 150)
+		.."&h="..tostring(tonumber(height) or 150)
+end
+
+NAmanage.SubplaceViewer_GetPlaceIcon = function(placeId, width, height, iconAssetId)
+	const state = NAmanage.SubplaceViewer
+	const destinationId = tonumber(placeId) or tonumber(game.PlaceId) or 0
+	const cached = state.placeIconAssets[destinationId]
+	const resolvedIconId = tonumber(iconAssetId) or (type(cached) == "number" and cached or nil)
+	if resolvedIconId and resolvedIconId > 0 then
+		return "rbxthumb://type=Asset&id="..tostring(resolvedIconId)
+			.."&w="..tostring(tonumber(width) or 150)
+			.."&h="..tostring(tonumber(height) or 150)
+	end
+	return NAmanage.SubplaceViewer_GetPlaceThumbnail(destinationId, width, height)
+end
+
+NAmanage.TeleportGui_ResolveDestinationIcon = function(gui, placeId)
+	if not gui then return false end
+	const state = NAmanage.SubplaceViewer
+	const destinationId = tonumber(placeId) or tonumber(game.PlaceId) or 0
+	const function applyIcon(target, iconAssetId)
+		if not target then return false end
+		local matchesDestination = false
+		local okAlive = pcall(function()
+			matchesDestination = target:GetAttribute("NADestinationPlaceId") == destinationId
+		end)
+		if not okAlive or not matchesDestination then return false end
+		const root = target:FindFirstChild("Root")
+		const foreground = root and root:FindFirstChild("Foreground")
+		const content = foreground and foreground:FindFirstChild("Content")
+		const icon = content and content:FindFirstChild("DestinationIcon")
+		if icon and icon:IsA("ImageLabel") then
+			icon.Image = NAmanage.SubplaceViewer_GetPlaceIcon(destinationId, 420, 420, iconAssetId)
+			return true
+		end
+		return false
+	end
+
+	const cached = state.placeIconAssets[destinationId]
+	if cached ~= nil then
+		return applyIcon(gui, type(cached) == "number" and cached or 0)
+	end
+	local waiting = state.placeIconRequests[destinationId]
+	if type(waiting) ~= "table" then
+		waiting = {}
+		state.placeIconRequests[destinationId] = waiting
+	end
+	waiting[#waiting + 1] = gui
+	if #waiting > 1 then return true end
+	Spawn(function()
+		local iconAssetId = 0
+		local ok, info = pcall(Services.MarketplaceService.GetProductInfo, Services.MarketplaceService, destinationId, Enum.InfoType.Asset)
+		if ok and type(info) == "table" then
+			iconAssetId = tonumber(info.IconImageAssetId) or 0
+			state.placeIconAssets[destinationId] = iconAssetId > 0 and iconAssetId or false
+		end
+		const targets = state.placeIconRequests[destinationId] or waiting
+		state.placeIconRequests[destinationId] = nil
+		for _, target in targets do
+			applyIcon(target, iconAssetId)
+		end
+	end)
+	return true
+end
+
+NAmanage.SubplaceViewer_GetPlaceName = function(placeId)
+	const state = NAmanage.SubplaceViewer
+	for _, place in state.places do
+		if tonumber(place.PlaceId) == tonumber(placeId) then
+			return tostring(place.Name or ("Place "..tostring(placeId)))
+		end
+	end
+	if tonumber(placeId) == tonumber(game.PlaceId) then
+		return tostring(game.Name)
+	end
+	return "Place "..tostring(placeId)
+end
+
+NAmanage.SubplaceViewer_ClearTeleportGui = function(gui)
+	const state = NAmanage.SubplaceViewer
+	state.teleportGuiToken += 1
+	const target = gui or state.teleportGui
+	if target then
+		pcall(function() target:Destroy() end)
+	end
+	if state.teleportHandoffGui then
+		pcall(function() state.teleportHandoffGui:Destroy() end)
+		state.teleportHandoffGui = nil
+	end
+	if state.teleportGui == target or gui == nil then
+		state.teleportGui = nil
+	end
+end
+
+NAmanage.TeleportGui_ApplyStaticState = function(gui)
+	if not gui then return false end
+	const root = gui:FindFirstChild("Root")
+	if not root then return false end
+	const backdrop = root:FindFirstChild("Backdrop")
+	const innerFrame = root:FindFirstChild("InnerFrame")
+	const innerFrameStroke = innerFrame and innerFrame:FindFirstChildOfClass("UIStroke")
+	const foreground = root:FindFirstChild("Foreground")
+	const topBrand = foreground and foreground:FindFirstChild("TopBrand")
+	const content = foreground and foreground:FindFirstChild("Content")
+	const logo = topBrand and topBrand:FindFirstChild("Logo", true)
+	const fallback = topBrand and topBrand:FindFirstChild("Fallback", true)
+	const brand = topBrand and topBrand:FindFirstChild("Brand", true)
+	const subBrand = topBrand and topBrand:FindFirstChild("SubBrand", true)
+	const rightTag = foreground and foreground:FindFirstChild("RightTag", true)
+	const statusPill = content and content:FindFirstChild("StatusPill")
+	const statusDot = statusPill and statusPill:FindFirstChild("StatusDot")
+	const actionLabel = statusPill and statusPill:FindFirstChild("Action")
+	const destination = content and content:FindFirstChild("Destination")
+	const destinationIcon = content and content:FindFirstChild("DestinationIcon")
+	const contentStroke = content and content:FindFirstChildOfClass("UIStroke")
+	const accent = content and content:FindFirstChild("Accent")
+	const info = content and content:FindFirstChild("Info")
+	const footer = content and content:FindFirstChild("Footer")
+	const progressTrack = foreground and foreground:FindFirstChild("ProgressTrack")
+	const runner = progressTrack and progressTrack:FindFirstChild("Runner")
+	const progressCaption = foreground and foreground:FindFirstChild("ProgressCaption")
+	const placeTag = foreground and foreground:FindFirstChild("PlaceTag")
+	const topEdge = root:FindFirstChild("TopEdge")
+	if backdrop and backdrop:IsA("ImageLabel") then
+		backdrop.Position = UDim2.fromScale(0.5, 0.5)
+		backdrop.Size = UDim2.fromScale(1.1, 1.1)
+		backdrop.ImageTransparency = 0.22
+	end
+	if innerFrameStroke then innerFrameStroke.Transparency = 0.78 end
+	if topBrand and topBrand:IsA("Frame") then
+		topBrand.Position = UDim2.new(0, tonumber(topBrand:GetAttribute("FinalX")) or 52, 0, tonumber(topBrand:GetAttribute("FinalY")) or 88)
+	end
+	if content and content:IsA("Frame") then
+		content.Position = UDim2.new(0, tonumber(content:GetAttribute("FinalX")) or 52, 1, tonumber(content:GetAttribute("FinalY")) or -70)
+		content.BackgroundTransparency = 0.16
+	end
+	if contentStroke then contentStroke.Transparency = 0.56 end
+	if accent and accent:IsA("Frame") then accent.BackgroundTransparency = 0 end
+	if logo and logo:IsA("ImageLabel") then logo.ImageTransparency = 0 end
+	if fallback and fallback:IsA("TextLabel") then fallback.TextTransparency = 0 end
+	if brand and brand:IsA("TextLabel") then brand.TextTransparency = 0 end
+	if subBrand and subBrand:IsA("TextLabel") then subBrand.TextTransparency = 0.18 end
+	if rightTag and rightTag:IsA("TextLabel") then rightTag.TextTransparency = 0.32 end
+	if statusPill and statusPill:IsA("Frame") then statusPill.BackgroundTransparency = 0.18 end
+	if statusDot and statusDot:IsA("Frame") then statusDot.BackgroundTransparency = 0 end
+	if actionLabel and actionLabel:IsA("TextLabel") then actionLabel.TextTransparency = 0 end
+	if destination and destination:IsA("TextLabel") then destination.TextTransparency = 0 end
+	if destinationIcon and destinationIcon:IsA("ImageLabel") then destinationIcon.ImageTransparency = 0.04 end
+	if info and info:IsA("TextLabel") then info.TextTransparency = 0.08 end
+	if footer and footer:IsA("TextLabel") then footer.TextTransparency = 0.18 end
+	if progressTrack and progressTrack:IsA("Frame") then progressTrack.BackgroundTransparency = 0.58 end
+	if runner and runner:IsA("Frame") then
+		runner.Position = UDim2.new(0.24, 0, 0, 0)
+		runner.BackgroundTransparency = 0
+	end
+	if progressCaption and progressCaption:IsA("TextLabel") then progressCaption.TextTransparency = 0.16 end
+	if placeTag and placeTag:IsA("TextLabel") then placeTag.TextTransparency = 0.28 end
+	if topEdge and topEdge:IsA("Frame") then topEdge.BackgroundTransparency = 0.18 end
+	return true
+end
+
+NAmanage.SubplaceViewer_CreateTeleportGui = function(placeId, placeName, action, detail, options)
+	options = type(options) == "table" and options or {}
+	const prearm = options.prearm == true
+	if NAStuff.CustomTeleportGuiEnabled == false or NAStuff.AntiTeleportHooked == true then
+		return nil
+	end
+	const state = NAmanage.SubplaceViewer
+	NAmanage.SubplaceViewer_ClearTeleportGui()
+	const ui = {}
+	const destinationId = tonumber(placeId) or tonumber(game.PlaceId) or 0
+	const mobile = IsOnMobile == true
+	const sidePad = mobile and 18 or 48
+	local guiInsetTop = 0
+	if Services.GuiService and Services.GuiService.GetGuiInset then
+		local okInset, topLeftInset = pcall(Services.GuiService.GetGuiInset, Services.GuiService)
+		if okInset and typeof(topLeftInset) == "Vector2" then
+			guiInsetTop = math.max(0, tonumber(topLeftInset.Y) or 0)
+		end
+	end
+	const topPad = math.max(mobile and 78 or 88, guiInsetTop + (mobile and 22 or 28))
+	const bottomPad = mobile and 62 or 64
+	const destinationThumbnail = NAmanage.SubplaceViewer_GetPlaceThumbnail(destinationId, 420, 420)
+	const destinationIconImage = NAmanage.SubplaceViewer_GetPlaceIcon(destinationId, 420, 420)
+
+	ui.gui = Instance.new("ScreenGui")
+	ui.gui.Name = "NATeleportGui"
+	ui.gui.IgnoreGuiInset = true
+	ui.gui.ResetOnSpawn = false
+	ui.gui.Enabled = true
+	ui.gui.DisplayOrder = 2147483647
+	ui.gui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+	pcall(function()
+		ui.gui:SetAttribute("NASubplaceViewerTeleport", true)
+		ui.gui:SetAttribute("NACustomTeleportGui", true)
+		ui.gui:SetAttribute("NADestinationPlaceId", destinationId)
+	end)
+
+	ui.root = Instance.new("Frame")
+	ui.root.Name = "Root"
+	ui.root.Size = UDim2.fromScale(1, 1)
+	ui.root.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	ui.root.BorderSizePixel = 0
+	ui.root.ZIndex = 1
+	ui.root.ClipsDescendants = true
+	ui.root.Parent = ui.gui
+
+	ui.backdrop = Instance.new("ImageLabel")
+	ui.backdrop.Name = "Backdrop"
+	ui.backdrop.AnchorPoint = Vector2.new(0.5, 0.5)
+	ui.backdrop.Position = UDim2.fromScale(0.486, 0.5)
+	ui.backdrop.Size = UDim2.fromScale(1.16, 1.16)
+	ui.backdrop.BackgroundTransparency = 1
+	ui.backdrop.Image = destinationThumbnail
+	ui.backdrop.ImageColor3 = Color3.fromRGB(225, 225, 225)
+	ui.backdrop.ImageTransparency = 1
+	ui.backdrop.ScaleType = Enum.ScaleType.Crop
+	ui.backdrop.ZIndex = 2
+	ui.backdrop.Parent = ui.root
+
+	ui.wash = Instance.new("Frame")
+	ui.wash.Name = "Wash"
+	ui.wash.Size = UDim2.fromScale(1, 1)
+	ui.wash.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	ui.wash.BackgroundTransparency = 0.34
+	ui.wash.BorderSizePixel = 0
+	ui.wash.ZIndex = 3
+	ui.wash.Parent = ui.root
+	ui.washGradient = Instance.new("UIGradient")
+	ui.washGradient.Rotation = 90
+	ui.washGradient.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.28);
+		NumberSequenceKeypoint.new(0.5, 0.58);
+		NumberSequenceKeypoint.new(1, 0.2);
+	})
+	ui.washGradient.Parent = ui.wash
+
+	ui.sideShade = Instance.new("Frame")
+	ui.sideShade.Name = "SideShade"
+	ui.sideShade.Size = UDim2.fromScale(1, 1)
+	ui.sideShade.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	ui.sideShade.BackgroundTransparency = 0.22
+	ui.sideShade.BorderSizePixel = 0
+	ui.sideShade.ZIndex = 4
+	ui.sideShade.Parent = ui.root
+	ui.sideGradient = Instance.new("UIGradient")
+	ui.sideGradient.Rotation = 0
+	ui.sideGradient.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.36);
+		NumberSequenceKeypoint.new(0.42, 0.5);
+		NumberSequenceKeypoint.new(0.74, 0.8);
+		NumberSequenceKeypoint.new(1, 0.92);
+	})
+	ui.sideGradient.Parent = ui.sideShade
+
+	ui.bottomShade = Instance.new("Frame")
+	ui.bottomShade.Name = "BottomShade"
+	ui.bottomShade.AnchorPoint = Vector2.new(0, 1)
+	ui.bottomShade.Position = UDim2.fromScale(0, 1)
+	ui.bottomShade.Size = UDim2.fromScale(1, 0.58)
+	ui.bottomShade.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	ui.bottomShade.BackgroundTransparency = 0.12
+	ui.bottomShade.BorderSizePixel = 0
+	ui.bottomShade.ZIndex = 5
+	ui.bottomShade.Parent = ui.root
+	ui.bottomGradient = Instance.new("UIGradient")
+	ui.bottomGradient.Rotation = 90
+	ui.bottomGradient.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1);
+		NumberSequenceKeypoint.new(0.42, 0.72);
+		NumberSequenceKeypoint.new(1, 0.22);
+	})
+	ui.bottomGradient.Parent = ui.bottomShade
+
+	ui.innerFrame = Instance.new("Frame")
+	ui.innerFrame.Name = "InnerFrame"
+	ui.innerFrame.Position = UDim2.fromOffset(mobile and 9 or 18, mobile and 9 or 18)
+	ui.innerFrame.Size = UDim2.new(1, mobile and -18 or -36, 1, mobile and -18 or -36)
+	ui.innerFrame.BackgroundTransparency = 1
+	ui.innerFrame.BorderSizePixel = 0
+	ui.innerFrame.ZIndex = 7
+	ui.innerFrame.Parent = ui.root
+	ui.innerFrameStroke = Instance.new("UIStroke")
+	ui.innerFrameStroke.Color = Color3.fromRGB(255, 255, 255)
+	ui.innerFrameStroke.Transparency = 1
+	ui.innerFrameStroke.Thickness = 1
+	ui.innerFrameStroke.Parent = ui.innerFrame
+
+	ui.topEdge = Instance.new("Frame")
+	ui.topEdge.Name = "TopEdge"
+	ui.topEdge.AnchorPoint = Vector2.new(0, 0)
+	ui.topEdge.Position = UDim2.new(0, sidePad, 0, mobile and 9 or 18)
+	ui.topEdge.Size = UDim2.fromOffset(mobile and 72 or 112, 2)
+	ui.topEdge.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	ui.topEdge.BackgroundTransparency = 1
+	ui.topEdge.BorderSizePixel = 0
+	ui.topEdge.ZIndex = 7
+	ui.topEdge.Parent = ui.root
+	ui.topEdgeGradient = Instance.new("UIGradient")
+	ui.topEdgeGradient.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 0, 0));
+		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255));
+		ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 0));
+	})
+	ui.topEdgeGradient.Parent = ui.topEdge
+
+	ui.foreground = Instance.new("Frame")
+	ui.foreground.Name = "Foreground"
+	ui.foreground.Size = UDim2.fromScale(1, 1)
+	ui.foreground.BackgroundTransparency = 1
+	ui.foreground.ZIndex = 10
+	ui.foreground.Parent = ui.root
+
+	ui.topBrand = Instance.new("Frame")
+	ui.topBrand.Name = "TopBrand"
+	ui.topBrand.Position = UDim2.new(0, sidePad, 0, topPad - 10)
+	ui.topBrand.Size = UDim2.fromOffset(mobile and 270 or 370, 46)
+	ui.topBrand.BackgroundTransparency = 1
+	ui.topBrand.ZIndex = 12
+	ui.topBrand:SetAttribute("FinalX", sidePad)
+	ui.topBrand:SetAttribute("FinalY", topPad)
+	ui.topBrand.Parent = ui.foreground
+
+	ui.logoHolder = Instance.new("Frame")
+	ui.logoHolder.Name = "LogoHolder"
+	ui.logoHolder.Size = UDim2.fromOffset(42, 42)
+	ui.logoHolder.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	ui.logoHolder.BackgroundTransparency = 0.08
+	ui.logoHolder.BorderSizePixel = 0
+	ui.logoHolder.ZIndex = 13
+	ui.logoHolder.Parent = ui.topBrand
+	ui.logoCorner = Instance.new("UICorner")
+	ui.logoCorner.CornerRadius = UDim.new(0, 6)
+	ui.logoCorner.Parent = ui.logoHolder
+	ui.logoStroke = Instance.new("UIStroke")
+	ui.logoStroke.Color = Color3.fromRGB(255, 255, 255)
+	ui.logoStroke.Transparency = 0.38
+	ui.logoStroke.Thickness = 1
+	ui.logoStroke.Parent = ui.logoHolder
+	ui.logoScale = Instance.new("UIScale")
+	ui.logoScale.Scale = 1
+	ui.logoScale.Parent = ui.logoHolder
+
+	const iconAsset = NAmanage.getNAImageAsset("Icon", "")
+	ui.logo = Instance.new("ImageLabel")
+	ui.logo.Name = "Logo"
+	ui.logo.AnchorPoint = Vector2.new(0.5, 0.5)
+	ui.logo.Position = UDim2.fromScale(0.5, 0.5)
+	ui.logo.Size = UDim2.new(1, -10, 1, -10)
+	ui.logo.BackgroundTransparency = 1
+	ui.logo.Image = iconAsset
+	ui.logo.ImageTransparency = 1
+	ui.logo.Visible = iconAsset ~= ""
+	ui.logo.ScaleType = Enum.ScaleType.Fit
+	ui.logo.ZIndex = 15
+	ui.logo.Parent = ui.logoHolder
+
+	ui.logoFallback = Instance.new("TextLabel")
+	ui.logoFallback.Name = "Fallback"
+	ui.logoFallback.Size = UDim2.fromScale(1, 1)
+	ui.logoFallback.BackgroundTransparency = 1
+	ui.logoFallback.Text = "NA"
+	ui.logoFallback.TextColor3 = Color3.fromRGB(255, 255, 255)
+	ui.logoFallback.TextTransparency = 1
+	ui.logoFallback.TextSize = 17
+	ui.logoFallback.Font = Enum.Font.GothamBold
+	ui.logoFallback.Visible = iconAsset == ""
+	ui.logoFallback.ZIndex = 14
+	ui.logoFallback.Parent = ui.logoHolder
+
+	ui.brand = Instance.new("TextLabel")
+	ui.brand.Name = "Brand"
+	ui.brand.Position = UDim2.new(0, 56, 0, 1)
+	ui.brand.Size = UDim2.new(1, -56, 0, 22)
+	ui.brand.BackgroundTransparency = 1
+	ui.brand.Text = "NAMELESS / ADMIN"
+	ui.brand.TextColor3 = Color3.fromRGB(255, 255, 255)
+	ui.brand.TextTransparency = 1
+	ui.brand.TextSize = mobile and 14 or 15
+	ui.brand.Font = Enum.Font.GothamBold
+	ui.brand.TextXAlignment = Enum.TextXAlignment.Left
+	ui.brand.ZIndex = 14
+	ui.brand.Parent = ui.topBrand
+
+	ui.subBrand = Instance.new("TextLabel")
+	ui.subBrand.Name = "SubBrand"
+	ui.subBrand.Position = UDim2.new(0, 56, 0, 25)
+	ui.subBrand.Size = UDim2.new(1, -56, 0, 16)
+	ui.subBrand.BackgroundTransparency = 1
+	ui.subBrand.Text = "TELEPORT"
+	ui.subBrand.TextColor3 = Color3.fromRGB(198, 198, 198)
+	ui.subBrand.TextTransparency = 1
+	ui.subBrand.TextSize = 8
+	ui.subBrand.Font = Enum.Font.GothamMedium
+	ui.subBrand.TextXAlignment = Enum.TextXAlignment.Left
+	ui.subBrand.ZIndex = 14
+	ui.subBrand.Parent = ui.topBrand
+
+	ui.rightTag = Instance.new("TextLabel")
+	ui.rightTag.Name = "RightTag"
+	ui.rightTag.AnchorPoint = Vector2.new(1, 0)
+	ui.rightTag.Position = UDim2.new(1, -sidePad, 0, topPad + 12)
+	ui.rightTag.Size = UDim2.fromOffset(220, 14)
+	ui.rightTag.BackgroundTransparency = 1
+	ui.rightTag.Text = ""
+	ui.rightTag.TextColor3 = Color3.fromRGB(205, 205, 205)
+	ui.rightTag.TextTransparency = 1
+	ui.rightTag.TextSize = 8
+	ui.rightTag.Font = Enum.Font.GothamMedium
+	ui.rightTag.TextXAlignment = Enum.TextXAlignment.Right
+	ui.rightTag.Visible = false
+	ui.rightTag.ZIndex = 12
+	ui.rightTag.Parent = ui.foreground
+
+	ui.content = Instance.new("Frame")
+	ui.content.Name = "Content"
+	ui.content.AnchorPoint = Vector2.new(0, 1)
+	ui.content.Position = UDim2.new(0, sidePad, 1, -(bottomPad - 12))
+	ui.content.Size = UDim2.new(mobile and 1 or 0.62, mobile and -(sidePad * 2) or 0, 0, mobile and 148 or 170)
+	ui.content.BackgroundColor3 = Color3.fromRGB(3, 3, 3)
+	ui.content.BackgroundTransparency = 1
+	ui.content.BorderSizePixel = 0
+	ui.content.ZIndex = 12
+	ui.content:SetAttribute("FinalX", sidePad)
+	ui.content:SetAttribute("FinalY", -bottomPad)
+	ui.content.Parent = ui.foreground
+	ui.contentSize = Instance.new("UISizeConstraint")
+	ui.contentSize.MinSize = Vector2.new(260, mobile and 148 or 170)
+	ui.contentSize.MaxSize = Vector2.new(760, mobile and 148 or 170)
+	ui.contentSize.Parent = ui.content
+	ui.contentCorner = Instance.new("UICorner")
+	ui.contentCorner.CornerRadius = UDim.new(0, 6)
+	ui.contentCorner.Parent = ui.content
+	ui.contentStroke = Instance.new("UIStroke")
+	ui.contentStroke.Color = Color3.fromRGB(255, 255, 255)
+	ui.contentStroke.Transparency = 1
+	ui.contentStroke.Thickness = 1
+	ui.contentStroke.Parent = ui.content
+
+	ui.accent = Instance.new("Frame")
+	ui.accent.Name = "Accent"
+	ui.accent.Position = UDim2.fromOffset(0, mobile and 14 or 18)
+	ui.accent.Size = UDim2.new(0, 2, 1, mobile and -28 or -36)
+	ui.accent.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	ui.accent.BackgroundTransparency = 1
+	ui.accent.BorderSizePixel = 0
+	ui.accent.ZIndex = 16
+	ui.accent.Parent = ui.content
+
+	ui.statusPill = Instance.new("Frame")
+	ui.statusPill.Name = "StatusPill"
+	ui.statusPill.Position = UDim2.fromOffset(mobile and 14 or 18, mobile and 13 or 17)
+	ui.statusPill.Size = UDim2.fromOffset(mobile and 145 or 164, 24)
+	ui.statusPill.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	ui.statusPill.BackgroundTransparency = 1
+	ui.statusPill.BorderSizePixel = 0
+	ui.statusPill.ZIndex = 13
+	ui.statusPill.Parent = ui.content
+	ui.statusCorner = Instance.new("UICorner")
+	ui.statusCorner.CornerRadius = UDim.new(0, 6)
+	ui.statusCorner.Parent = ui.statusPill
+	ui.statusStroke = Instance.new("UIStroke")
+	ui.statusStroke.Color = Color3.fromRGB(255, 255, 255)
+	ui.statusStroke.Transparency = 0.44
+	ui.statusStroke.Thickness = 1
+	ui.statusStroke.Parent = ui.statusPill
+
+	ui.statusDot = Instance.new("Frame")
+	ui.statusDot.Name = "StatusDot"
+	ui.statusDot.AnchorPoint = Vector2.new(0, 0.5)
+	ui.statusDot.Position = UDim2.new(0, 9, 0.5, 0)
+	ui.statusDot.Size = UDim2.fromOffset(5, 5)
+	ui.statusDot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	ui.statusDot.BackgroundTransparency = 1
+	ui.statusDot.BorderSizePixel = 0
+	ui.statusDot.ZIndex = 15
+	ui.statusDot.Parent = ui.statusPill
+	ui.statusDotCorner = Instance.new("UICorner")
+	ui.statusDotCorner.CornerRadius = UDim.new(0, 6)
+	ui.statusDotCorner.Parent = ui.statusDot
+
+	ui.actionLabel = Instance.new("TextLabel")
+	ui.actionLabel.Name = "Action"
+	ui.actionLabel.Position = UDim2.new(0, 23, 0, 0)
+	ui.actionLabel.Size = UDim2.new(1, -28, 1, 0)
+	ui.actionLabel.BackgroundTransparency = 1
+	ui.actionLabel.Text = string.upper(tostring(action or "TELEPORTING"))
+	ui.actionLabel.TextColor3 = Color3.fromRGB(245, 245, 245)
+	ui.actionLabel.TextTransparency = 1
+	ui.actionLabel.TextSize = 9
+	ui.actionLabel.Font = Enum.Font.GothamBold
+	ui.actionLabel.TextXAlignment = Enum.TextXAlignment.Left
+	ui.actionLabel.ZIndex = 15
+	ui.actionLabel.Parent = ui.statusPill
+
+	ui.destinationIcon = Instance.new("ImageLabel")
+	ui.destinationIcon.Name = "DestinationIcon"
+	ui.destinationIcon.AnchorPoint = Vector2.new(1, 0.5)
+	ui.destinationIcon.Position = UDim2.new(1, mobile and -14 or -18, 0.5, 0)
+	ui.destinationIcon.Size = UDim2.fromOffset(mobile and 82 or 128, mobile and 116 or 134)
+	ui.destinationIcon.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	ui.destinationIcon.BackgroundTransparency = 0.06
+	ui.destinationIcon.BorderSizePixel = 0
+	ui.destinationIcon.Image = destinationIconImage
+	ui.destinationIcon.ImageColor3 = Color3.fromRGB(220, 220, 220)
+	ui.destinationIcon.ImageTransparency = 1
+	ui.destinationIcon.ScaleType = Enum.ScaleType.Crop
+	ui.destinationIcon.ZIndex = 13
+	ui.destinationIcon.Parent = ui.content
+	ui.destinationIconCorner = Instance.new("UICorner")
+	ui.destinationIconCorner.CornerRadius = UDim.new(0, 6)
+	ui.destinationIconCorner.Parent = ui.destinationIcon
+	ui.destinationIconStroke = Instance.new("UIStroke")
+	ui.destinationIconStroke.Color = Color3.fromRGB(255, 255, 255)
+	ui.destinationIconStroke.Transparency = 0.62
+	ui.destinationIconStroke.Thickness = 1
+	ui.destinationIconStroke.Parent = ui.destinationIcon
+
+	ui.destination = Instance.new("TextLabel")
+	ui.destination.Name = "Destination"
+	ui.destination.Position = UDim2.new(0, mobile and 14 or 18, 0, mobile and 46 or 52)
+	ui.destination.Size = UDim2.new(1, mobile and -116 or -174, 0, mobile and 34 or 42)
+	ui.destination.BackgroundTransparency = 1
+	ui.destination.Text = tostring(placeName or NAmanage.SubplaceViewer_GetPlaceName(destinationId))
+	ui.destination.TextColor3 = Color3.fromRGB(255, 255, 255)
+	ui.destination.TextTransparency = 1
+	ui.destination.TextSize = mobile and 25 or 34
+	ui.destination.Font = Enum.Font.GothamBold
+	ui.destination.TextTruncate = Enum.TextTruncate.AtEnd
+	ui.destination.TextXAlignment = Enum.TextXAlignment.Left
+	ui.destination.ZIndex = 14
+	ui.destination.Parent = ui.content
+
+	ui.info = Instance.new("TextLabel")
+	ui.info.Name = "Info"
+	ui.info.Position = UDim2.new(0, mobile and 15 or 19, 0, mobile and 84 or 98)
+	ui.info.Size = UDim2.new(1, mobile and -117 or -176, 0, 18)
+	ui.info.BackgroundTransparency = 1
+	ui.info.Text = tostring(detail or ("Place ID  "..tostring(destinationId)))
+	ui.info.TextColor3 = Color3.fromRGB(205, 205, 205)
+	ui.info.TextTransparency = 1
+	ui.info.TextSize = mobile and 10 or 11
+	ui.info.Font = Enum.Font.Gotham
+	ui.info.TextTruncate = Enum.TextTruncate.AtEnd
+	ui.info.TextXAlignment = Enum.TextXAlignment.Left
+	ui.info.ZIndex = 14
+	ui.info.Parent = ui.content
+
+	ui.footer = Instance.new("TextLabel")
+	ui.footer.Name = "Footer"
+	ui.footer.Position = UDim2.new(0, mobile and 15 or 19, 0, mobile and 111 or 130)
+	ui.footer.Size = UDim2.new(1, mobile and -117 or -176, 0, 17)
+	ui.footer.BackgroundTransparency = 1
+	ui.footer.Text = "Loading..."
+	ui.footer.TextColor3 = Color3.fromRGB(170, 170, 170)
+	ui.footer.TextTransparency = 1
+	ui.footer.TextSize = 9
+	ui.footer.Font = Enum.Font.GothamMedium
+	ui.footer.TextXAlignment = Enum.TextXAlignment.Left
+	ui.footer.ZIndex = 14
+	ui.footer.Parent = ui.content
+
+	ui.progressTrack = Instance.new("Frame")
+	ui.progressTrack.Name = "ProgressTrack"
+	ui.progressTrack.AnchorPoint = Vector2.new(0, 1)
+	ui.progressTrack.Position = UDim2.new(0, sidePad, 1, -27)
+	ui.progressTrack.Size = UDim2.new(1, -(sidePad * 2), 0, 1)
+	ui.progressTrack.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	ui.progressTrack.BackgroundTransparency = 1
+	ui.progressTrack.BorderSizePixel = 0
+	ui.progressTrack.ClipsDescendants = true
+	ui.progressTrack.ZIndex = 13
+	ui.progressTrack.Parent = ui.foreground
+	ui.runner = Instance.new("Frame")
+	ui.runner.Name = "Runner"
+	ui.runner.Position = UDim2.new(-0.22, 0, 0, 0)
+	ui.runner.Size = UDim2.new(0.22, 0, 1, 0)
+	ui.runner.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	ui.runner.BackgroundTransparency = 0
+	ui.runner.BorderSizePixel = 0
+	ui.runner.ZIndex = 15
+	ui.runner.Parent = ui.progressTrack
+	ui.runnerGradient = Instance.new("UIGradient")
+	ui.runnerGradient.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(88, 88, 88));
+		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255));
+		ColorSequenceKeypoint.new(1, Color3.fromRGB(88, 88, 88));
+	})
+	ui.runnerGradient.Parent = ui.runner
+
+	ui.progressCaption = Instance.new("TextLabel")
+	ui.progressCaption.Name = "ProgressCaption"
+	ui.progressCaption.Position = UDim2.new(0, sidePad, 1, -48)
+	ui.progressCaption.Size = UDim2.fromOffset(180, 14)
+	ui.progressCaption.BackgroundTransparency = 1
+	ui.progressCaption.Text = "LOADING"
+	ui.progressCaption.TextColor3 = Color3.fromRGB(195, 195, 195)
+	ui.progressCaption.TextTransparency = 1
+	ui.progressCaption.TextSize = 7
+	ui.progressCaption.Font = Enum.Font.GothamMedium
+	ui.progressCaption.TextXAlignment = Enum.TextXAlignment.Left
+	ui.progressCaption.ZIndex = 13
+	ui.progressCaption.Parent = ui.foreground
+
+	ui.placeTag = Instance.new("TextLabel")
+	ui.placeTag.Name = "PlaceTag"
+	ui.placeTag.AnchorPoint = Vector2.new(1, 0)
+	ui.placeTag.Position = UDim2.new(1, -sidePad, 1, -48)
+	ui.placeTag.Size = UDim2.fromOffset(220, 14)
+	ui.placeTag.BackgroundTransparency = 1
+	ui.placeTag.Text = "DESTINATION  //  "..tostring(destinationId)
+	ui.placeTag.TextColor3 = Color3.fromRGB(195, 195, 195)
+	ui.placeTag.TextTransparency = 1
+	ui.placeTag.TextSize = 7
+	ui.placeTag.Font = Enum.Font.GothamMedium
+	ui.placeTag.TextXAlignment = Enum.TextXAlignment.Right
+	ui.placeTag.ZIndex = 13
+	ui.placeTag.Parent = ui.foreground
+
+	if prearm then
+		pcall(function() ui.gui:SetAttribute("NAGameTeleportPrearmed", true) end)
+		NAmanage.TeleportGui_ApplyStaticState(ui.gui)
+		NAmanage.TeleportGui_ResolveDestinationIcon(ui.gui, destinationId)
+		state.teleportHandoffGui = ui.gui
+		state.teleportGui = nil
+		pcall(Services.TeleportService.SetTeleportGui, Services.TeleportService, ui.gui)
+		return ui.gui
+	end
+
+	const lp = (Services.Players and Services.Players.LocalPlayer) or player
+	const playerGui = lp and (lp:FindFirstChildOfClass("PlayerGui") or lp:FindFirstChild("PlayerGui"))
+	if playerGui then
+		ui.gui.Parent = playerGui
+	end
+
+	ui.handoffGui = ui.gui:Clone()
+	ui.handoffGui.Name = "NATeleportGui"
+	ui.handoffGui.Enabled = true
+	NAmanage.TeleportGui_ApplyStaticState(ui.handoffGui)
+	NAmanage.TeleportGui_ResolveDestinationIcon(ui.gui, destinationId)
+	NAmanage.TeleportGui_ResolveDestinationIcon(ui.handoffGui, destinationId)
+	state.teleportHandoffGui = ui.handoffGui
+	pcall(Services.TeleportService.SetTeleportGui, Services.TeleportService, ui.handoffGui)
+	state.teleportGui = ui.gui
+	state.teleportGuiToken += 1
+	const token = state.teleportGuiToken
+
+	pcall(function()
+		Services.TweenService:Create(ui.backdrop, TweenInfo.new(0.78, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+			Position = UDim2.fromScale(0.5, 0.5);
+			Size = UDim2.fromScale(1.1, 1.1);
+			ImageTransparency = 0.22;
+		}):Play()
+		Services.TweenService:Create(ui.innerFrameStroke, TweenInfo.new(0.65, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Transparency = 0.78 }):Play()
+		Services.TweenService:Create(ui.topBrand, TweenInfo.new(0.48, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), { Position = UDim2.new(0, sidePad, 0, topPad) }):Play()
+		Services.TweenService:Create(ui.content, TweenInfo.new(0.56, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), { Position = UDim2.new(0, sidePad, 1, -bottomPad); BackgroundTransparency = 0.16 }):Play()
+		Services.TweenService:Create(ui.contentStroke, TweenInfo.new(0.58, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Transparency = 0.56 }):Play()
+		Services.TweenService:Create(ui.accent, TweenInfo.new(0.46, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 0 }):Play()
+		Services.TweenService:Create(ui.logo, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { ImageTransparency = 0 }):Play()
+		Services.TweenService:Create(ui.logoFallback, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextTransparency = 0 }):Play()
+		Services.TweenService:Create(ui.brand, TweenInfo.new(0.38, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextTransparency = 0 }):Play()
+		Services.TweenService:Create(ui.subBrand, TweenInfo.new(0.42, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextTransparency = 0.18 }):Play()
+		Services.TweenService:Create(ui.rightTag, TweenInfo.new(0.48, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextTransparency = 0.32 }):Play()
+		Services.TweenService:Create(ui.statusPill, TweenInfo.new(0.42, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 0.18 }):Play()
+		Services.TweenService:Create(ui.statusDot, TweenInfo.new(0.42, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 0 }):Play()
+		Services.TweenService:Create(ui.actionLabel, TweenInfo.new(0.42, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextTransparency = 0 }):Play()
+		Services.TweenService:Create(ui.destination, TweenInfo.new(0.48, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextTransparency = 0 }):Play()
+		Services.TweenService:Create(ui.destinationIcon, TweenInfo.new(0.52, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { ImageTransparency = 0.04 }):Play()
+		Services.TweenService:Create(ui.info, TweenInfo.new(0.54, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextTransparency = 0.08 }):Play()
+		Services.TweenService:Create(ui.footer, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextTransparency = 0.18 }):Play()
+		Services.TweenService:Create(ui.progressTrack, TweenInfo.new(0.58, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 0.58 }):Play()
+		Services.TweenService:Create(ui.progressCaption, TweenInfo.new(0.62, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextTransparency = 0.16 }):Play()
+		Services.TweenService:Create(ui.placeTag, TweenInfo.new(0.62, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextTransparency = 0.28 }):Play()
+		Services.TweenService:Create(ui.topEdge, TweenInfo.new(0.65, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 0.18 }):Play()
+	end)
+
+	Spawn(function()
+		local dots = 0
+		while state.teleportGui == ui.gui and token == state.teleportGuiToken and ui.gui.Parent do
+			dots = (dots % 3) + 1
+			ui.footer.Text = "Loading"..string.rep(".", dots)
+			Wait(0.34)
+		end
+	end)
+	Spawn(function()
+		while state.teleportGui == ui.gui and token == state.teleportGuiToken and ui.gui.Parent do
+			ui.runner.Position = UDim2.new(-0.22, 0, 0, 0)
+			local okTween, tween = pcall(Services.TweenService.Create, Services.TweenService, ui.runner, TweenInfo.new(1.12, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { Position = UDim2.new(1, 0, 0, 0) })
+			if okTween and tween then
+				tween:Play()
+				pcall(function() tween.Completed:Wait() end)
+			else
+				Wait(1.12)
+			end
+			Wait(0.04)
+		end
+	end)
+	Spawn(function()
+		while state.teleportGui == ui.gui and token == state.teleportGuiToken and ui.gui.Parent do
+			pcall(function()
+				local dim = Services.TweenService:Create(ui.statusDot, TweenInfo.new(0.56, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), { BackgroundTransparency = 0.72 })
+				dim:Play()
+				dim.Completed:Wait()
+				local bright = Services.TweenService:Create(ui.statusDot, TweenInfo.new(0.56, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), { BackgroundTransparency = 0 })
+				bright:Play()
+				bright.Completed:Wait()
+			end)
+		end
+	end)
+	Spawn(function()
+		while state.teleportGui == ui.gui and token == state.teleportGuiToken and ui.gui.Parent do
+			pcall(function()
+				local drift = Services.TweenService:Create(ui.backdrop, TweenInfo.new(4.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+					Position = UDim2.fromScale(0.507, 0.496);
+					Size = UDim2.fromScale(1.13, 1.13);
+				})
+				drift:Play()
+				drift.Completed:Wait()
+				local driftBack = Services.TweenService:Create(ui.backdrop, TweenInfo.new(4.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+					Position = UDim2.fromScale(0.5, 0.5);
+					Size = UDim2.fromScale(1.1, 1.1);
+				})
+				driftBack:Play()
+				driftBack.Completed:Wait()
+			end)
+		end
+	end)
+	Spawn(function()
+		while state.teleportGui == ui.gui and token == state.teleportGuiToken and ui.gui.Parent do
+			pcall(function()
+				local grow = Services.TweenService:Create(ui.logoScale, TweenInfo.new(1.15, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), { Scale = 1.025 })
+				grow:Play()
+				grow.Completed:Wait()
+				local shrink = Services.TweenService:Create(ui.logoScale, TweenInfo.new(1.15, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), { Scale = 1 })
+				shrink:Play()
+				shrink.Completed:Wait()
+			end)
+		end
+	end)
+	return ui.gui
+end
+
+NAmanage.SubplaceViewer_PerformTeleport = function(placeId, placeName, action, serverId, detail)
+	const lp = (Services.Players and Services.Players.LocalPlayer) or player
+	const meta = {
+		placeId = placeId;
+		placeName = placeName;
+		action = action;
+		detail = detail;
+	}
+	if type(serverId) == "string" and serverId ~= "" then
+		return NAmanage.TeleportServiceCall("TeleportToPlaceInstance", { placeId, serverId, lp }, meta)
+	end
+	return NAmanage.TeleportServiceCall("Teleport", { placeId, lp }, meta)
+end
+
+NAmanage.SubplaceViewer_HandleArrivingTeleportGui = function()
+	local ok, gui = pcall(Services.TeleportService.GetArrivingTeleportGui, Services.TeleportService)
+	if not (ok and gui) then return end
+	local tagged = false
+	pcall(function()
+		tagged = gui:GetAttribute("NASubplaceViewerTeleport") == true or gui:GetAttribute("NACustomTeleportGui") == true
+	end)
+	if not tagged and gui.Name ~= "NATeleportGui" then return end
+	const lp = (Services.Players and Services.Players.LocalPlayer) or player
+	const playerGui = lp and (lp:FindFirstChildOfClass("PlayerGui") or lp:FindFirstChild("PlayerGui"))
+	if playerGui then
+		pcall(function() gui.Parent = playerGui end)
+	end
+	NAmanage.TeleportGui_ApplyStaticState(gui)
+	const root = gui:FindFirstChild("Root")
+	const backdrop = root and root:FindFirstChild("Backdrop")
+	const wash = root and root:FindFirstChild("Wash")
+	const sideShade = root and root:FindFirstChild("SideShade")
+	const bottomShade = root and root:FindFirstChild("BottomShade")
+	const innerFrame = root and root:FindFirstChild("InnerFrame")
+	const innerFrameStroke = innerFrame and innerFrame:FindFirstChildOfClass("UIStroke")
+	const topEdge = root and root:FindFirstChild("TopEdge")
+	const foreground = root and root:FindFirstChild("Foreground")
+	const topBrand = foreground and foreground:FindFirstChild("TopBrand")
+	const content = foreground and foreground:FindFirstChild("Content")
+	const statusPill = content and content:FindFirstChild("StatusPill")
+	const statusDot = statusPill and statusPill:FindFirstChild("StatusDot")
+	const actionLabel = statusPill and statusPill:FindFirstChild("Action")
+	const footer = content and content:FindFirstChild("Footer")
+	const progressTrack = foreground and foreground:FindFirstChild("ProgressTrack")
+	const runner = progressTrack and progressTrack:FindFirstChild("Runner")
+	const progressCaption = foreground and foreground:FindFirstChild("ProgressCaption")
+	if actionLabel and actionLabel:IsA("TextLabel") then
+		actionLabel.Text = "READY"
+	end
+	if footer and footer:IsA("TextLabel") then
+		footer.Text = "Done"
+		footer.TextColor3 = Color3.fromRGB(235, 235, 235)
+	end
+	if progressCaption and progressCaption:IsA("TextLabel") then
+		progressCaption.Text = "READY"
+	end
+	if statusPill and statusPill:IsA("Frame") then
+		pcall(function()
+			Services.TweenService:Create(statusPill, TweenInfo.new(0.26, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 0.18 }):Play()
+		end)
+	end
+	if statusDot and statusDot:IsA("Frame") then
+		statusDot.BackgroundTransparency = 0
+	end
+	if runner and runner:IsA("Frame") then
+		pcall(function()
+			Services.TweenService:Create(runner, TweenInfo.new(0.34, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+				Position = UDim2.fromScale(0, 0);
+				Size = UDim2.fromScale(1, 1);
+			}):Play()
+		end)
+	end
+	Spawn(function()
+		Wait(0.52)
+		if not gui.Parent then return end
+		if content and content:IsA("Frame") then
+			pcall(function()
+				Services.TweenService:Create(content, TweenInfo.new(0.58, Enum.EasingStyle.Quint, Enum.EasingDirection.In), {
+					Position = UDim2.new(content.Position.X.Scale, content.Position.X.Offset, content.Position.Y.Scale, content.Position.Y.Offset - 14);
+				}):Play()
+			end)
+		end
+		if topBrand and topBrand:IsA("Frame") then
+			pcall(function()
+				Services.TweenService:Create(topBrand, TweenInfo.new(0.58, Enum.EasingStyle.Quint, Enum.EasingDirection.In), {
+					Position = UDim2.new(topBrand.Position.X.Scale, topBrand.Position.X.Offset, topBrand.Position.Y.Scale, topBrand.Position.Y.Offset - 8);
+				}):Play()
+			end)
+		end
+		if foreground then
+			for _, obj in foreground:GetDescendants() do
+				if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+					pcall(function()
+						Services.TweenService:Create(obj, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+							TextTransparency = 1;
+							BackgroundTransparency = 1;
+						}):Play()
+					end)
+				elseif obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+					pcall(function()
+						Services.TweenService:Create(obj, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+							ImageTransparency = 1;
+							BackgroundTransparency = 1;
+						}):Play()
+					end)
+				elseif obj:IsA("UIStroke") then
+					pcall(function()
+						Services.TweenService:Create(obj, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Transparency = 1 }):Play()
+					end)
+				elseif obj:IsA("Frame") and obj ~= foreground then
+					pcall(function()
+						Services.TweenService:Create(obj, TweenInfo.new(0.52, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { BackgroundTransparency = 1 }):Play()
+					end)
+				end
+			end
+		end
+		if topEdge and topEdge:IsA("Frame") then
+			pcall(function()
+				Services.TweenService:Create(topEdge, TweenInfo.new(0.48, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { BackgroundTransparency = 1 }):Play()
+			end)
+		end
+		if innerFrameStroke then
+			pcall(function()
+				Services.TweenService:Create(innerFrameStroke, TweenInfo.new(0.48, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Transparency = 1 }):Play()
+			end)
+		end
+		Wait(0.24)
+		if backdrop and backdrop:IsA("ImageLabel") then
+			pcall(function()
+				Services.TweenService:Create(backdrop, TweenInfo.new(0.92, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), {
+					ImageTransparency = 1;
+					Size = UDim2.fromScale(1.02, 1.02);
+				}):Play()
+			end)
+		end
+		for _, shade in { wash, sideShade, bottomShade } do
+			if shade and shade:IsA("Frame") then
+				pcall(function()
+					Services.TweenService:Create(shade, TweenInfo.new(0.92, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { BackgroundTransparency = 1 }):Play()
+				end)
+			end
+		end
+		if root and root:IsA("Frame") then
+			pcall(function()
+				Services.TweenService:Create(root, TweenInfo.new(1.02, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { BackgroundTransparency = 1 }):Play()
+			end)
+		end
+		Wait(1.05)
+		pcall(function() gui:Destroy() end)
+	end)
+end
+
+Defer(NAmanage.SubplaceViewer_HandleArrivingTeleportGui)
+
+NAmanage.TeleportGui_Create = function(placeId, placeName, action, detail)
+	return NAmanage.SubplaceViewer_CreateTeleportGui(placeId, placeName, action, detail)
+end
+
+NAmanage.TeleportGui_Clear = function(gui)
+	return NAmanage.SubplaceViewer_ClearTeleportGui(gui)
+end
+
+NAmanage.TeleportGui_GetPlaceName = function(placeId)
+	return NAmanage.SubplaceViewer_GetPlaceName(placeId)
+end
+
+NAmanage.TeleportServiceCall = function(method, args, meta)
+	args = type(args) == "table" and args or {}
+	meta = type(meta) == "table" and meta or {}
+	const expParams = NAmanage.TeleportArgsToExperienceParams(method, args, meta)
+	local tp = Services.TeleportService
+	if not tp then
+		local okTp, resolvedTp = pcall(function()
+			return game.TeleportService or game:GetService("TeleportService")
+		end)
+		if okTp and resolvedTp then
+			Services.TeleportService = resolvedTp
+			tp = resolvedTp
+		end
+	end
+	if not tp then
+		if expParams then
+			return NAmanage.ExperienceServiceLaunch(expParams, meta)
+		end
+		return false, "TeleportService unavailable"
+	end
+	const fn = tp[method]
+	if typeof(fn) ~= "function" then
+		if expParams then
+			return NAmanage.ExperienceServiceLaunch(expParams, meta)
+		end
+		return false, "TeleportService."..tostring(method).." unavailable"
+	end
+	const placeId = meta.placeId or args[1]
+	const gui = NAmanage.TeleportGui_Create(
+		placeId,
+		meta.placeName or NAmanage.TeleportGui_GetPlaceName(placeId),
+		meta.action or "TELEPORTING",
+		meta.detail
+	)
+	const fallbackToken = NAmanage.RegisterTeleportFallback(method, args, meta)
+	local ok, result = pcall(function()
+		return fn(tp, Unpack(args))
+	end)
+	if not ok then
+		NAmanage.TeleportGui_Clear(gui)
+		if fallbackToken then
+			local fallbackOk, fallbackResult = NAmanage.TryExperienceFallback("TeleportService call error: "..tostring(result), fallbackToken)
+			if fallbackOk then
+				return true, fallbackResult
+			end
+			return false, tostring(result).." | ExperienceService fallback: "..tostring(fallbackResult)
+		end
+	end
+	return ok, result
+end
+
+NAmanage.GameTeleportGui = type(NAmanage.GameTeleportGui) == "table" and NAmanage.GameTeleportGui or {}
+
+NAmanage.TeleportGui_UpdateDestination = function(gui, placeId, placeName, action, detail)
+	if not gui then return false end
+	placeId = tonumber(placeId) or tonumber(game.PlaceId) or 0
+	local okAlive = pcall(function() return gui.Parent end)
+	if not okAlive then return false end
+	pcall(function()
+		gui.Enabled = true
+		gui:SetAttribute("NADestinationPlaceId", placeId)
+	end)
+	const root = gui:FindFirstChild("Root")
+	const backdrop = root and root:FindFirstChild("Backdrop")
+	const foreground = root and root:FindFirstChild("Foreground")
+	const content = foreground and foreground:FindFirstChild("Content")
+	const statusPill = content and content:FindFirstChild("StatusPill")
+	const actionLabel = statusPill and statusPill:FindFirstChild("Action")
+	const destination = content and content:FindFirstChild("Destination")
+	const destinationIcon = content and content:FindFirstChild("DestinationIcon")
+	const info = content and content:FindFirstChild("Info")
+	const footer = content and content:FindFirstChild("Footer")
+	const progressTrack = foreground and foreground:FindFirstChild("ProgressTrack")
+	const runner = progressTrack and progressTrack:FindFirstChild("Runner")
+	const progressCaption = foreground and foreground:FindFirstChild("ProgressCaption")
+	const placeTag = foreground and foreground:FindFirstChild("PlaceTag")
+	const destinationThumbnail = NAmanage.SubplaceViewer_GetPlaceThumbnail(placeId, 420, 420)
+	const destinationIconImage = NAmanage.SubplaceViewer_GetPlaceIcon(placeId, 420, 420)
+	if backdrop and backdrop:IsA("ImageLabel") then
+		backdrop.Image = destinationThumbnail
+	end
+	if destinationIcon and destinationIcon:IsA("ImageLabel") then
+		destinationIcon.Image = destinationIconImage
+	end
+	NAmanage.TeleportGui_ResolveDestinationIcon(gui, placeId)
+	if actionLabel and actionLabel:IsA("TextLabel") then
+		actionLabel.Text = string.upper(tostring(action or "GAME TELEPORT"))
+	end
+	if destination and destination:IsA("TextLabel") then
+		destination.Text = tostring(placeName or NAmanage.TeleportGui_GetPlaceName(placeId))
+	end
+	if info and info:IsA("TextLabel") then
+		info.Text = tostring(detail or ("Place ID  "..tostring(placeId)))
+	end
+	if footer and footer:IsA("TextLabel") then
+		footer.Text = "Loading..."
+	end
+	if progressCaption and progressCaption:IsA("TextLabel") then
+		progressCaption.Text = "LOADING"
+	end
+	if placeTag and placeTag:IsA("TextLabel") then
+		placeTag.Text = "DESTINATION  //  "..tostring(placeId)
+	end
+	if runner and runner:IsA("Frame") then
+		runner.Position = UDim2.new(-0.22, 0, 0, 0)
+		runner.Size = UDim2.new(0.22, 0, 1, 0)
+	end
+	NAmanage.TeleportGui_ApplyStaticState(gui)
+	return true
+end
+
+NAmanage.GameTeleportGui_Disarm = function()
+	const state = NAmanage.GameTeleportGui
+	const gui = state.prearmedGui
+	state.prearmedGui = nil
+	state.lastGui = nil
+	state.lastPlaceId = nil
+	state.lastAt = 0
+	state.inFlight = false
+	const teleportState = NAmanage.SubplaceViewer
+	if gui then
+		if teleportState and teleportState.teleportHandoffGui == gui then
+			teleportState.teleportHandoffGui = nil
+		end
+		pcall(function() gui:Destroy() end)
+	end
+	if not (teleportState and teleportState.teleportGui and teleportState.teleportGui.Parent) then
+		pcall(Services.TeleportService.SetTeleportGui, Services.TeleportService, nil)
+	end
+end
+
+NAmanage.GameTeleportGui_Arm = function()
+	if NAStuff.CustomTeleportGuiEnabled == false or NAStuff.CustomTeleportGuiGameTeleportsEnabled ~= true or NAStuff.AntiTeleportHooked == true then
+		NAmanage.GameTeleportGui_Disarm()
+		return false
+	end
+	if NAStuff.teleportTransition == true then
+		return false
+	end
+	const state = NAmanage.GameTeleportGui
+	const teleportState = NAmanage.SubplaceViewer
+	if teleportState and teleportState.teleportGui and teleportState.teleportGui.Parent then
+		return false
+	end
+	if state.prearmedGui then
+		local okAlive = pcall(function() return state.prearmedGui.Name end)
+		if okAlive and teleportState and teleportState.teleportHandoffGui == state.prearmedGui then
+			pcall(Services.TeleportService.SetTeleportGui, Services.TeleportService, state.prearmedGui)
+			return true
+		end
+		state.prearmedGui = nil
+	end
+	const gui = NAmanage.SubplaceViewer_CreateTeleportGui(
+		game.PlaceId,
+		tostring(game.Name or "Current place"),
+		"GAME TELEPORT",
+		"Waiting for game teleport",
+		{ prearm = true }
+	)
+	if not gui then
+		return false
+	end
+	state.prearmedGui = gui
+	state.lastGui = nil
+	state.lastPlaceId = nil
+	state.lastAt = 0
+	state.inFlight = false
+	return true
+end
+
+NAmanage.GameTeleportGui_Reset = function()
+	const state = NAmanage.GameTeleportGui
+	state.prearmedGui = nil
+	state.lastPlaceId = nil
+	state.lastAt = 0
+	state.lastGui = nil
+	state.inFlight = false
+	if NAStuff.CustomTeleportGuiEnabled ~= false and NAStuff.CustomTeleportGuiGameTeleportsEnabled == true and NAStuff.AntiTeleportHooked ~= true then
+		Delay(0.25, function()
+			if NAStuff.teleportTransition ~= true then
+				pcall(NAmanage.GameTeleportGui_Arm)
+			end
+		end)
+	end
+end
+
+NAmanage.GameTeleportGui_OnTeleport = function(tpState, placeId, spawnName)
+	if NAStuff.CustomTeleportGuiEnabled == false or NAStuff.CustomTeleportGuiGameTeleportsEnabled ~= true or NAStuff.AntiTeleportHooked == true then
+		return nil
+	end
+	const stateName = (typeof(tpState) == "EnumItem" and tpState.Name) or tostring(tpState or "")
+	if stateName ~= "RequestedFromServer" and stateName ~= "Started" and stateName ~= "WaitingForServer" and stateName ~= "InProgress" then
+		return nil
+	end
+	const teleportState = NAmanage.SubplaceViewer
+	if teleportState and teleportState.teleportGui and teleportState.teleportGui.Parent then
+		return teleportState.teleportGui
+	end
+	placeId = tonumber(placeId)
+	if not placeId or placeId <= 0 then
+		return nil
+	end
+	const state = NAmanage.GameTeleportGui
+	local gui = state.prearmedGui
+	if not gui then
+		pcall(NAmanage.GameTeleportGui_Arm)
+		gui = state.prearmedGui
+	end
+	if not gui then
+		return nil
+	end
+	local detail = "Requested by game"
+	spawnName = tostring(spawnName or "")
+	if spawnName ~= "" then
+		detail = "Requested by game  /  Spawn "..spawnName
+	elseif stateName == "RequestedFromServer" then
+		detail = "Requested by server"
+	end
+	NAmanage.TeleportGui_UpdateDestination(
+		gui,
+		placeId,
+		NAmanage.TeleportGui_GetPlaceName(placeId),
+		"GAME TELEPORT",
+		detail
+	)
+	if not gui.Parent then
+		const lp = (Services.Players and Services.Players.LocalPlayer) or player
+		const playerGui = lp and (lp:FindFirstChildOfClass("PlayerGui") or lp:FindFirstChild("PlayerGui"))
+		if playerGui then
+			pcall(function() gui.Parent = playerGui end)
+		end
+	end
+	if teleportState then
+		teleportState.teleportHandoffGui = gui
+	end
+	state.lastPlaceId = placeId
+	state.lastAt = os.clock()
+	state.lastGui = gui
+	state.inFlight = true
+	return gui
+end
+
+if NAStuff.CustomTeleportGuiGameTeleportsEnabled == true then
+	Delay(1.25, function()
+		if NAStuff.teleportTransition ~= true then
+			pcall(NAmanage.GameTeleportGui_Arm)
+		end
+	end)
+end
+
+NAmanage.SubplaceViewer_UpdateResponsiveLayout = function()
+	const state = NAmanage.SubplaceViewer
+	const ui = state.ui or NAmanage.SubplaceViewer_GetUI()
+	if not (ui and ui.frame) then
+		return false
+	end
+	const width = math.max(1, ui.frame.AbsoluteSize.X)
+	const previousCompact = state.compact == true
+	const previousPhone = state.phone == true
+	state.compact = IsOnMobile == true or width < 660
+	state.phone = width < 500
+	return previousCompact ~= state.compact or previousPhone ~= state.phone
+end
+
+NAmanage.SubplaceViewer_ApplyResponsive = function(center)
+	const state = NAmanage.SubplaceViewer
+	const ui = state.ui or NAmanage.SubplaceViewer_GetUI()
+	const frame = ui and ui.frame
+	if not frame then
+		return false
+	end
+	const ok = NAmanage.ExecutorWindowSizing.Apply(frame, {
+		key = "SubplaceViewer";
+		baseWidth = 780;
+		baseHeight = 530;
+		minWidth = 560;
+		minHeight = 360;
+		mobileMinWidth = 320;
+		mobileMinHeight = 280;
+		center = center == true;
+	})
+	if not ok then
+		return false
+	end
+	const changed = NAmanage.SubplaceViewer_UpdateResponsiveLayout()
+	if changed and state.loaded and state.viewMode == "places" and state.rendering ~= true then
+		Defer(NAmanage.SubplaceViewer_Render)
+	end
+	return true
+end
+
+NAmanage.SubplaceViewer_GetUI = function()
+	const state = NAmanage.SubplaceViewer
+	const frame = NAUIMANAGER and NAUIMANAGER.SubplaceViewerFrame
+	const container = frame and frame:FindFirstChild("Container")
+	const topbar = frame and frame:FindFirstChild("Topbar")
+	state.ui = {
+		frame = frame;
+		container = container;
+		topbar = topbar;
+		title = topbar and topbar:FindFirstChild("Title");
+		refresh = topbar and topbar:FindFirstChild("Refresh");
+		search = container and container:FindFirstChild("Search");
+		filter = container and container:FindFirstChild("Filter");
+		sort = container and container:FindFirstChild("Sort");
+		current = container and container:FindFirstChild("Current");
+		status = container and container:FindFirstChild("Status");
+		list = container and container:FindFirstChild("List");
+	}
+	return state.ui
+end
+
+NAmanage.SubplaceViewer_RefreshScroll = function(immediate)
+	const state = NAmanage.SubplaceViewer
+	if state._scrollRefreshQueued and immediate ~= true then
+		return
+	end
+	const function refresh()
+		state._scrollRefreshQueued = false
+		const ui = state.ui or NAmanage.SubplaceViewer_GetUI()
+		const list = ui and ui.list
+		if not (list and list.Parent) then
+			return
+		end
+		const scroll = NAmanage.SubplaceViewerScroll
+		if scroll and scroll.install and scroll._installed ~= true then
+			pcall(scroll.install)
+		end
+		if scroll and scroll.setTarget then
+			pcall(scroll.setTarget, list)
+		end
+		pcall(updateCanvasSize, list, NAUIMANAGER and NAUIMANAGER.AUTOSCALER and NAUIMANAGER.AUTOSCALER.Scale or nil)
+		if scroll and scroll.refresh then
+			pcall(scroll.refresh)
+		elseif scroll and scroll.scheduleRefresh then
+			pcall(scroll.scheduleRefresh)
+		end
+	end
+	if immediate == true then
+		refresh()
+		return
+	end
+	state._scrollRefreshQueued = true
+	Defer(refresh)
+end
+
+NAmanage.SubplaceViewer_SaveFavorites = function()
+	const state = NAmanage.SubplaceViewer
+	if not (Services.HttpService and type(writefile) == "function") then return false end
+	pcall(function()
+		if type(isfolder) == "function" and type(makefolder) == "function" then
+			if not isfolder("Nameless-Admin") then makefolder("Nameless-Admin") end
+			if not isfolder(state.root) then makefolder(state.root) end
+		end
+	end)
+	local ok, data = pcall(Services.HttpService.JSONEncode, Services.HttpService, state.favorites)
+	if ok then return pcall(writefile, state.favoritesPath, data) end
+	return false
+end
+
+NAmanage.SubplaceViewer_LoadFavorites = function()
+	const state = NAmanage.SubplaceViewer
+	if not (Services.HttpService and type(isfile) == "function" and type(readfile) == "function") then return end
+	local okFile, exists = pcall(isfile, state.favoritesPath)
+	if not (okFile and exists) then return end
+	local okRead, raw = pcall(readfile, state.favoritesPath)
+	if not okRead then return end
+	local okDecode, data = pcall(Services.HttpService.JSONDecode, Services.HttpService, raw)
+	if okDecode and type(data) == "table" then state.favorites = data end
+end
+
+NAmanage.SubplaceViewer_HttpJson = function(url)
+	local ok, body = pcall(_na_boot.httpGet, url, { maxAttempts = 4; timeout = 12 })
+	if not ok or type(body) ~= "string" then return nil, body end
+	local decodedOk, data = pcall(Services.HttpService.JSONDecode, Services.HttpService, body)
+	if not decodedOk then return nil, data end
+	return data
+end
+
+NAmanage.SubplaceViewer_ApplyPlaceIcon = function(place)
+	const state = NAmanage.SubplaceViewer
+	const ui = state.ui or NAmanage.SubplaceViewer_GetUI()
+	const placeId = tonumber(place and place.PlaceId)
+	if not (ui and ui.list and placeId) then return false end
+	const row = ui.list:FindFirstChild("Place_"..tostring(placeId))
+	const icon = row and row:FindFirstChild("Icon")
+	if icon and icon:IsA("ImageLabel") then
+		icon.Image = NAmanage.SubplaceViewer_GetPlaceIcon(placeId, 150, 150, place.IconAssetId)
+		return true
+	end
+	return false
+end
+
+NAmanage.SubplaceViewer_FetchPlaceIconAssets = function(places, fetchToken)
+	const state = NAmanage.SubplaceViewer
+	const workerCount = math.min(4, #places)
+	if workerCount <= 0 then return end
+	Delay(0.05, function()
+		if fetchToken ~= state.fetchToken then return end
+		local nextIndex = 0
+		for _ = 1, workerCount do
+			Spawn(function()
+				while fetchToken == state.fetchToken do
+					nextIndex += 1
+					const index = nextIndex
+					const place = places[index]
+					if not place then break end
+					const placeId = tonumber(place.PlaceId)
+					if placeId then
+						local cached = state.placeIconAssets[placeId]
+						if cached == nil then
+							local ok, info = pcall(Services.MarketplaceService.GetProductInfo, Services.MarketplaceService, placeId, Enum.InfoType.Asset)
+							if ok and type(info) == "table" then
+								const iconAssetId = tonumber(info.IconImageAssetId) or 0
+								cached = iconAssetId > 0 and iconAssetId or false
+								state.placeIconAssets[placeId] = cached
+							end
+						end
+						place.IconAssetId = type(cached) == "number" and cached or 0
+						if fetchToken == state.fetchToken then
+							NAmanage.SubplaceViewer_ApplyPlaceIcon(place)
+						end
+					end
+				end
+			end)
+		end
+	end)
+end
+
+NAmanage.SubplaceViewer_ApplyCachedPlaceIcons = function(places)
+	const state = NAmanage.SubplaceViewer
+	for _, place in places do
+		const cached = state.placeIconAssets[tonumber(place.PlaceId)]
+		if type(cached) == "number" then
+			place.IconAssetId = cached
+		elseif cached == false then
+			place.IconAssetId = 0
+		end
+	end
+end
+
+NAmanage.SubplaceViewer_FetchServers = function(placeId, cursor)
+	const state = NAmanage.SubplaceViewer
+	const pid = tostring(placeId)
+	local suffix = "/v1/games/"..pid.."/servers/Public?sortOrder=Asc&limit=100"
+	if cursor and cursor ~= "" then suffix ..= "&cursor="..Services.HttpService:UrlEncode(cursor) end
+	local lastErr
+	for _, base in state.serverBases do
+		local data, err = NAmanage.SubplaceViewer_HttpJson(base..suffix)
+		if type(data) == "table" and type(data.data) == "table" then return data end
+		lastErr = err
+	end
+	local workerUrl = state.serverWorker.."/servers?placeId="..Services.HttpService:UrlEncode(pid)
+	local data, err = NAmanage.SubplaceViewer_HttpJson(workerUrl)
+	if type(data) == "table" and type(data.data) == "table" then return data end
+	return nil, err or lastErr
+end
+
+NAmanage.SubplaceViewer_NormalizeServers = function(data, allowCurrent)
+	const servers = {}
+	if type(data) ~= "table" or type(data.data) ~= "table" then return servers end
+	for _, server in data.data do
+		if type(server) == "table" then
+			const serverId = tostring(server.id or "")
+			const playing = tonumber(server.playing) or 0
+			const maximum = tonumber(server.maxPlayers or server.max) or 0
+			if serverId ~= "" and maximum > playing and (allowCurrent or serverId ~= tostring(game.JobId)) then
+				servers[#servers + 1] = {
+					id = serverId;
+					playing = playing;
+					max = maximum;
+					ping = tonumber(server.ping) or 0;
+					fps = tonumber(server.fps) or 0;
+				}
+			end
+		end
+	end
+	return servers
+end
+
+NAmanage.SubplaceViewer_TeleportServer = function(placeId, server, message)
+	if type(server) ~= "table" or not server.id then
+		DoNotif("No joinable server was found.", 3, "Subplace Viewer")
+		return false
+	end
+	const latencyText = type(NAStuff.srv) == "table" and type(NAStuff.srv.latencyText) == "function" and NAStuff.srv:latencyText(server) or ((tonumber(server.ping) or 0) > 0 and (tostring(math.floor(tonumber(server.ping))).." ms") or "unknown latency")
+	local ok, err = NAmanage.SubplaceViewer_PerformTeleport(
+		placeId,
+		NAmanage.SubplaceViewer_GetPlaceName(placeId),
+		string.upper(tostring(message or "Joining server")),
+		server.id,
+		Format("%d/%d players  •  %s", server.playing, server.max, latencyText)
+	)
+	if ok then
+		DoNotif((message or "Joining server")..": "..tostring(server.playing).."/"..tostring(server.max).." | "..latencyText, 4, "Subplace Viewer")
+	else
+		DoNotif("Teleport failed: "..tostring(err), 4, "Subplace Viewer")
+	end
+	return ok
+end
+
+NAmanage.SubplaceViewer_Hop = function(placeId, mode, value)
+	const state = NAmanage.SubplaceViewer
+	const ui = state.ui or NAmanage.SubplaceViewer_GetUI()
+	const labels = {
+		advanced = "best-latency server";
+		smallest = "small server in the best-latency region";
+		fullest = "full server in the best-latency region";
+		oldest = "oldest active server";
+		newest = "newest active server";
+		version = "requested place version";
+		oldversion = "oldest active place version";
+		region = "requested region";
+	}
+	if ui and ui.status then ui.status.Text = "Finding the "..tostring(labels[mode] or "server").."..." end
+	Spawn(function()
+		if type(NAStuff.srv) ~= "table" then
+			if ui and ui.status then ui.status.Text = "RoValra server picker is unavailable." end
+			return
+		end
+		local server, err, extra = nil, nil, nil
+		if mode == "oldest" or mode == "newest" then
+			server, err = NAStuff.srv:pickUptime(placeId, mode)
+		elseif mode == "version" then
+			server, err = NAStuff.srv:pickVersion(placeId, value)
+		elseif mode == "oldversion" then
+			server, err, extra = NAStuff.srv:pickOldestVersion(placeId)
+		elseif mode == "region" then
+			server, err, extra = NAStuff.srv:pickRegion(placeId, value)
+		else
+			const pickMode = mode == "smallest" and "low" or mode == "fullest" and "high" or "ping"
+			server, err = NAStuff.srv:pickLatency(placeId, pickMode)
+		end
+		if not server then
+			if ui and ui.status then ui.status.Text = "No matching joinable public server was found." end
+			DoNotif("No matching joinable public server was found: "..tostring(err or "none available"), 4, "Subplace Viewer")
+			return
+		end
+		const latencyText = type(NAStuff.srv.latencyText) == "function" and NAStuff.srv:latencyText(server) or "unknown latency"
+		if ui and ui.status then ui.status.Text = "Joining "..latencyText.."..." end
+		const names = {
+			smallest = "Smallest low-latency server";
+			fullest = "Fullest low-latency server";
+			oldest = "Oldest active server";
+			newest = "Newest active server";
+			version = "Version "..tostring(value or server.placeVersion or "?");
+			oldversion = "Oldest active version "..tostring(extra or server.placeVersion or "?");
+			region = "Region "..tostring((type(extra) == "table" and extra.city) or value or server.region or "?");
+		}
+		NAmanage.SubplaceViewer_TeleportServer(placeId, server, names[mode] or "Best latency hop")
+	end)
+end
+
+NAmanage.SubplaceViewer_ShowServers = function(place)
+	const state = NAmanage.SubplaceViewer
+	state.viewMode = "servers"
+	state.serverSort = state.serverSort or "latency"
+	const ui = state.ui or NAmanage.SubplaceViewer_GetUI()
+	if not (ui and ui.list) then return end
+	state.serverToken += 1
+	const token = state.serverToken
+	NAlib.disconnect("NASubplaceViewerCards")
+	NAlib.disconnect("NASubplaceViewerServers")
+	for _, child in ui.list:GetChildren() do
+		if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then child:Destroy() end
+	end
+	ui.status.Text = "Loading public servers for "..tostring(place.Name).."..."
+	Spawn(function()
+		local data, err = NAmanage.SubplaceViewer_FetchServers(place.PlaceId)
+		if token ~= state.serverToken then return end
+		local servers = NAmanage.SubplaceViewer_NormalizeServers(data, place.PlaceId ~= game.PlaceId)
+		if type(data) ~= "table" or type(data.data) ~= "table" then ui.status.Text = "Server request failed: "..tostring(err or "unknown error") return end
+		local latencyModelReady = false
+		if #servers > 0 and type(NAStuff.srv) == "table" and type(NAStuff.srv.enrichLatencyList) == "function" then
+			ui.status.Text = "Resolving region, uptime, version and latency for "..tostring(place.Name).."..."
+			servers, latencyModelReady = NAStuff.srv:enrichLatencyList(place.PlaceId, servers)
+			if token ~= state.serverToken then return end
+		end
+
+		local function sortServers()
+			const mode = state.serverSort or "latency"
+			table.sort(servers, function(a, b)
+				if mode == "players" then
+					if a.playing ~= b.playing then return a.playing < b.playing end
+				elseif mode == "uptime" then
+					const au = tonumber(a.uptime) or -1
+					const bu = tonumber(b.uptime) or -1
+					if au ~= bu then return au > bu end
+				elseif mode == "version" then
+					const av = tonumber(a.placeVersion) or math.huge
+					const bv = tonumber(b.placeVersion) or math.huge
+					if av ~= bv then return av < bv end
+				else
+					const ar = tonumber(a.regionRank) or math.huge
+					const br = tonumber(b.regionRank) or math.huge
+					if ar ~= br then return ar < br end
+					const al = tonumber(a.latency) or tonumber(a.ping) or math.huge
+					const bl = tonumber(b.latency) or tonumber(b.ping) or math.huge
+					if al ~= bl then return al < bl end
+				end
+				return tostring(a.id) < tostring(b.id)
+			end)
+		end
+		sortServers()
+
+		local knownRegions = 0
+		for _, server in servers do if server.region or server.regionLabel then knownRegions += 1 end end
+		ui.status.Text = latencyModelReady and Format("%d joinable | %d region-mapped | %s", #servers, knownRegions, tostring(place.Name)) or Format("%d joinable | Roblox ping fallback | %s", #servers, tostring(place.Name))
+
+		local controls = Instance.new("Frame", ui.list)
+		controls.Name = "ServerControls"
+		controls.Size = UDim2.new(1, -4, 0, 110)
+		controls.BackgroundTransparency = 1
+		local grid = Instance.new("UIGridLayout", controls)
+		grid.CellPadding = UDim2.new(0, 5, 0, 5)
+		grid.CellSize = UDim2.new(0.25, -4, 0, 33)
+		grid.FillDirectionMaxCells = 4
+		local function makeControl(name, label, order)
+			local b = Instance.new("TextButton", controls)
+			b.Name = name
+			b.LayoutOrder = order
+			b.BackgroundColor3 = Color3.fromRGB(65,60,82)
+			b.TextColor3 = Color3.fromRGB(245,245,250)
+			b.Text = label
+			b.TextSize = 12
+			b.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+			Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+			return b
+		end
+		local function makeInput(name, placeholder, order)
+			local box = Instance.new("TextBox", controls)
+			box.Name = name
+			box.LayoutOrder = order
+			box.BackgroundColor3 = Color3.fromRGB(43,43,52)
+			box.TextColor3 = Color3.fromRGB(245,245,250)
+			box.PlaceholderColor3 = Color3.fromRGB(160,160,176)
+			box.PlaceholderText = placeholder
+			box.Text = ""
+			box.ClearTextOnFocus = false
+			box.TextSize = 12
+			box.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+			Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+			return box
+		end
+		local back = makeControl("Back", "Back", 1)
+		local sort = makeControl("Sort", "Sort: "..string.upper(string.sub(state.serverSort,1,1))..string.sub(state.serverSort,2), 2)
+		local best = makeControl("Best", "Best Latency", 3)
+		local smallest = makeControl("Smallest", "Smallest", 4)
+		local fullest = makeControl("Fullest", "Fullest", 5)
+		local oldest = makeControl("Oldest", "Oldest", 6)
+		local newest = makeControl("Newest", "Newest", 7)
+		local oldversion = makeControl("OldVersion", "Old Version", 8)
+		local regionInput = makeInput("RegionInput", "Region / city", 9)
+		local region = makeControl("Region", "Region Hop", 10)
+		local versionInput = makeInput("VersionInput", "Place version", 11)
+		local version = makeControl("Version", "Version Hop", 12)
+		NAlib.connect("NASubplaceViewerServers", back.Activated:Connect(function() NAmanage.SubplaceViewer_Render() end))
+		NAlib.connect("NASubplaceViewerServers", best.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "advanced") end))
+		NAlib.connect("NASubplaceViewerServers", smallest.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "smallest") end))
+		NAlib.connect("NASubplaceViewerServers", fullest.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "fullest") end))
+		NAlib.connect("NASubplaceViewerServers", oldest.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "oldest") end))
+		NAlib.connect("NASubplaceViewerServers", newest.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "newest") end))
+		NAlib.connect("NASubplaceViewerServers", oldversion.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "oldversion") end))
+		NAlib.connect("NASubplaceViewerServers", region.Activated:Connect(function()
+			const query = tostring(regionInput.Text or ""):match("^%s*(.-)%s*$") or ""
+			if query == "" then DoNotif("Enter a region or city first.", 3, "Subplace Viewer") return end
+			NAmanage.SubplaceViewer_Hop(place.PlaceId, "region", query)
+		end))
+		NAlib.connect("NASubplaceViewerServers", version.Activated:Connect(function()
+			const selectedVersion = tonumber(versionInput.Text)
+			if not selectedVersion then DoNotif("Enter a valid place version first.", 3, "Subplace Viewer") return end
+			NAmanage.SubplaceViewer_Hop(place.PlaceId, "version", selectedVersion)
+		end))
+		NAlib.connect("NASubplaceViewerServers", sort.Activated:Connect(function()
+			const order = { latency = "players"; players = "uptime"; uptime = "version"; version = "latency" }
+			state.serverSort = order[state.serverSort] or "latency"
+			NAmanage.SubplaceViewer_ShowServers(place)
+		end))
+
+		if #servers == 0 then
+			local empty = Instance.new("TextLabel", ui.list)
+			empty.Size = UDim2.new(1, -4, 0, 44)
+			empty.BackgroundTransparency = 1
+			empty.Text = "No other joinable public servers were returned."
+			empty.TextColor3 = Color3.fromRGB(205,205,218)
+			empty.TextSize = 13
+			empty.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+			return
+		end
+
+		for index, server in servers do
+			local row = Instance.new("Frame", ui.list)
+			row.Name = "Server_"..tostring(index)
+			row.Size = UDim2.new(1, -4, 0, 92)
+			row.BackgroundColor3 = Color3.fromRGB(48,48,56)
+			row.BackgroundTransparency = 0.12
+			Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+			local label = Instance.new("TextLabel", row)
+			label.BackgroundTransparency = 1
+			label.Position = UDim2.new(0,10,0,4)
+			label.Size = UDim2.new(1,-116,1,-8)
+			label.TextXAlignment = Enum.TextXAlignment.Left
+			label.TextYAlignment = Enum.TextYAlignment.Center
+			const latencyText = type(NAStuff.srv) == "table" and NAStuff.srv:latencyText(server) or "unknown latency"
+			const pingText = (tonumber(server.ping) or 0) > 0 and (tostring(math.floor(tonumber(server.ping))).." ms") or "N/A"
+			const uptimeText = type(NAStuff.srv) == "table" and NAStuff.srv:formatUptime(server.uptime, server.uptimeEstimated == true) or "Unknown"
+			const versionText = server.placeVersion and tostring(server.placeVersion) or "Unknown"
+			label.Text = Format("%d/%d players\nLatency: %s\nUptime: %s | Version: %s\nRoblox ping: %s | FPS: %.2f", server.playing, server.max, latencyText, uptimeText, versionText, pingText, server.fps)
+			label.TextColor3 = Color3.fromRGB(225,225,235)
+			label.TextSize = 12
+			label.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+			local join = Instance.new("TextButton", row)
+			join.Size = UDim2.new(0,92,0,32)
+			join.Position = UDim2.new(1,-102,0.5,-16)
+			join.BackgroundColor3 = Color3.fromRGB(70,65,92)
+			join.Text = "Join"
+			join.TextColor3 = Color3.fromRGB(245,245,250)
+			join.TextSize = 13
+			join.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+			Instance.new("UICorner", join).CornerRadius = UDim.new(0, 6)
+			NAlib.connect("NASubplaceViewerServers", join.Activated:Connect(function() NAmanage.SubplaceViewer_TeleportServer(place.PlaceId, server, "Joining server") end))
+		end
+	end)
+end
+
+NAmanage.SubplaceViewer_Render = function()
+	const state = NAmanage.SubplaceViewer
+	state.serverToken += 1
+	state.viewMode = "places"
+	state.rendering = true
+	const ui = state.ui or NAmanage.SubplaceViewer_GetUI()
+	if not (ui and ui.list) then
+		state.rendering = false
+		return
+	end
+	NAmanage.SubplaceViewer_UpdateResponsiveLayout()
+	NAlib.disconnect("NASubplaceViewerCards")
+	NAlib.disconnect("NASubplaceViewerServers")
+	for _, child in ui.list:GetChildren() do
+		if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then child:Destroy() end
+	end
+	local query = Lower(tostring(ui.search and ui.search.Text or ""))
+	local entries = {}
+	for _, place in state.places do
+		const favorite = state.favorites[tostring(place.PlaceId)] == true
+		if (state.filter == "all" or favorite) and (query == "" or Lower(place.Name):find(query, 1, true) or tostring(place.PlaceId):find(query, 1, true)) then
+			entries[#entries + 1] = place
+		end
+	end
+	table.sort(entries, function(a, b)
+		const af = state.favorites[tostring(a.PlaceId)] == true
+		const bf = state.favorites[tostring(b.PlaceId)] == true
+		if af ~= bf then return af end
+		const ac = a.PlaceId == game.PlaceId
+		const bc = b.PlaceId == game.PlaceId
+		if ac ~= bc then return ac end
+		if state.sort == "id" then return a.PlaceId < b.PlaceId end
+		return Lower(a.Name) < Lower(b.Name)
+	end)
+	ui.status.Text = Format("%d/%d subplaces | Universe %s", #entries, #state.places, tostring(game.GameId))
+	for index, place in entries do
+		const isCurrent = place.PlaceId == game.PlaceId
+		const compact = state.compact == true
+		const phone = state.phone == true
+		const iconSize = compact and (phone and 54 or 60) or 72
+		const rowHeight = compact and (phone and 176 or 182) or 126
+		local row = Instance.new("Frame", ui.list)
+		row.Name = "Place_"..tostring(place.PlaceId)
+		row.LayoutOrder = index
+		row.Size = UDim2.new(1, -4, 0, rowHeight)
+		row.BackgroundColor3 = isCurrent and Color3.fromRGB(58,53,75) or Color3.fromRGB(48,48,56)
+		row.BackgroundTransparency = 0.1
+		Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+		local icon = Instance.new("ImageLabel", row)
+		icon.Name = "Icon"
+		icon.BackgroundColor3 = Color3.fromRGB(35,35,42)
+		icon.Position = UDim2.new(0, 8, 0, 8)
+		icon.Size = UDim2.new(0, iconSize, 0, iconSize)
+		icon.Image = NAmanage.SubplaceViewer_GetPlaceIcon(place.PlaceId, 150, 150, place.IconAssetId)
+		Instance.new("UICorner", icon).CornerRadius = UDim.new(0, 6)
+		local label = Instance.new("TextLabel", row)
+		label.BackgroundTransparency = 1
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.TextYAlignment = Enum.TextYAlignment.Top
+		label.TextWrapped = true
+		label.Text = place.Name.."\nPlaceId: "..tostring(place.PlaceId)..(isCurrent and "\nCurrent Place" or "")
+		label.TextColor3 = Color3.fromRGB(230,230,240)
+		label.TextSize = phone and 13 or 14
+		label.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+		local actions = Instance.new("Frame", row)
+		actions.Name = "Actions"
+		actions.BackgroundTransparency = 1
+		if compact then
+			label.Position = UDim2.new(0, iconSize + 18, 0, 7)
+			label.Size = UDim2.new(1, -(iconSize + 26), 0, iconSize + 2)
+			actions.Position = UDim2.new(0, 8, 0, iconSize + 16)
+			actions.Size = UDim2.new(1, -16, 0, 100)
+		else
+			label.Position = UDim2.new(0, 90, 0, 7)
+			label.Size = UDim2.new(0.52, -98, 1, -14)
+			actions.Position = UDim2.new(0.52, 0, 0, 7)
+			actions.Size = UDim2.new(0.48, -8, 1, -14)
+		end
+		local actionGrid = Instance.new("UIGridLayout", actions)
+		actionGrid.CellPadding = UDim2.new(0, compact and 5 or 6, 0, 6)
+		actionGrid.CellSize = UDim2.new(0.25, compact and -4 or -5, 0, 30)
+		actionGrid.FillDirection = Enum.FillDirection.Horizontal
+		actionGrid.FillDirectionMaxCells = 4
+		actionGrid.HorizontalAlignment = Enum.HorizontalAlignment.Right
+		actionGrid.VerticalAlignment = Enum.VerticalAlignment.Center
+		actionGrid.SortOrder = Enum.SortOrder.LayoutOrder
+		local function makeAction(name, text, order, color)
+			local b = Instance.new("TextButton", actions)
+			b.Name = name
+			b.LayoutOrder = order
+			b.BackgroundColor3 = color or Color3.fromRGB(63,59,82)
+			b.BackgroundTransparency = 0.05
+			b.Text = text
+			b.TextColor3 = Color3.fromRGB(245,245,250)
+			b.TextSize = phone and 10 or 11
+			b.TextTruncate = Enum.TextTruncate.AtEnd
+			b.FontFace = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+			Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+			return b
+		end
+		const isFavorite = state.favorites[tostring(place.PlaceId)] == true
+		local favorite = makeAction("Favorite", isFavorite and "<b>star</b>" or "star", 1, isFavorite and Color3.fromRGB(115,88,55) or nil)
+		favorite.RichText = true
+		favorite.TextSize = phone and 17 or 18
+		favorite.FontFace = Font.new("rbxasset://LuaPackages/Packages/_Index/BuilderIcons/BuilderIcons/BuilderIcons.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+		local join = makeAction("Join", isCurrent and "Server Hop" or "Join", 2, isCurrent and Color3.fromRGB(55,126,255) or nil)
+		local rejoin
+		if isCurrent then rejoin = makeAction("Rejoin", "Rejoin", 3, Color3.fromRGB(55,126,255)) end
+		local advanced = makeAction("Advanced", "Best Latency", isCurrent and 4 or 3, Color3.fromRGB(90,94,255))
+		local smallest = makeAction("Smallest", "Smallest", isCurrent and 5 or 4, Color3.fromRGB(45,166,125))
+		local fullest = makeAction("Fullest", "Fullest", isCurrent and 6 or 5, Color3.fromRGB(150,93,255))
+		local oldest = makeAction("Oldest", "Oldest", isCurrent and 7 or 6, Color3.fromRGB(125,94,62))
+		local newest = makeAction("Newest", "Newest", isCurrent and 8 or 7, Color3.fromRGB(55,126,180))
+		local oldversion = makeAction("OldVersion", "Old Version", isCurrent and 9 or 8, Color3.fromRGB(125,75,110))
+		local servers = makeAction("Servers", "Servers", isCurrent and 10 or 9)
+		local copy = makeAction("Copy", "Copy ID", isCurrent and 11 or 10)
+		NAlib.connect("NASubplaceViewerCards", favorite.Activated:Connect(function()
+			const key = tostring(place.PlaceId)
+			state.favorites[key] = not state.favorites[key] or nil
+			NAmanage.SubplaceViewer_SaveFavorites()
+			NAmanage.SubplaceViewer_Render()
+		end))
+		NAlib.connect("NASubplaceViewerCards", servers.Activated:Connect(function() NAmanage.SubplaceViewer_ShowServers(place) end))
+		NAlib.connect("NASubplaceViewerCards", copy.Activated:Connect(function()
+			if type(setclipboard) == "function" then setclipboard(tostring(place.PlaceId)) DoNotif("PlaceId copied.", 2, "Subplace Viewer") end
+		end))
+		NAlib.connect("NASubplaceViewerCards", join.Activated:Connect(function()
+			if isCurrent then
+				NAmanage.SubplaceViewer_Hop(game.PlaceId, "advanced")
+			else
+				local ok, err = NAmanage.SubplaceViewer_PerformTeleport(place.PlaceId, place.Name, "JOINING SUBPLACE", nil, "Place ID "..tostring(place.PlaceId))
+				if ok then DoNotif("Teleporting to "..tostring(place.Name)..".", 2, "Subplace Viewer") else DoNotif("Teleport failed: "..tostring(err), 4, "Subplace Viewer") end
+			end
+		end))
+		if rejoin then
+			NAlib.connect("NASubplaceViewerCards", rejoin.Activated:Connect(function()
+				local ok, err = NAmanage.SubplaceViewer_PerformTeleport(game.PlaceId, game.Name, "REJOINING SERVER", game.JobId, "Returning to the current server")
+				if ok then DoNotif("Rejoining this server.", 2, "Subplace Viewer") else DoNotif("Teleport failed: "..tostring(err), 4, "Subplace Viewer") end
+			end))
+		end
+		if advanced then
+			NAlib.connect("NASubplaceViewerCards", advanced.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "advanced") end))
+		end
+		if smallest then NAlib.connect("NASubplaceViewerCards", smallest.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "smallest") end)) end
+		if fullest then NAlib.connect("NASubplaceViewerCards", fullest.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "fullest") end)) end
+		if oldest then NAlib.connect("NASubplaceViewerCards", oldest.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "oldest") end)) end
+		if newest then NAlib.connect("NASubplaceViewerCards", newest.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "newest") end)) end
+		if oldversion then NAlib.connect("NASubplaceViewerCards", oldversion.Activated:Connect(function() NAmanage.SubplaceViewer_Hop(place.PlaceId, "oldversion") end)) end
+	end
+	state.rendering = false
+	NAmanage.SubplaceViewer_RefreshScroll()
+end
+
+NAmanage.SubplaceViewer_Fetch = function(force)
+	const state = NAmanage.SubplaceViewer
+	const ui = state.ui or NAmanage.SubplaceViewer_GetUI()
+	if state.loading then return end
+	if state.loaded and not force then NAmanage.SubplaceViewer_Render() return end
+	state.loading = true
+	state.fetchToken += 1
+	const token = state.fetchToken
+	if ui and ui.status then ui.status.Text = "Fetching universe subplaces..." end
+	Spawn(function()
+		local places = {}
+		local seen = {}
+		local ok, pages = pcall(function() return __lt.cm("AssetService", "GetGamePlacesAsync") end)
+		if ok and pages then
+			while true do
+				for _, info in pages:GetCurrentPage() do
+					if info.PlaceId and not seen[info.PlaceId] then
+						seen[info.PlaceId] = true
+						places[#places + 1] = { Name = tostring(info.Name or ("Place "..info.PlaceId)); PlaceId = info.PlaceId }
+					end
+				end
+				if pages.IsFinished then break end
+				local advanced = pcall(function() pages:AdvanceToNextPageAsync() end)
+				if not advanced then break end
+			end
+		end
+		if not seen[game.PlaceId] then places[#places + 1] = { Name = game.Name; PlaceId = game.PlaceId } end
+		if token ~= state.fetchToken then return end
+		NAmanage.SubplaceViewer_ApplyCachedPlaceIcons(places)
+		state.places = places
+		state.loaded = true
+		state.loading = false
+		if #places == 0 then
+			if ui and ui.status then ui.status.Text = "No subplaces were returned." end
+		else
+			NAmanage.SubplaceViewer_Render()
+			NAmanage.SubplaceViewer_FetchPlaceIconAssets(places, token)
+		end
+	end)
+end
+
+NAmanage.SubplaceViewer_Init = function()
+	const state = NAmanage.SubplaceViewer
+	const ui = NAmanage.SubplaceViewer_GetUI()
+	if state.initialized or not (ui and ui.frame) then return ui ~= nil end
+	state.initialized = true
+	NAmanage.SubplaceViewer_LoadFavorites()
+	if ui.sort then ui.sort.Text = state.sort == "id" and "Sort: ID" or "Sort: Name" end
+	NAmanage.SubplaceViewer_ApplyResponsive(false)
+	NAmanage.SubplaceViewer_SaveFrameSize = function()
+		NAmanage.ExecutorWindowSizing.Save(ui.frame, "NASubplaceViewerSavedSizeX", "NASubplaceViewerSavedSizeY")
+	end
+	NAlib.disconnect("NASubplaceViewerScrollSync")
+	const listLayout = ui.list and ui.list:FindFirstChildOfClass("UIListLayout")
+	if listLayout then
+		NAlib.connect("NASubplaceViewerScrollSync", listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+			NAmanage.SubplaceViewer_RefreshScroll()
+		end))
+	end
+	if ui.list then
+		NAlib.connect("NASubplaceViewerScrollSync", ui.list:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			NAmanage.SubplaceViewer_RefreshScroll()
+		end))
+		NAlib.connect("NASubplaceViewerScrollSync", ui.list:GetPropertyChangedSignal("Visible"):Connect(function()
+			NAmanage.SubplaceViewer_RefreshScroll()
+		end))
+	end
+	NAlib.connect("NASubplaceViewerScrollSync", ui.frame:GetPropertyChangedSignal("Visible"):Connect(function()
+		if ui.frame.Visible then
+			NAmanage.SubplaceViewer_RefreshScroll()
+		end
+	end))
+	NAlib.disconnect("NASubplaceViewerResponsive")
+	NAlib.connect("NASubplaceViewerResponsive", ui.frame:GetPropertyChangedSignal("Size"):Connect(NAmanage.SubplaceViewer_SaveFrameSize))
+	NAlib.connect("NASubplaceViewerResponsive", ui.frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		const changed = NAmanage.SubplaceViewer_UpdateResponsiveLayout()
+		if changed and state.loaded and state.viewMode == "places" and state.rendering ~= true then
+			Defer(NAmanage.SubplaceViewer_Render)
+		end
+	end))
+	if Services.Workspace and Services.Workspace.CurrentCamera then
+		NAlib.connect("NASubplaceViewerResponsive", Services.Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+			Defer(function()
+				if ui.frame and ui.frame.Parent then
+					NAmanage.SubplaceViewer_ApplyResponsive(true)
+				end
+			end)
+		end))
+	end
+	if NAStuff and NAStuff.NASCREENGUI then
+		NAlib.connect("NASubplaceViewerResponsive", NAStuff.NASCREENGUI:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			Defer(function()
+				if ui.frame and ui.frame.Parent then
+					NAmanage.SubplaceViewer_ApplyResponsive(true)
+				end
+			end)
+		end))
+	end
+	if NAUIMANAGER and NAUIMANAGER.AUTOSCALER then
+		NAlib.connect("NASubplaceViewerResponsive", NAUIMANAGER.AUTOSCALER:GetPropertyChangedSignal("Scale"):Connect(function()
+			Defer(function()
+				if ui.frame and ui.frame.Parent then
+					NAmanage.SubplaceViewer_ApplyResponsive(true)
+				end
+			end)
+		end))
+	end
+	NAlib.connect("NASubplaceViewer", ui.refresh.Activated:Connect(function() NAmanage.SubplaceViewer_Fetch(true) end))
+	NAlib.connect("NASubplaceViewer", ui.search:GetPropertyChangedSignal("Text"):Connect(function() if state.loaded then NAmanage.SubplaceViewer_Render() end end))
+	NAlib.connect("NASubplaceViewer", ui.filter.Activated:Connect(function()
+		state.filter = state.filter == "all" and "favorites" or "all"
+		ui.filter.Text = state.filter == "all" and "All Places" or "Favorites"
+		NAmanage.SubplaceViewer_Render()
+	end))
+	NAlib.connect("NASubplaceViewer", ui.sort.Activated:Connect(function()
+		state.sort = state.sort == "name" and "id" or "name"
+		ui.sort.Text = state.sort == "name" and "Sort: Name" or "Sort: ID"
+		NAmanage.SubplaceViewer_Render()
+	end))
+	NAlib.connect("NASubplaceViewer", ui.current.Activated:Connect(function()
+		ui.search.Text = tostring(game.PlaceId)
+	end))
+	NAmanage.SubplaceViewer_RefreshScroll()
+	return true
+end
+
+NAmanage.SubplaceViewer_Toggle = function(forceState)
+	const ui = NAmanage.SubplaceViewer_GetUI()
+	if not (ui and ui.frame) then DoNotif("Subplace Viewer UI unavailable.", 3) return false end
+	NAmanage.SubplaceViewer_Init()
+	local visible = forceState
+	if type(visible) ~= "boolean" then visible = not ui.frame.Visible end
+	ui.frame.Visible = visible
+	if visible then
+		if NAmanage.centerFrame then pcall(NAmanage.centerFrame, ui.frame) end
+		if NAmanage.OnUIWindowShown then pcall(NAmanage.OnUIWindowShown, ui.frame) end
+		NAmanage.SubplaceViewer_Fetch(false)
+		NAmanage.SubplaceViewer_RefreshScroll()
+	end
+	return true
+end
+
+NAmanage.Notepad_Toggle = function(forceState)
+	if not (NAUIMANAGER and NAUIMANAGER.NotepadFrame) then
+		DoNotif("Notepad UI unavailable.", 3)
+		return false
+	end
+	NAmanage.Notepad_Init()
+	const frame = NAUIMANAGER.NotepadFrame
+	local nextState = forceState
+	if type(nextState) ~= "boolean" then
+		nextState = not frame.Visible
+	end
+	if frame.Visible and nextState == false and type(NAmanage.Notepad_SaveFrameSize) == "function" then
+		pcall(NAmanage.Notepad_SaveFrameSize)
+	end
+	frame.Visible = nextState
+	if frame.Visible then
+		if NAmanage.centerFrame then
+			pcall(NAmanage.centerFrame, frame)
+		end
+		if type(NAStuff.NotepadRefresh) == "function" then
+			Defer(NAStuff.NotepadRefresh)
+		end
+	end
+	return true
 end
 
 NAmanage.StandardWindowResponsive = type(NAmanage.StandardWindowResponsive) == "table" and NAmanage.StandardWindowResponsive or {}

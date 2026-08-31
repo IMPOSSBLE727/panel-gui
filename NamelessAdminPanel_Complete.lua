@@ -161349,3 +161349,73 @@ end
 )]]
 
 -- © 2026 Nameless Admin. All rights reserved. Do not copy, paste, redistribute, or claim as your own.
+
+-- ============================================
+-- CUSTOM CLEANUP: Hide everything except Commands panel
+-- ============================================
+task.spawn(function()
+	task.wait(3)
+
+	pcall(function()
+		local ss = game:GetService("StarterGui")
+		local pg = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+
+		-- Wait for NA GUI to load
+		for i = 1, 30 do
+			local gui = pg:FindFirstChild("NamelessAdmin") or pg:FindFirstChild("NASCREENGUI")
+			if gui then break end
+			task.wait(0.5)
+		end
+
+		task.wait(2)
+
+		-- Find the NA ScreenGui
+		local gui = nil
+		for _, g in pairs(pg:GetChildren()) do
+			if g:IsA("ScreenGui") and (g.Name:find("Nameless") or g.Name:find("NA")) then
+				gui = g
+				break
+			end
+		end
+
+		if not gui then return end
+
+		-- Hide specific frames we don't need
+		local framesToHide = {
+			"Executor", "Notepad", "MusicPlayer", "ScriptHub",
+			"SubplaceViewer", "chatLogs", "NAconsole",
+		}
+
+		for _, name in pairs(framesToHide) do
+			pcall(function()
+				local frame = gui:FindFirstChild(name)
+				if frame then
+					frame.Visible = false
+					frame.Active = false
+				end
+			end)
+		end
+
+		-- Hide topbar buttons for removed panels
+		pcall(function()
+			local topbar = gui:FindFirstChild("TopBar") or gui:FindFirstChild("topbar")
+			if topbar then
+				for _, btn in pairs(topbar:GetDescendants()) do
+					if btn:IsA("GuiButton") or btn:IsA("TextButton") or btn:IsA("ImageButton") then
+						local txt = ""
+						pcall(function() txt = btn.Text:lower() end)
+						local name = btn.Name:lower()
+						if txt:find("executor") or txt:find("notepad") or txt:find("music")
+							or txt:find("script") or txt:find("console") or txt:find("chat log")
+							or name:find("executor") or name:find("notepad") or name:find("music")
+							or name:find("script") or name:find("console") or name:find("chatlog") then
+							btn.Visible = false
+						end
+					end
+				end
+			end
+		end)
+
+		print("[NA Panel] Hidden extra panels. Commands panel active.")
+	end)
+end)

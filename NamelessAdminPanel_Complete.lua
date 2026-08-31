@@ -161351,71 +161351,88 @@ end
 -- © 2026 Nameless Admin. All rights reserved. Do not copy, paste, redistribute, or claim as your own.
 
 -- ============================================
--- CUSTOM CLEANUP: Hide everything except Commands panel
+-- CUSTOM: Keep only Commands panel
 -- ============================================
 task.spawn(function()
-	task.wait(3)
+	task.wait(5)
 
 	pcall(function()
-		local ss = game:GetService("StarterGui")
 		local pg = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
 
-		-- Wait for NA GUI to load
-		for i = 1, 30 do
-			local gui = pg:FindFirstChild("NamelessAdmin") or pg:FindFirstChild("NASCREENGUI")
-			if gui then break end
-			task.wait(0.5)
-		end
-
-		task.wait(2)
-
-		-- Find the NA ScreenGui
+		-- Find NA ScreenGui
 		local gui = nil
 		for _, g in pairs(pg:GetChildren()) do
-			if g:IsA("ScreenGui") and (g.Name:find("Nameless") or g.Name:find("NA")) then
-				gui = g
-				break
+			if g:IsA("ScreenGui") then
+				local n = g.Name:lower()
+				if n:find("nameless") or n:find("nadmin") or n:find("nascreen") then
+					gui = g
+					break
+				end
 			end
 		end
-
+		if not gui then
+			-- Try finding by descendant
+			for _, g in pairs(pg:GetChildren()) do
+				if g:IsA("ScreenGui") and g:FindFirstChild("Commands") then
+					gui = g
+					break
+				end
+			end
+		end
 		if not gui then return end
 
-		-- Hide specific frames we don't need
-		local framesToHide = {
-			"Executor", "Notepad", "MusicPlayer", "ScriptHub",
-			"SubplaceViewer", "chatLogs", "NAconsole",
+		-- Frames to HIDE (real NA frame names)
+		local hideNames = {
+			"ChatLogs",
+			"soRealConsole",
+			"CommandKeybinds",
+			"setsettings",
+			"SuchWaypoint",
+			"binders",
+			"Executor",
+			"Notepad",
+			"MusicPlayer",
+			"ScriptHub",
+			"SubplaceViewer",
+			"Plugins",
 		}
 
-		for _, name in pairs(framesToHide) do
+		for _, name in pairs(hideNames) do
 			pcall(function()
-				local frame = gui:FindFirstChild(name)
-				if frame then
-					frame.Visible = false
-					frame.Active = false
+				local f = gui:FindFirstChild(name)
+				if f then
+					f.Visible = false
+					f.Active = false
+					f.ClipsDescendants = true
+					f.Size = UDim2.new(0, 0, 0, 0)
 				end
 			end)
 		end
 
-		-- Hide topbar buttons for removed panels
+		-- Hide ALL icon buttons in topbar except Commands (the list icon)
 		pcall(function()
-			local topbar = gui:FindFirstChild("TopBar") or gui:FindFirstChild("topbar")
-			if topbar then
-				for _, btn in pairs(topbar:GetDescendants()) do
-					if btn:IsA("GuiButton") or btn:IsA("TextButton") or btn:IsA("ImageButton") then
-						local txt = ""
-						pcall(function() txt = btn.Text:lower() end)
-						local name = btn.Name:lower()
-						if txt:find("executor") or txt:find("notepad") or txt:find("music")
-							or txt:find("script") or txt:find("console") or txt:find("chat log")
-							or name:find("executor") or name:find("notepad") or name:find("music")
-							or name:find("script") or name:find("console") or name:find("chatlog") then
-							btn.Visible = false
+			for _, obj in pairs(gui:GetDescendants()) do
+				if obj:IsA("ImageButton") and obj.Name == "IconButton" then
+					local parent = obj.Parent
+					if parent and parent:IsA("Frame") then
+						-- Check if this icon leads to a non-commands panel
+						local tooltip = ""
+						pcall(function() tooltip = obj.Tooltip:lower() end)
+						localparentName = parent.Name:lower()
+
+						local keep = false
+						if tooltip:find("command") then keep = true end
+						if parentName:find("command") then keep = true end
+
+						if not keep then
+							obj.Visible = false
+							obj.Active = false
 						end
 					end
 				end
 			end
 		end)
 
-		print("[NA Panel] Hidden extra panels. Commands panel active.")
+		print("[NA Panel] Commands-only mode active")
 	end)
 end)

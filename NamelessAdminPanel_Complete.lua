@@ -123739,89 +123739,11 @@ end
 
 NAmanage.Topbar_BuildBaseButtons=function()
 	return {
-		{name="settings",icon="gear",activeFrame="SettingsFrame",func=function()
-			if NAUIMANAGER.SettingsFrame then
-				NAUIMANAGER.SettingsFrame.Visible=not NAUIMANAGER.SettingsFrame.Visible
-				NAmanage.centerFrame(NAUIMANAGER.SettingsFrame)
-			end
-		end},
 		{name="cmds",icon="list-bulleted",activeFrame="commandsFrame",func=function()
 			if NAmanage.Commands_Toggle then
 				NAmanage.Commands_Toggle()
 			elseif NAgui and NAgui.commands then
 				NAgui.commands()
-			end
-		end},
-		{name="chatlogs",icon="speech-bubble-align-center",activeFrame="chatLogsFrame",func=function()
-			if NAUIMANAGER.chatLogsFrame then
-				NAUIMANAGER.chatLogsFrame.Visible=not NAUIMANAGER.chatLogsFrame.Visible
-				NAmanage.centerFrame(NAUIMANAGER.chatLogsFrame)
-			end
-		end},
-		{name="console",icon="pencil-square",activeFrame="NAconsoleFrame",func=function()
-			if NAUIMANAGER.NAconsoleFrame then
-				NAUIMANAGER.NAconsoleFrame.Visible=not NAUIMANAGER.NAconsoleFrame.Visible
-				NAmanage.centerFrame(NAUIMANAGER.NAconsoleFrame)
-			end
-		end},
-		{name="waypp",icon="location-pin",activeFrame="WaypointFrame",func=function()
-			if NAUIMANAGER.WaypointFrame then
-				NAUIMANAGER.WaypointFrame.Visible=not NAUIMANAGER.WaypointFrame.Visible
-				NAmanage.centerFrame(NAUIMANAGER.WaypointFrame)
-			end
-		end},
-		{name="bindd",icon="hammer-code",activeFrame="BindersFrame",func=function()
-			if NAUIMANAGER.BindersFrame then
-				NAUIMANAGER.BindersFrame.Visible=not NAUIMANAGER.BindersFrame.Visible
-				NAmanage.centerFrame(NAUIMANAGER.BindersFrame)
-			end
-		end},
-		{name="executor",icon="code",activeFrame="ExecutorFrame",func=function()
-			NAmanage.Executor_Toggle()
-		end},
-		{name="notepad",icon="three-ring-note",activeFrame="NotepadFrame",func=function()
-			if NAmanage.Notepad_Toggle then
-				NAmanage.Notepad_Toggle()
-			else
-				DoNotif("Notepad UI unavailable.", 3)
-			end
-		end},
-		{name="ckeybinds",icon="xbox-a",activeFrame="CommandKeybindsFrame",func=function()
-			const frame = NAUIMANAGER and NAUIMANAGER.CommandKeybindsFrame
-			if frame then
-				if frame.Visible then
-					frame.Visible = false
-				else
-					NAgui.commandkeybinds()
-				end
-			end
-		end},
-		{name="plugins",icon="nebula",activeFrame="PluginsFrame",func=function()
-			if NAmanage and NAmanage.PluginsWindow_Toggle then
-				NAmanage.PluginsWindow_Toggle()
-			elseif NAgui and NAgui.plugins then
-				NAgui.plugins()
-			end
-		end},
-		{name="music",icon="music-note",activeFrame="MusicFrame",func=function()
-			if NAmanage and NAmanage.MusicWindow_Toggle then
-				NAmanage.MusicWindow_Toggle()
-			else
-				DoNotif("Music player UI unavailable.", 3, "Music")
-			end
-		end},
-		{name="scripthub",icon="cloud",activeFrame="ScriptHubFrame",func=function()
-			if NAmanage and NAmanage.ScriptHub_Toggle then
-				NAmanage.ScriptHub_Toggle()
-			else
-				DoNotif("Script Hub UI unavailable.", 3, "Script Hub")
-			end
-		end},
-		{name="tpui",icon="globe-detailed",activeFrame="SubplaceViewerFrame",func=function()
-			if NAmanage and NAmanage.SubplaceViewer_Toggle then
-				NAmanage.SubplaceViewer_Toggle()
-			else
-				DoNotif("Subplace Viewer UI unavailable.", 3, "Subplace Viewer")
 			end
 		end},
 	}
@@ -138417,8 +138339,8 @@ NAStartupUI("Responsive:StandardWindows", 0, function()
 		NAmanage.StandardWindowResponsive.Bind()
 	end
 end)
-NAStartupUI("Menu:ChatLogs", 0, function() if NAUIMANAGER.chatLogsFrame then NAgui.menuv3(NAUIMANAGER.chatLogsFrame) end end)
-NAStartupUI("Menu:Console", 0.01, function() if NAUIMANAGER.NAconsoleFrame then NAgui.menuv2(NAUIMANAGER.NAconsoleFrame) end end)
+--[[NAStartupUI("Menu:ChatLogs", 0, function() if NAUIMANAGER.chatLogsFrame then NAgui.menuv3(NAUIMANAGER.chatLogsFrame) end end)]]
+--[[NAStartupUI("Menu:Console", 0.01, function() if NAUIMANAGER.NAconsoleFrame then NAgui.menuv2(NAUIMANAGER.NAconsoleFrame) end end)]]
 NAStartupUI("Menu:Commands", 0.02, function()
 	if NAUIMANAGER.commandsFrame then
 		NAgui.menu(NAUIMANAGER.commandsFrame)
@@ -138427,26 +138349,26 @@ NAStartupUI("Menu:Commands", 0.02, function()
 		end
 	end
 end)
-NAStartupUI("Menu:CommandKeybinds", 0.03, function() if NAUIMANAGER.CommandKeybindsFrame then NAgui.menu(NAUIMANAGER.CommandKeybindsFrame) end end)
-NAStartupUI("Menu:Settings", 0.04, function() if NAUIMANAGER.SettingsFrame then NAgui.menu(NAUIMANAGER.SettingsFrame) end end)
-NAStartupUI("Menu:Waypoints", 0.05, function() if NAUIMANAGER.WaypointFrame then NAgui.menu(NAUIMANAGER.WaypointFrame) end end)
-NAStartupUI("Menu:Binders", 0.06, function() if NAUIMANAGER.BindersFrame then NAgui.menu(NAUIMANAGER.BindersFrame) end end)
-NAStartupUI("Menu:PluginsBind", 0.07, function() if NAmanage.PluginsWindow_Bind then NAmanage.PluginsWindow_Bind() end end)
-NAStartupUI("Menu:Music", 0.25, function()
+--[[NAStartupUI("Menu:CommandKeybinds", 0.03, function() if NAUIMANAGER.CommandKeybindsFrame then NAgui.menu(NAUIMANAGER.CommandKeybindsFrame) end end)]]
+--[[NAStartupUI("Menu:Settings", 0.04, function() if NAUIMANAGER.SettingsFrame then NAgui.menu(NAUIMANAGER.SettingsFrame) end end)]]
+--[[NAStartupUI("Menu:Waypoints", 0.05, function() if NAUIMANAGER.WaypointFrame then NAgui.menu(NAUIMANAGER.WaypointFrame) end end)]]
+--[[NAStartupUI("Menu:Binders", 0.06, function() if NAUIMANAGER.BindersFrame then NAgui.menu(NAUIMANAGER.BindersFrame) end end)]]
+--[[NAStartupUI("Menu:PluginsBind", 0.07, function() if NAmanage.PluginsWindow_Bind then NAmanage.PluginsWindow_Bind() end end)]]
+--[[NAStartupUI("Menu:Music", 0.25, function()
 	if NAUIMANAGER.MusicFrame then
 		if NAmanage.MusicWindowInit then NAmanage.MusicWindowInit() end
 		NAgui.menu(NAUIMANAGER.MusicFrame)
 	end
-end)
-NAStartupUI("Menu:Executor", 0.08, function() if NAUIMANAGER.ExecutorFrame then NAgui.menu(NAUIMANAGER.ExecutorFrame) end end)
-NAStartupUI("Menu:Notepad", 0.09, function() if NAUIMANAGER.NotepadFrame then NAgui.menu(NAUIMANAGER.NotepadFrame) end end)
-NAStartupUI("Menu:ScriptHub", 0.1, function() if NAUIMANAGER.ScriptHubFrame then NAgui.menu(NAUIMANAGER.ScriptHubFrame) end end)
-NAStartupUI("Menu:SubplaceViewer", 0.1, function() if NAUIMANAGER.SubplaceViewerFrame then NAgui.menu(NAUIMANAGER.SubplaceViewerFrame) end end)
+end)]]
+--[[NAStartupUI("Menu:Executor", 0.08, function() if NAUIMANAGER.ExecutorFrame then NAgui.menu(NAUIMANAGER.ExecutorFrame) end end)]]
+--[[NAStartupUI("Menu:Notepad", 0.09, function() if NAUIMANAGER.NotepadFrame then NAgui.menu(NAUIMANAGER.NotepadFrame) end end)]]
+--[[NAStartupUI("Menu:ScriptHub", 0.1, function() if NAUIMANAGER.ScriptHubFrame then NAgui.menu(NAUIMANAGER.ScriptHubFrame) end end)]]
+--[[NAStartupUI("Menu:SubplaceViewer", 0.1, function() if NAUIMANAGER.SubplaceViewerFrame then NAgui.menu(NAUIMANAGER.SubplaceViewerFrame) end end)]]
 
 --[[ GUI RESIZE FUNCTION ]]--
 
-NAStartupUI("Resize:ChatLogs", 0.1, function() if NAUIMANAGER.chatLogsFrame then NAgui.resizeable(NAUIMANAGER.chatLogsFrame) end end)
-NAStartupUI("Resize:Console", 0.11, function() if NAUIMANAGER.NAconsoleFrame then NAgui.resizeable(NAUIMANAGER.NAconsoleFrame) end end)
+--[[NAStartupUI("Resize:ChatLogs", 0.1, function() if NAUIMANAGER.chatLogsFrame then NAgui.resizeable(NAUIMANAGER.chatLogsFrame) end end)]]
+--[[NAStartupUI("Resize:Console", 0.11, function() if NAUIMANAGER.NAconsoleFrame then NAgui.resizeable(NAUIMANAGER.NAconsoleFrame) end end)]]
 NAStartupUI("Resize:Commands", 0.12, function()
 	if NAUIMANAGER.commandsFrame then
 		NAgui.resizeable(NAUIMANAGER.commandsFrame, Vector2.new(180, 118), Vector2.new(5000, 5000))
@@ -138481,28 +138403,28 @@ NAStartupUI("Resize:Commands", 0.12, function()
 		end
 	end
 end)
-NAStartupUI("Resize:CommandKeybinds", 0.13, function()
+--[[NAStartupUI("Resize:CommandKeybinds", 0.13, function()
 	if NAUIMANAGER.CommandKeybindsFrame then
 		const metrics = NAmanage.ExecutorWindowSizing.GetSize(640, 470, { minWidth = 460; minHeight = 320; mobileMinWidth = 300; mobileMinHeight = 240; })
 		NAgui.resizeable(NAUIMANAGER.CommandKeybindsFrame, Vector2.new(metrics.minWidth, metrics.minHeight), Vector2.new(1400, 920))
 	end
-end)
-NAStartupUI("Resize:Settings", 0.14, function()
+end)]]
+--[[NAStartupUI("Resize:Settings", 0.14, function()
 	if NAUIMANAGER.SettingsFrame then
 		NAgui.resizeable(NAUIMANAGER.SettingsFrame, NAmanage.GetSettingsResizeMin and NAmanage.GetSettingsResizeMin() or nil, Vector2.new(5000, 5000))
 		if NAmanage.SettingsTabLayout and type(NAmanage.SettingsTabLayout.Apply) == "function" then
 			NAmanage.SettingsTabLayout.Apply()
 		end
 	end
-end)
-NAStartupUI("Resize:Waypoints", 0.15, function() if NAUIMANAGER.WaypointFrame then NAgui.resizeable(NAUIMANAGER.WaypointFrame) end end)
-NAStartupUI("Resize:Binders", 0.16, function() if NAUIMANAGER.BindersFrame then NAgui.resizeable(NAUIMANAGER.BindersFrame) end end)
-NAStartupUI("Resize:Music", 0.3, function()
+end)]]
+--[[NAStartupUI("Resize:Waypoints", 0.15, function() if NAUIMANAGER.WaypointFrame then NAgui.resizeable(NAUIMANAGER.WaypointFrame) end end)]]
+--[[NAStartupUI("Resize:Binders", 0.16, function() if NAUIMANAGER.BindersFrame then NAgui.resizeable(NAUIMANAGER.BindersFrame) end end)]]
+--[[NAStartupUI("Resize:Music", 0.3, function()
 	if NAUIMANAGER.MusicFrame then
 		const metrics = NAmanage.ExecutorWindowSizing.GetSize(620, 450, { minWidth = 420; minHeight = 290; mobileMinWidth = 300; mobileMinHeight = 240; })
 		NAgui.resizeable(NAUIMANAGER.MusicFrame, Vector2.new(metrics.minWidth, metrics.minHeight), Vector2.new(1100, 820))
 	end
-end)
+end)]]
 NAStartupUI("Resize:ScriptHub", 0.31, function()
 	if NAUIMANAGER.ScriptHubFrame then
 		const metrics = NAmanage.ExecutorWindowSizing.GetSize(760, 520, { minWidth = 560; minHeight = 360; mobileMinWidth = 280; mobileMinHeight = 230; })
@@ -161350,89 +161272,30 @@ end
 
 -- © 2026 Nameless Admin. All rights reserved. Do not copy, paste, redistribute, or claim as your own.
 
--- ============================================
--- CUSTOM: Keep only Commands panel
--- ============================================
+-- CUSTOM: Commands-only mode - destroy extra UIs
 task.spawn(function()
-	task.wait(5)
-
-	pcall(function()
-		local pg = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
-
-		-- Find NA ScreenGui
-		local gui = nil
-		for _, g in pairs(pg:GetChildren()) do
-			if g:IsA("ScreenGui") then
-				local n = g.Name:lower()
-				if n:find("nameless") or n:find("nadmin") or n:find("nascreen") then
-					gui = g
-					break
-				end
-			end
-		end
-		if not gui then
-			-- Try finding by descendant
-			for _, g in pairs(pg:GetChildren()) do
-				if g:IsA("ScreenGui") and g:FindFirstChild("Commands") then
-					gui = g
-					break
-				end
-			end
-		end
-		if not gui then return end
-
-		-- Frames to HIDE (real NA frame names)
-		local hideNames = {
-			"ChatLogs",
-			"soRealConsole",
-			"CommandKeybinds",
-			"setsettings",
-			"SuchWaypoint",
-			"binders",
-			"Executor",
-			"Notepad",
-			"MusicPlayer",
-			"ScriptHub",
-			"SubplaceViewer",
-			"Plugins",
-		}
-
-		for _, name in pairs(hideNames) do
-			pcall(function()
-				local f = gui:FindFirstChild(name)
-				if f then
-					f.Visible = false
-					f.Active = false
-					f.ClipsDescendants = true
-					f.Size = UDim2.new(0, 0, 0, 0)
-				end
-			end)
-		end
-
-		-- Hide ALL icon buttons in topbar except Commands (the list icon)
-		pcall(function()
-			for _, obj in pairs(gui:GetDescendants()) do
-				if obj:IsA("ImageButton") and obj.Name == "IconButton" then
-					local parent = obj.Parent
-					if parent and parent:IsA("Frame") then
-						-- Check if this icon leads to a non-commands panel
-						local tooltip = ""
-						pcall(function() tooltip = obj.Tooltip:lower() end)
-						localparentName = parent.Name:lower()
-
-						local keep = false
-						if tooltip:find("command") then keep = true end
-						if parentName:find("command") then keep = true end
-
-						if not keep then
-							obj.Visible = false
-							obj.Active = false
-						end
-					end
-				end
-			end
-		end)
-
-		print("[NA Panel] Commands-only mode active")
-	end)
+    task.wait(10)
+    local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    for _, gui in ipairs(pg:GetChildren()) do
+        if gui:IsA("ScreenGui") then
+            local cmds = gui:FindFirstChild("Commands")
+            if cmds then
+                local keep = {"Commands", "CmdBar"}
+                for _, obj in ipairs(gui:GetChildren()) do
+                    if obj:IsA("GuiObject") then
+                        local found = false
+                        for _, k in ipairs(keep) do
+                            if obj.Name == k then found = true break end
+                        end
+                        if not found then
+                            pcall(function() obj:Destroy() end)
+                        end
+                    end
+                end
+                print("[Panel] Commands-only mode active")
+                return
+            end
+        end
+    end
 end)

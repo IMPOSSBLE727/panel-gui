@@ -666,13 +666,59 @@ local function populate(filterText)
         btn.Font = Enum.Font.Gotham
         btn.TextXAlignment = Enum.TextXAlignment.Left
         btn.BorderSizePixel = 0
-        btn.LayoutOrder = i
+        btn.LayoutOrder = i * 10
         InstanceNew("UICorner", btn).CornerRadius = UDim.new(0, 4)
         btn.MouseButton1Click:Connect(function()
             if c.requiresArgs then
-                cmdBarFrame.Visible = true
-                cmdInput.Text = c.name .. " "
-                cmdInput:CaptureFocus()
+                for _, child in pairs(scroll:GetChildren()) do
+                    if child.Name == "ArgBox_" .. c.name then child:Destroy() end
+                end
+                local argFrame = Instance.new("Frame", scroll)
+                argFrame.Name = "ArgBox_" .. c.name
+                argFrame.Size = UDim2.new(1, 0, 0, 28)
+                argFrame.BackgroundColor3 = Color3.fromRGB(45, 45, 60)
+                argFrame.BorderSizePixel = 0
+                argFrame.LayoutOrder = i * 10 + 1
+                InstanceNew("UICorner", argFrame).CornerRadius = UDim.new(0, 4)
+                local argInput = Instance.new("TextBox", argFrame)
+                argInput.Size = UDim2.new(1, -56, 0, 22)
+                argInput.Position = UDim2.new(0, 6, 0, 3)
+                argInput.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+                argInput.PlaceholderText = "Enter " .. c.name .. "..."
+                argInput.PlaceholderColor3 = Color3.fromRGB(100, 100, 100)
+                argInput.TextColor3 = Color3.new(1, 1, 1)
+                argInput.TextSize = 11
+                argInput.Font = Enum.Font.Gotham
+                argInput.BorderSizePixel = 0
+                argInput.ClearTextOnFocus = false
+                InstanceNew("UICorner", argInput).CornerRadius = UDim.new(0, 4)
+                local runBtn = Instance.new("TextButton", argFrame)
+                runBtn.Size = UDim2.new(0, 46, 0, 22)
+                runBtn.Position = UDim2.new(1, -52, 0, 3)
+                runBtn.BackgroundColor3 = Color3.fromRGB(100, 0, 255)
+                runBtn.Text = "Run"
+                runBtn.TextColor3 = Color3.new(1, 1, 1)
+                runBtn.TextSize = 11
+                runBtn.Font = Enum.Font.GothamBold
+                runBtn.BorderSizePixel = 0
+                InstanceNew("UICorner", runBtn).CornerRadius = UDim.new(0, 4)
+                runBtn.MouseButton1Click:Connect(function()
+                    local val = argInput.Text
+                    if val and val ~= "" then
+                        cmd.run(c.name .. " " .. val)
+                        argFrame:Destroy()
+                    end
+                end)
+                argInput.FocusLost:Connect(function(enter)
+                    if enter then
+                        local val = argInput.Text
+                        if val and val ~= "" then
+                            cmd.run(c.name .. " " .. val)
+                            argFrame:Destroy()
+                        end
+                    end
+                end)
+                argInput:CaptureFocus()
             else
                 cmd.run(c.name)
             end

@@ -563,6 +563,9 @@ if not gui.Parent then
     gui.Parent = LP:WaitForChild("PlayerGui")
 end
 
+-- Command Bar Frame (declared early for close button reference)
+local cmdBarFrame = Instance.new("Frame", gui)
+
 -- Main Frame
 local main = InstanceNew("Frame", gui)
 main.Name = "Cmds"
@@ -687,8 +690,7 @@ search:GetPropertyChangedSignal("Text"):Connect(function()
     populate(search.Text)
 end)
 
--- Command Bar
-local cmdBarFrame = Instance.new("Frame", gui)
+-- Command Bar (configure the forward-declared frame)
 cmdBarFrame.Name = "CmdBar"
 cmdBarFrame.Size = UDim2.new(0, 380, 0, 36)
 cmdBarFrame.Position = UDim2.new(0.5, -190, 1, -50)

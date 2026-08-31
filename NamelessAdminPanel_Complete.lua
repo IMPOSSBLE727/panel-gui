@@ -310,34 +310,56 @@ local function executeCommand(cmdName, args)
         fullCmd = cmdName .. " " .. args
     end
 
+    -- Method 1: TextChatService (new chat)
     pcall(function()
-        local StarterGui = game:GetService("StarterGui")
-        StarterGui:SendCoreMessage("TypeChatMessage", {Prefix = ":", Message = fullCmd})
-    end)
-
-    pcall(function()
-        local ReplicatedStorage = game:GetService("ReplicatedStorage")
-        local TextChatService = game:GetService("TextChatService")
-
-        if TextChatService and TextChatService.TextChannels then
-            local General = TextChatService.TextChannels:FindFirstChild("RBXGeneral")
-            if General then
-                General:SendAsync(":" .. fullCmd)
+        local TCS = game:GetService("TextChatService")
+        if TCS.TextChannels then
+            local ch = TCS.TextChannels:FindFirstChild("RBXGeneral")
+            if ch then
+                ch:SendAsync(":" .. fullCmd)
+                return
             end
         end
     end)
 
+    -- Method 2: Legacy chat - find and type in chat bar
     pcall(function()
-        local chatBar = LP.PlayerGui:FindFirstChild("Chat")
-        if chatBar then
-            chatBar = chatBar:FindFirstChild("ChatBar")
-            if chatBar then
-                chatBar:CaptureFocus()
-                chatBar.Text = ":" .. fullCmd
-                task.wait(0.05)
-                pcall(function()
-                    game:GetService("VirtualInputManager"):SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-                end)
+        local function findChatBar(parent)
+            for _, v in pairs(parent:GetDescendants()) do
+                if v.Name == "ChatBar" and v:IsA("TextBox") then
+                    return v
+                end
+            end
+            return nil
+        end
+        local bar = findChatBar(game:GetService("CoreGui"))
+        if not bar then bar = findChatBar(LP:WaitForChild("PlayerGui")) end
+        if bar then
+            bar:CaptureFocus()
+            bar.Text = ":" .. fullCmd
+            task.wait(0.1)
+            pcall(function()
+                local VIM = game:GetService("VirtualInputManager")
+                VIM:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+                VIM:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+            end)
+        end
+    end)
+
+    -- Method 3: Fire Nameless Admin's own remote if it exists
+    pcall(function()
+        local prefix = ":"
+        pcall(function()
+            if _G.NA and _G.NA.prefix then prefix = _G.NA.prefix end
+        end)
+        pcall(function()
+            if _G.NamelessAdmin and _G.NamelessAdmin.prefix then prefix = _G.NamelessAdmin.prefix end
+        end)
+
+        local ReplicatedStorage = game:GetService("ReplicatedStorage")
+        for _, remote in pairs(ReplicatedStorage:GetDescendants()) do
+            if remote:IsA("RemoteEvent") and remote.Name:lower():find("chat") then
+                remote:FireServer(prefix .. fullCmd)
             end
         end
     end)

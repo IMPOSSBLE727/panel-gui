@@ -670,8 +670,9 @@ local function populate(filterText)
         InstanceNew("UICorner", btn).CornerRadius = UDim.new(0, 4)
         btn.MouseButton1Click:Connect(function()
             if c.requiresArgs then
-                search.Text = c.name .. " "
-                search:CaptureFocus()
+                cmdBarFrame.Visible = true
+                cmdInput.Text = c.name .. " "
+                cmdInput:CaptureFocus()
             else
                 cmd.run(c.name)
             end

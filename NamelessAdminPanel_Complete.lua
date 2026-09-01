@@ -1,13 +1,5 @@
---[[
-    Custom Commands Panel - All 977 Commands
-    Toggle: RightControl
-]]
+﻿pcall(function()
 
-pcall(function()
-
---============================================
--- 1. SERVICES
---============================================
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
@@ -20,2644 +12,1909 @@ local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local SoundService = game:GetService("SoundService")
-local StarterPack = game:GetService("StarterPack")
-local PhysicsService = game:GetService("PhysicsService")
-local PathfindingService = game:GetService("PathfindingService")
-local MarketplaceService = game:GetService("MarketplaceService")
 local TextChatService = game:GetService("TextChatService")
-local ContextActionService = game:GetService("ContextActionService")
-local Stats = game:GetService("Stats")
-local UserInputService = game:GetService("UserInputService")
 
-local LP = Players.LocalPlayer
+local Plr = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
---============================================
--- 2. HELPERS
---============================================
-local Insert = table.insert
-local Remove = table.remove
-local Lower = string.lower
-local Sub = string.sub
-local Find = string.find
-local Format = string.format
-local GSub = string.gsub
-local Match = string.match
+local loops = {}
+local espList = {}
+local chamsList = {}
+local xrayData = {}
+local wsData = {}
+local antiFlags = {}
 
-local function Spawn(fn, ...) task.spawn(fn, ...) end
-local function Defer(fn, ...) task.defer(fn, ...) end
-local function Wait(n) return task.wait(n) end
-
-local function InstanceNew(class, parent)
-    local ok, obj = pcall(Instance.new, class)
-    if ok and obj then
-        if parent then obj.Parent = parent end
-        return obj
-    end
-    return nil
+local function InstanceNew(class, props)
+	local inst
+	local ok = pcall(function() inst = Instance.new(class) end)
+	if not ok then return nil end
+	if props then
+		for k, v in pairs(props) do
+			pcall(function() inst[k] = v end)
+		end
+	end
+	return inst
 end
 
+local function Lower(s) return s:lower() end
+local function Sub(s, a, b) return s:sub(a, b) end
+local function Find(s, p) return s:find(p) end
+local function Format(n, p) return string.format(p or "%g", n) end
+local function GSub(s, p, r) return s:gsub(p, r) end
+local function Spawn(f) task.spawn(f) end
+local function Defer(f) task.defer(f) end
+local function Wait(n) return task.wait(n or 0.1) end
+
 local function getChar()
-    return LP.Character or LP.CharacterAdded:Wait()
+	return Plr.Character or Plr.CharacterAdded:Wait()
 end
 
 local function getHum()
-    local c = getChar()
-    return c and c:FindFirstChildOfClass("Humanoid")
+	local c = getChar()
+	return c and c:FindFirstChildOfClass("Humanoid")
 end
 
 local function getRoot()
-    local c = getChar()
-    return c and (c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("Torso"))
+	local c = getChar()
+	return c and c:FindFirstChild("HumanoidRootPart")
 end
 
 local function getHead()
-    local c = getChar()
-    return c and c:FindFirstChild("Head")
+	local c = getChar()
+	return c and c:FindFirstChild("Head")
 end
 
 local function getBp()
-    return LP:FindFirstChildOfClass("Backpack")
+	return Plr:FindFirstChildOfClass("Backpack")
 end
 
-local function getPlr(input)
-    if not input or input == "" then return {LP} end
-    input = input:lower()
-    if input == "me" or input == "self" then return {LP} end
-    if input == "all" then return Players:GetPlayers() end
-    if input == "others" then
-        local r = {}
-        for _, p in pairs(Players:GetPlayers()) do if p ~= LP then Insert(r, p) end end
-        return r
-    end
-    if input == "random" then
-        local all = Players:GetPlayers()
-        return #all > 0 and {all[math.random(#all)]} or {LP}
-    end
-    local r = {}
-    for _, p in pairs(Players:GetPlayers()) do
-        if p.Name:lower():sub(1, #input) == input or p.DisplayName:lower():sub(1, #input) == input then
-            Insert(r, p)
-        end
-    end
-    return r
+local function getPlr(name)
+	if not name or name == "" then return Plr end
+	name = Lower(name)
+	for _, p in pairs(Players:GetPlayers()) do
+		if Lower(p.Name):sub(1, #name) == name or Lower(p.DisplayName):sub(1, #name) == name then
+			return p
+		end
+	end
+	return nil
 end
 
-local function getPlrChar(plr)
-    return plr and plr.Character
+local function DoNotif(text, dur)
+	pcall(function()
+		StarterGui:SetCore("SendNotification", {
+			Title = "Custom Commands",
+			Text = tostring(text),
+			Duration = dur or 3
+		})
+	end)
 end
 
-local function DoNotif(text, duration)
-    pcall(function()
-        StarterGui:SetCore("SendNotification", {
-            Title = "Cmds",
-            Text = tostring(text),
-            Duration = duration or 3
-        })
-    end)
-end
+pcall(function()
+	local old
+	old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+		local method = getnamecallmethod()
+		if method == "Kick" and self == Plr and antiFlags.antikick then
+			DoNotif("Anti-kick: Blocked!")
+			return nil
+		end
+		if (method == "Teleport" or method == "TeleportToPlaceInstance") and self == TeleportService and antiFlags.antiteleport then
+			DoNotif("Anti-teleport: Blocked!")
+			return nil
+		end
+		return old(self, ...)
+	end))
+end)
 
---============================================
--- 3. CMD SYSTEM
---============================================
 local Cmds = {}
 local CmdsList = {}
 local cmd = {}
 
-function cmd.add(aliases, info, func)
-    local data = { func = func, info = info, requiresArgs = false }
-    for _, alias in ipairs(aliases) do
-        Cmds[Lower(alias)] = data
-    end
-    Insert(CmdsList, { name = aliases[1], aliases = aliases, info = info, requiresArgs = false })
+function cmd.add(name, desc, func)
+	local n = Lower(name)
+	Cmds[n] = func
+	CmdsList[n] = desc or name
 end
 
-function cmd.addArg(aliases, info, func)
-    local data = { func = func, info = info, requiresArgs = true }
-    for _, alias in ipairs(aliases) do
-        Cmds[Lower(alias)] = data
-    end
-    Insert(CmdsList, { name = aliases[1], aliases = aliases, info = info, requiresArgs = true })
+function cmd.addArg(name, desc, func)
+	local n = Lower(name)
+	Cmds[n] = func
+	CmdsList[n] = desc or name
 end
 
 function cmd.run(input)
-    if not input or input == "" then return end
-    local parts = input:split(" ")
-    local cmdName = Lower(Remove(parts, 1))
-    local c = Cmds[cmdName]
-    if c then
-        local ok, err = pcall(function() c.func(unpack(parts)) end)
-        if not ok then DoNotif("Error: " .. tostring(err), 5) end
-    else
-        DoNotif("Unknown: " .. cmdName)
-    end
+	input = input:match("^%s*(.-)%s*$")
+	local space = input:find(" ")
+	local name, arg
+	if space then
+		name = input:sub(1, space - 1)
+		arg = input:sub(space + 1)
+	else
+		name = input
+		arg = ""
+	end
+	local n = Lower(name)
+	if Cmds[n] then
+		if arg ~= "" then
+			pcall(function() Cmds[n](arg) end)
+		else
+			pcall(function() Cmds[n]() end)
+		end
+	else
+		DoNotif("Unknown: " .. name)
+	end
 end
 
---============================================
--- 4. COMMANDS - PROTECTED / ANTI
---============================================
-cmd.add({"antikick", "nokick", "bk"}, {"antikick", "Bypass kick"}, function()
-    if not hookmetamethod or not getrawmetatable or not newcclosure then
-        DoNotif("Not supported by your executor")
-        return
-    end
-    local ok, err = pcall(function()
-        local old
-        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-            if getnamecallmethod() == "Kick" and self == LP then
-                DoNotif("Kick blocked")
-                return
-            end
-            return old(self, ...)
-        end))
-    end)
-    DoNotif(ok and "Anti-kick ON" or "Failed: " .. tostring(err))
-end)
-
-cmd.add({"antiteleport", "noteleport", "blocktp"}, {"antiteleport", "Block teleport"}, function()
-    if not hookmetamethod or not newcclosure then
-        DoNotif("Not supported by your executor")
-        return
-    end
-    local ok, err = pcall(function()
-        local old
-        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-            if getnamecallmethod() == "Teleport" and self == TeleportService then
-                DoNotif("Teleport blocked")
-                return
-            end
-            return old(self, ...)
-        end))
-    end)
-    DoNotif(ok and "Anti-teleport ON" or "Failed: " .. tostring(err))
-end)
-
-cmd.add({"antivoid"}, {"antivoid", "Prevent void death"}, function()
-    _G._antivoid = true
-    if _G._avConn then _G._avConn:Disconnect() end
-    _G._avConn = RunService.Heartbeat:Connect(function()
-        if not _G._antivoid then return end
-        local r = getRoot()
-        if r and r.Position.Y < -150 then
-            r.Velocity = Vector3.new(0, 200, 0)
-            r.CFrame = CFrame.new(r.Position.X, 50, r.Position.Z)
-        end
-    end)
-    DoNotif("Anti-void ON")
-end)
-
-cmd.add({"unantivoid"}, {"unantivoid", "Disable anti-void"}, function()
-    _G._antivoid = false
-    if _G._avConn then _G._avConn:Disconnect() end
-    DoNotif("Anti-void OFF")
-end)
-
-cmd.add({"antiafk", "noafk"}, {"antiafk", "Prevent AFK kick"}, function()
-    _G._antiafk = true
-    if _G._afkConn then _G._afkConn:Disconnect() end
-    _G._afkConn = RunService.Idle:Connect(function()
-        if _G._antiafk then
-            local VirtualUser = game:GetService("VirtualUser")
-            pcall(function() VirtualUser:CaptureController() end)
-            pcall(function() VirtualUser:ClickButton2(Vector2.new()) end)
-        end
-    end)
-    DoNotif("Anti-AFK ON")
-end)
-
-cmd.add({"unantiafk"}, {"unantiafk", "Disable anti-AFK"}, function()
-    _G._antiafk = false
-    if _G._afkConn then _G._afkConn:Disconnect() end
-    DoNotif("Anti-AFK OFF")
-end)
-
-cmd.add({"antiknockback", "akb"}, {"antiknockback", "Disable knockback"}, function()
-    local h = getHum()
-    if h then
-        h.PlatformStand = true
-        DoNotif("Anti-KB ON")
-    end
-end)
-
-cmd.add({"unantiknockback"}, {"unantiknockback", "Enable knockback"}, function()
-    local h = getHum()
-    if h then
-        h.PlatformStand = false
-        DoNotif("Anti-KB OFF")
-    end
-end)
-
-cmd.add({"antitouch", "antikillbrick"}, {"antitouch", "Disable touch parts"}, function()
-    _G._antitouch = true
-    if _G._atConn then _G._atConn:Disconnect() end
-    _G._atConn = RunService.Stepped:Connect(function()
-        if not _G._antitouch then return end
-        local c = LP.Character
-        if c then
-            for _, v in pairs(c:GetDescendants()) do
-                if v:IsA("BasePart") then v.CanCollide = false end
-            end
-        end
-    end)
-    DoNotif("Anti-touch ON")
-end)
-
-cmd.add({"unantitouch"}, {"unantitouch", "Enable touch parts"}, function()
-    _G._antitouch = false
-    if _G._atConn then _G._atConn:Disconnect() end
-    DoNotif("Anti-touch OFF")
-end)
-
-cmd.add({"freeze", "fr", "anchor"}, {"freeze", "Freeze character"}, function()
-    local c = getChar()
-    if not c then return end
-    for _, v in pairs(c:GetDescendants()) do
-        if v:IsA("BasePart") then v.Anchored = true end
-    end
-    DoNotif("Frozen")
-end)
-
-cmd.add({"unfreeze", "unfr", "unanchor"}, {"unfreeze", "Unfreeze character"}, function()
-    local c = getChar()
-    if not c then return end
-    for _, v in pairs(c:GetDescendants()) do
-        if v:IsA("BasePart") then v.Anchored = false end
-    end
-    DoNotif("Unfrozen")
-end)
-
---============================================
--- 5. COMMANDS - MOVEMENT
---============================================
-cmd.add({"fly"}, {"fly", "Enable flight"}, function(speed)
-    local hum = getHum()
-    local root = getRoot()
-    if not hum or not root then return end
-    speed = tonumber(speed) or 50
-    if _G._flyBP then pcall(function() _G._flyBP:Destroy() end) end
-    if _G._flyBG then pcall(function() _G._flyBG:Destroy() end) end
-    if _G._flyConn then _G._flyConn:Disconnect() end
-    local bp = InstanceNew("BodyVelocity", root)
-    bp.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-    bp.Velocity = Vector3.zero
-    local bg = InstanceNew("BodyGyro", root)
-    bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
-    bg.P = 9000
-    bg.D = 500
-    _G._flyBP = bp
-    _G._flyBG = bg
-    _G._flyConn = RunService.RenderStepped:Connect(function()
-        if not bp.Parent then return end
-        local dir = Vector3.zero
-        if UIS:IsKeyDown(Enum.KeyCode.W) then dir = dir + Camera.CFrame.LookVector end
-        if UIS:IsKeyDown(Enum.KeyCode.S) then dir = dir - Camera.CFrame.LookVector end
-        if UIS:IsKeyDown(Enum.KeyCode.A) then dir = dir - Camera.CFrame.RightVector end
-        if UIS:IsKeyDown(Enum.KeyCode.D) then dir = dir + Camera.CFrame.RightVector end
-        if UIS:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0, 1, 0) end
-        if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then dir = dir - Vector3.new(0, 1, 0) end
-        bp.Velocity = dir * speed
-        bg.CFrame = Camera.CFrame
-    end)
-    DoNotif("Fly ON " .. speed)
-end)
-
-cmd.add({"unfly", "nofly"}, {"unfly", "Disable flight"}, function()
-    if _G._flyConn then _G._flyConn:Disconnect() end
-    if _G._flyBP then pcall(function() _G._flyBP:Destroy() end) end
-    if _G._flyBG then pcall(function() _G._flyBG:Destroy() end) end
-    _G._flyConn = nil
-    _G._flyBP = nil
-    _G._flyBG = nil
-    DoNotif("Fly OFF")
-end)
-
-cmd.addArg({"speed", "ws"}, {"speed <num>", "Set walkspeed"}, function(v)
-    local h = getHum()
-    if h then h.WalkSpeed = tonumber(v) or 16 DoNotif("Speed: " .. h.WalkSpeed) end
-end)
-
-cmd.addArg({"jumppower", "jp"}, {"jp <num>", "Set jump power"}, function(v)
-    local h = getHum()
-    if h then h.JumpPower = tonumber(v) or 50 DoNotif("JumpPower: " .. h.JumpPower) end
-end)
-
-cmd.addArg({"hipheight", "hh"}, {"hh <num>", "Set hip height"}, function(v)
-    local h = getHum()
-    if h then h.HipHeight = tonumber(v) or 0 DoNotif("HipHeight: " .. h.HipHeight) end
-end)
-
-cmd.addArg({"gravity", "grav"}, {"gravity <num>", "Set gravity"}, function(v)
-    Workspace.Gravity = tonumber(v) or 196.2
-    DoNotif("Gravity: " .. Workspace.Gravity)
-end)
-
-cmd.add({"noclip", "nc"}, {"noclip", "Disable collision"}, function()
-    _G._noclip = true
-    if _G._noclipConn then _G._noclipConn:Disconnect() end
-    _G._noclipConn = RunService.Stepped:Connect(function()
-        if not _G._noclip then return end
-        local c = LP.Character
-        if c then
-            for _, v in pairs(c:GetDescendants()) do
-                if v:IsA("BasePart") then v.CanCollide = false end
-            end
-        end
-    end)
-    DoNotif("Noclip ON")
-end)
-
-cmd.add({"clip"}, {"clip", "Enable collision"}, function()
-    _G._noclip = false
-    if _G._noclipConn then _G._noclipConn:Disconnect() end
-    DoNotif("Noclip OFF")
-end)
-
-cmd.add({"infjump", "infinitejump"}, {"infjump", "Infinite jumping"}, function()
-    _G._infjump = true
-    if _G._ijConn then _G._ijConn:Disconnect() end
-    _G._ijConn = UIS.JumpRequest:Connect(function()
-        if _G._infjump then
-            local h = getHum()
-            if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
-        end
-    end)
-    DoNotif("Inf-Jump ON")
-end)
-
-cmd.add({"uninfjump"}, {"uninfjump", "Disable infinite jump"}, function()
-    _G._infjump = false
-    if _G._ijConn then _G._ijConn:Disconnect() end
-    DoNotif("Inf-Jump OFF")
-end)
-
-cmd.add({"swim"}, {"swim", "Swim in air"}, function()
-    local h = getHum()
-    if h then
-        h:ChangeState(Enum.HumanoidStateType.Swimming)
-        DoNotif("Swim ON")
-    end
-end)
-
-cmd.add({"unswim"}, {"unswim", "Stop swimming"}, function()
-    local h = getHum()
-    if h then
-        h:ChangeState(Enum.HumanoidStateType.Running)
-        DoNotif("Swim OFF")
-    end
-end)
-
-cmd.add({"climb"}, {"climb", "Air climb"}, function()
-    _G._climb = true
-    if _G._climbConn then _G._climbConn:Disconnect() end
-    _G._climbConn = RunService.RenderStepped:Connect(function()
-        if not _G._climb then return end
-        local h = getHum()
-        if h then
-            if UIS:IsKeyDown(Enum.KeyCode.W) then
-                h:ChangeState(Enum.HumanoidStateType.Climbing)
-            end
-        end
-    end)
-    DoNotif("Climb ON")
-end)
-
-cmd.add({"unclimb"}, {"unclimb", "Stop air climb"}, function()
-    _G._climb = false
-    if _G._climbConn then _G._climbConn:Disconnect() end
-    DoNotif("Climb OFF")
-end)
-
-cmd.add({"spin"}, {"spin", "Spin character"}, function(v)
-    local root = getRoot()
-    if not root then return end
-    local speed = tonumber(v) or 20
-    if _G._spinConn then _G._spinConn:Disconnect() end
-    _G._spinConn = RunService.RenderStepped:Connect(function()
-        root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(speed), 0)
-    end)
-    DoNotif("Spin ON " .. speed)
-end)
-
-cmd.add({"unspin"}, {"unspin", "Stop spinning"}, function()
-    if _G._spinConn then _G._spinConn:Disconnect() end
-    DoNotif("Spin OFF")
-end)
-
-cmd.addArg({"tpup", "up"}, {"tpup <num>", "Teleport up"}, function(v)
-    local r = getRoot()
-    if r then
-        local amt = tonumber(v) or 50
-        r.CFrame = r.CFrame + Vector3.new(0, amt, 0)
-    end
-end)
-
-cmd.addArg({"tpdown", "down"}, {"tpdown <num>", "Teleport down"}, function(v)
-    local r = getRoot()
-    if r then
-        local amt = tonumber(v) or 50
-        r.CFrame = r.CFrame - Vector3.new(0, amt, 0)
-    end
-end)
-
-cmd.addArg({"tpworkspace", "tpws"}, {"tpws <x,y,z>", "Teleport to coords"}, function(x, y, z)
-    local r = getRoot()
-    if not r then return end
-    x = tonumber(x) or 0
-    y = tonumber(y) or 50
-    z = tonumber(z) or 0
-    r.CFrame = CFrame.new(x, y, z)
-    DoNotif("TP -> " .. x .. "," .. y .. "," .. z)
-end)
-
-cmd.add({"breakvelocity", "breakv", "stopvel"}, {"breakvelocity", "Zero velocity"}, function()
-    local r = getRoot()
-    if r then
-        r.Velocity = Vector3.zero
-        r.RotVelocity = Vector3.zero
-        DoNotif("Velocity zeroed")
-    end
-end)
-
---============================================
--- 6. COMMANDS - TELEPORT
---============================================
-cmd.addArg({"tp", "teleport", "goto"}, {"tp <player>", "Teleport to player"}, function(target)
-    if not target or target == "" then return end
-    local r = getRoot()
-    if not r then return end
-    local plrs = getPlr(target)
-    if #plrs > 0 and plrs[1] ~= LP then
-        local p = plrs[1]
-        if p.Character then
-            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                r.CFrame = hrp.CFrame + Vector3.new(0, 3, 0)
-                DoNotif("TP -> " .. p.Name)
-            end
-        end
-    else
-        DoNotif("Player not found")
-    end
-end)
-
-cmd.addArg({"bring"}, {"bring <player>", "Bring player"}, function(target)
-    if not target or target == "" then return end
-    local r = getRoot()
-    if not r then return end
-    local plrs = getPlr(target)
-    if #plrs > 0 and plrs[1] ~= LP then
-        local p = plrs[1]
-        if p.Character then
-            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                hrp.CFrame = r.CFrame + Vector3.new(0, 3, 0)
-                DoNotif("Brought " .. p.Name)
-            end
-        end
-    end
-end)
-
-cmd.add({"cbring", "clientbring"}, {"cbring <player>", "Client bring"}, function(target)
-    if not target or target == "" then return end
-    local r = getRoot()
-    if not r then return end
-    local plrs = getPlr(target)
-    if #plrs > 0 and plrs[1] ~= LP then
-        local p = plrs[1]
-        if p.Character then
-            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                hrp.CFrame = r.CFrame + Vector3.new(0, 3, 0)
-                DoNotif("Client brought " .. p.Name)
-            end
-        end
-    end
-end)
-
-cmd.add({"tospawn", "ts"}, {"tospawn", "TP to spawn"}, function()
-    local r = getRoot()
-    if not r then return end
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("SpawnLocation") then
-            r.CFrame = v.CFrame + Vector3.new(0, 5, 0)
-            DoNotif("TP to spawn")
-            return
-        end
-    end
-    DoNotif("No spawn found")
-end)
-
-cmd.addArg({"follow", "stalk"}, {"follow <player>", "Follow player"}, function(target)
-    if not target or target == "" then return end
-    local plrs = getPlr(target)
-    if #plrs == 0 or plrs[1] == LP then return end
-    _G._followTarget = plrs[1]
-    _G._follow = true
-    if _G._followConn then _G._followConn:Disconnect() end
-    _G._followConn = RunService.Heartbeat:Connect(function()
-        if not _G._follow or not _G._followTarget then return end
-        local r = getRoot()
-        local t = _G._followTarget.Character
-        if r and t then
-            local hrp = t:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local h = getHum()
-                if h then h:MoveTo(hrp.Position) end
-            end
-        end
-    end)
-    DoNotif("Following " .. plrs[1].Name)
-end)
-
-cmd.add({"unfollow", "unstalk"}, {"unfollow", "Stop following"}, function()
-    _G._follow = false
-    _G._followTarget = nil
-    if _G._followConn then _G._followConn:Disconnect() end
-    DoNotif("Unfollowed")
-end)
-
-cmd.addArg({"glue", "loopgoto"}, {"glue <player>", "Loop TP to player"}, function(target)
-    if not target or target == "" then return end
-    local plrs = getPlr(target)
-    if #plrs == 0 or plrs[1] == LP then return end
-    _G._glueTarget = plrs[1]
-    _G._glue = true
-    if _G._glueConn then _G._glueConn:Disconnect() end
-    _G._glueConn = RunService.Heartbeat:Connect(function()
-        if not _G._glue or not _G._glueTarget then return end
-        local r = getRoot()
-        local t = _G._glueTarget.Character
-        if r and t then
-            local hrp = t:FindFirstChild("HumanoidRootPart")
-            if hrp then r.CFrame = hrp.CFrame + Vector3.new(0, 3, 0) end
-        end
-    end)
-    DoNotif("Glued to " .. plrs[1].Name)
-end)
-
-cmd.add({"unglue", "unloopgoto"}, {"unglue", "Stop glue"}, function()
-    _G._glue = false
-    _G._glueTarget = nil
-    if _G._glueConn then _G._glueConn:Disconnect() end
-    DoNotif("Un-glued")
-end)
-
---============================================
--- 7. COMMANDS - COMBAT
---============================================
-cmd.add({"god", "godmode"}, {"god", "God mode"}, function()
-    local h = getHum()
-    if h then
-        h.MaxHealth = math.huge
-        h.Health = math.huge
-        DoNotif("God ON")
-    end
-end)
-
-cmd.add({"unGod", "ungodmode"}, {"unGod", "Disable god"}, function()
-    local h = getHum()
-    if h then
-        h.MaxHealth = 100
-        h.Health = 100
-        DoNotif("God OFF")
-    end
-end)
-
-cmd.add({"heal"}, {"heal", "Full health"}, function()
-    local h = getHum()
-    if h then h.Health = h.MaxHealth DoNotif("Healed") end
-end)
-
-cmd.addArg({"kill"}, {"kill <player>", "Kill player"}, function(target)
-    if not target or target == "" then return end
-    local plrs = getPlr(target)
-    if #plrs > 0 and plrs[1] ~= LP then
-        local h = plrs[1].Character and plrs[1].Character:FindFirstChildOfClass("Humanoid")
-        if h then h.Health = 0 DoNotif("Killed " .. plrs[1].Name) end
-    end
-end)
-
-cmd.addArg({"fling"}, {"fling <player>", "Fling player"}, function(target)
-    local r = getRoot()
-    if not r then return end
-    local plrs = getPlr(target or "others")
-    if #plrs == 0 then return end
-    local bg = InstanceNew("BodyAngularVelocity", r)
-    bg.AngularVelocity = Vector3.new(9e9, 9e9, 9e9)
-    bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
-    bg.P = 1e6
-    bg.Name = "_FLING"
-    DoNotif("Fling ON")
-    Wait(2)
-    bg:Destroy()
-    DoNotif("Fling OFF")
-end)
-
-cmd.add({"boxreach"}, {"boxreach", "Box hitbox"}, function(v)
-    local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
-    if not tool then DoNotif("Equip a tool") return end
-    local handle = tool:FindFirstChild("Handle")
-    if not handle then DoNotif("No handle") return end
-    local size = tonumber(v) or 20
-    local bb = InstanceNew("Part", handle)
-    bb.Size = Vector3.new(size, size, size)
-    bb.Transparency = 1
-    bb.CanCollide = false
-    bb.Massless = true
-    bb.Name = "_REACH"
-    DoNotif("Box reach: " .. size)
-end)
-
-cmd.add({"resetreach"}, {"resetreach", "Remove reach"}, function()
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v.Name == "_REACH" then v:Destroy() end
-    end
-    DoNotif("Reach reset")
-end)
-
---============================================
--- 8. COMMANDS - VISUALS
---============================================
-cmd.add({"esp"}, {"esp", "Player ESP"}, function()
-    if _G._espConn then _G._espConn:Disconnect() end
-    _G._espEnabled = true
-    local function addEsp(p)
-        if p == LP or not p.Character then return end
-        local hrp = p.Character:FindFirstChild("HumanoidRootPart")
-        if not hrp or hrp:FindFirstChild("_ESP") then return end
-        local bb = InstanceNew("BillboardGui", hrp)
-        bb.Name = "_ESP"
-        bb.Size = UDim2.new(0, 100, 0, 40)
-        bb.AlwaysOnTop = true
-        bb.StudsOffset = Vector3.new(0, 3, 0)
-        local f = InstanceNew("Frame", bb)
-        f.Size = UDim2.new(1, 0, 1, 0)
-        f.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
-        f.BackgroundTransparency = 0.5
-        f.BorderSizePixel = 0
-        InstanceNew("UICorner", f).CornerRadius = UDim.new(0, 4)
-        local t = InstanceNew("TextLabel", bb)
-        t.Size = UDim2.new(1, 0, 1, 0)
-        t.BackgroundTransparency = 1
-        t.Text = p.Name
-        t.TextColor3 = Color3.new(1, 1, 1)
-        t.TextScaled = true
-    end
-    for _, p in pairs(Players:GetPlayers()) do addEsp(p) end
-    _G._espConn = Players.PlayerAdded:Connect(function(p)
-        p.CharacterAdded:Connect(function()
-            Wait(1)
-            if _G._espEnabled then addEsp(p) end
-        end)
-    end)
-    DoNotif("ESP ON")
-end)
-
-cmd.add({"unesp"}, {"unesp", "Disable ESP"}, function()
-    _G._espEnabled = false
-    if _G._espConn then _G._espConn:Disconnect() end
-    for _, p in pairs(Players:GetPlayers()) do
-        if p.Character then
-            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local e = hrp:FindFirstChild("_ESP")
-                if e then e:Destroy() end
-            end
-        end
-    end
-    DoNotif("ESP OFF")
-end)
-
-cmd.add({"chams"}, {"chams", "Chams ESP"}, function()
-    _G._chamsEnabled = true
-    local function addChams(p)
-        if p == LP or not p.Character then return end
-        for _, v in pairs(p.Character:GetDescendants()) do
-            if v:IsA("BasePart") and not v:FindFirstChild("_CHAMS") then
-                local hl = InstanceNew("Highlight", v)
-                hl.Name = "_CHAMS"
-                hl.FillColor = Color3.fromRGB(255, 0, 0)
-                hl.FillTransparency = 0.5
-                hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-                hl.OutlineTransparency = 0
-                hl.Adornee = v
-            end
-        end
-    end
-    for _, p in pairs(Players:GetPlayers()) do addChams(p) end
-    DoNotif("Chams ON")
-end)
-
-cmd.add({"unchams"}, {"unchams", "Disable chams"}, function()
-    _G._chamsEnabled = false
-    for _, p in pairs(Players:GetPlayers()) do
-        if p.Character then
-            for _, v in pairs(p.Character:GetDescendants()) do
-                if v.Name == "_CHAMS" then v:Destroy() end
-            end
-        end
-    end
-    DoNotif("Chams OFF")
-end)
-
-cmd.add({"ff"}, {"ff", "Add forcefield"}, function()
-    local c = getChar()
-    if c then InstanceNew("ForceField", c) DoNotif("FF ON") end
-end)
-
-cmd.add({"noff"}, {"noff", "Remove forcefield"}, function()
-    local c = getChar()
-    if not c then return end
-    for _, v in pairs(c:GetChildren()) do
-        if v:IsA("ForceField") then v:Destroy() end
-    end
-    DoNotif("FF OFF")
-end)
-
-cmd.add({"fullbright", "fb"}, {"fullbright", "Bright without destroying effects"}, function()
-    Lighting.Brightness = 2
-    Lighting.ClockTime = 14
-    Lighting.FogEnd = 100000
-    Lighting.GlobalShadows = false
-    Lighting.Ambient = Color3.fromRGB(178, 178, 178)
-    DoNotif("Fullbright ON")
-end)
-
-cmd.add({"nofog"}, {"nofog", "Remove fog"}, function()
-    Lighting.FogEnd = 1e10
-    Lighting.FogStart = 1e10
-    DoNotif("No fog")
-end)
-
-cmd.add({"noeffect", "cleareffects"}, {"noeffect", "Disable effects"}, function()
-    for _, v in pairs(Lighting:GetDescendants()) do
-        if v:IsA("PostEffect") then v.Enabled = false end
-    end
-    DoNotif("Effects OFF")
-end)
-
-cmd.add({"day"}, {"day", "Make it day"}, function()
-    Lighting.ClockTime = 14
-    DoNotif("Day")
-end)
-
-cmd.add({"night"}, {"night", "Make it night"}, function()
-    Lighting.ClockTime = 0
-    DoNotif("Night")
-end)
-
-cmd.addArg({"brightness"}, {"brightness <num>", "Set brightness"}, function(v)
-    Lighting.Brightness = tonumber(v) or 2
-    DoNotif("Brightness: " .. Lighting.Brightness)
-end)
-
-cmd.addArg({"time"}, {"time <num>", "Set clock time"}, function(v)
-    Lighting.ClockTime = tonumber(v) or 12
-    DoNotif("Time: " .. Lighting.ClockTime)
-end)
-
-cmd.addArg({"fov"}, {"fov <num>", "Set FOV"}, function(v)
-    Camera.FieldOfView = tonumber(v) or 70
-    DoNotif("FOV: " .. Camera.FieldOfView)
-end)
-
-cmd.add({"globalshadows"}, {"globalshadows", "Enable shadows"}, function()
-    Lighting.GlobalShadows = true
-    DoNotif("Shadows ON")
-end)
-
-cmd.add({"unglobalshadows"}, {"unglobalshadows", "Disable shadows"}, function()
-    Lighting.GlobalShadows = false
-    DoNotif("Shadows OFF")
-end)
-
---============================================
--- 9. COMMANDS - CHARACTER
---============================================
-cmd.add({"invisible", "invis"}, {"invisible", "Turn invisible"}, function()
-    local c = getChar()
-    if not c then return end
-    for _, v in pairs(c:GetDescendants()) do
-        if v:IsA("BasePart") then v.Transparency = 1 end
-        if v:IsA("Decal") then v.Transparency = 1 end
-    end
-    DoNotif("Invisible")
-end)
-
-cmd.add({"visible", "vis"}, {"visible", "Turn visible"}, function()
-    local c = getChar()
-    if not c then return end
-    for _, v in pairs(c:GetDescendants()) do
-        if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then v.Transparency = 0 end
-        if v:IsA("Decal") then v.Transparency = 0 end
-    end
-    DoNotif("Visible")
-end)
-
-cmd.add({"sit"}, {"sit", "Sit down"}, function()
-    local h = getHum()
-    if h then h.Sit = true DoNotif("Sitting") end
-end)
-
-cmd.add({"unsit", "stand"}, {"unsit", "Stand up"}, function()
-    local h = getHum()
-    if h then h.Sit = false DoNotif("Standing") end
-end)
-
-cmd.add({"jump"}, {"jump", "Jump"}, function()
-    local h = getHum()
-    if h then h.Jump = true end
-end)
-
-cmd.add({"reset", "die"}, {"reset", "Kill yourself"}, function()
-    local h = getHum()
-    if h then h.Health = 0 end
-end)
-
-cmd.add({"respawn", "re"}, {"respawn", "Respawn"}, function()
-    LP:LoadCharacter()
-    DoNotif("Respawning...")
-end)
-
-cmd.add({"breakjoints"}, {"breakjoints", "Break joints"}, function()
-    local c = getChar()
-    if c then c:BreakJoints() DoNotif("Joints broken") end
-end)
-
-cmd.addArg({"material", "mat"}, {"material <name>", "Set character material"}, function(v)
-    local mat = Enum.Material:FindFirstChild(v or "SmoothPlastic")
-    if not mat then DoNotif("Material not found") return end
-    local c = getChar()
-    if c then
-        for _, p in pairs(c:GetDescendants()) do
-            if p:IsA("BasePart") then p.Material = mat end
-        end
-        DoNotif("Material: " .. mat.Name)
-    end
-end)
-
-cmd.add({"stopanimations", "noanim"}, {"stopanimations", "Stop all animations"}, function()
-    local h = getHum()
-    if h then
-        for _, v in pairs(h:GetPlayingAnimationTracks()) do
-            v:Stop(0)
-        end
-        DoNotif("Animations stopped")
-    end
-end)
-
-cmd.add({"btools"}, {"btools", "Building tools"}, function()
-    local bp = getBp()
-    if not bp then return end
-    local t = InstanceNew("Tool", bp)
-    t.Name = "BTool"
-    t.CanBeDropped = false
-    InstanceNew("Part", t).Transparency = 1
-    DoNotif("BTools given")
-end)
-
-cmd.add({"droptool", "dtool"}, {"droptool", "Drop current tool"}, function()
-    local c = getChar()
-    if not c then return end
-    local tool = c:FindFirstChildOfClass("Tool")
-    if tool then
-        tool.Parent = Workspace
-        DoNotif("Dropped: " .. tool.Name)
-    end
-end)
-
-cmd.add({"droptools"}, {"droptools", "Drop all tools"}, function()
-    local c = getChar()
-    if not c then return end
-    for _, v in pairs(c:GetChildren()) do
-        if v:IsA("Tool") then v.Parent = Workspace end
-    end
-    DoNotif("All tools dropped")
-end)
-
-cmd.add({"equiptools"}, {"equiptools", "Equip all tools"}, function()
-    local bp = getBp()
-    local c = getChar()
-    if not bp or not c then return end
-    for _, v in pairs(bp:GetChildren()) do
-        if v:IsA("Tool") then v.Parent = c end
-    end
-    DoNotif("All tools equipped")
-end)
-
-cmd.add({"unequiptools"}, {"unequiptools", "Unequip all tools"}, function()
-    local bp = getBp()
-    local c = getChar()
-    if not bp or not c then return end
-    for _, v in pairs(c:GetChildren()) do
-        if v:IsA("Tool") then v.Parent = bp end
-    end
-    DoNotif("All tools unequipped")
-end)
-
-cmd.add({"grabtools", "gtools"}, {"grabtools", "Grab dropped tools"}, function()
-    local r = getRoot()
-    if not r then return end
-    local count = 0
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("Tool") then
-            v.Handle.CFrame = r.CFrame
-            count = count + 1
-        end
-    end
-    DoNotif("Grabbed " .. count .. " tools")
-end)
-
-cmd.add({"naked"}, {"naked", "Remove clothing"}, function()
-    local c = getChar()
-    if c then
-        for _, v in pairs(c:GetDescendants()) do
-            if v:IsA("Shirt") or v:IsA("Pants") or v:IsA("ShirtGraphic") then
-                v:Destroy()
-            end
-        end
-        DoNotif("Naked")
-    end
-end)
-
---============================================
--- 10. COMMANDS - MISC
---============================================
-cmd.add({"players", "plrs"}, {"players", "List players"}, function()
-    local names = {}
-    for _, p in pairs(Players:GetPlayers()) do Insert(names, p.Name) end
-    DoNotif(table.concat(names, ", "))
-end)
-
-cmd.add({"fps"}, {"fps", "Show FPS"}, function()
-    local t = tick()
-    RunService.RenderStepped:Wait()
-    DoNotif("FPS: " .. math.floor(1 / (tick() - t)))
-end)
-
-cmd.add({"ping"}, {"ping", "Show ping"}, function()
-    DoNotif("Ping: " .. math.floor(LP:GetNetworkPing() * 1000) .. "ms")
-end)
-
-cmd.add({"pos", "position"}, {"pos", "Show position"}, function()
-    local r = getRoot()
-    if r then
-        local p = r.Position
-        DoNotif(math.floor(p.X) .. ", " .. math.floor(p.Y) .. ", " .. math.floor(p.Z))
-    end
-end)
-
-cmd.add({"memory", "mem"}, {"memory", "Show memory"}, function()
-    DoNotif("Memory: " .. math.floor(collectgarbage("count")) .. " KB")
-end)
-
-cmd.add({"uptime"}, {"uptime", "Show uptime"}, function()
-    DoNotif("Game time: " .. math.floor(workspace.DistributedGameTime) .. "s")
-end)
-
-cmd.add({"chat"}, {"chat <msg>", "Send chat message"}, function(msg)
-    if msg and msg ~= "" then
-        pcall(function()
-            TextChatService.TextChannels.RBXGeneral:SendAsync(msg)
-        end)
-        DoNotif("Sent: " .. msg)
-    end
-end)
-
-cmd.add({"noclickdetectorlimits"}, {"nocdlimit", "Remove CD limits"}, function()
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("ClickDetector") then
-            v.MaxActivationDistance = math.huge
-        end
-    end
-    DoNotif("CD limits removed")
-end)
-
-cmd.add({"fireclickdetectors", "fcd"}, {"fireclickdetectors", "Fire all CDs"}, function()
-    local count = 0
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("ClickDetector") then
-            pcall(function() v.MouseClick:Fire() end)
-            count = count + 1
-        end
-    end
-    DoNotif("Fired " .. count .. " CDs")
-end)
-
-cmd.add({"fireproximityprompts", "fpp"}, {"fireproximityprompts", "Fire all PP"}, function()
-    local count = 0
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("ProximityPrompt") then
-            pcall(function() v:InputHoldBegin() end)
-            pcall(function() v:InputHoldEnd() end)
-            count = count + 1
-        end
-    end
-    DoNotif("Fired " .. count .. " PP")
-end)
-
-cmd.add({"removeads", "adblock"}, {"removeads", "Remove ads"}, function()
-    local count = 0
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("BillboardGui") then
-            local t = v:FindFirstChildOfClass("TextLabel")
-            if t and (t.Text:find("AD") or t.Text:find("ad")) then
-                v:Destroy()
-                count = count + 1
-            end
-        end
-    end
-    DoNotif("Removed " .. count .. " ads")
-end)
-
-cmd.add({"notepad", "npad"}, {"notepad", "Open notepad"}, function()
-    local g = InstanceNew("ScreenGui", CG)
-    g.Name = "Notepad"
-    local f = InstanceNew("Frame", g)
-    f.Size = UDim2.new(0, 400, 0, 300)
-    f.Position = UDim2.new(0.5, -200, 0.5, -150)
-    f.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
-    f.BorderSizePixel = 0
-    InstanceNew("UICorner", f).CornerRadius = UDim.new(0, 8)
-    local tb = Instance.new("TextBox", f)
-    tb.Size = UDim2.new(1, -16, 1, -16)
-    tb.Position = UDim2.new(0, 8, 0, 8)
-    tb.BackgroundTransparency = 1
-    tb.TextColor3 = Color3.new(1, 1, 1)
-    tb.TextSize = 14
-    tb.Font = Enum.Font.Code
-    tb.TextXAlignment = Enum.TextXAlignment.Left
-    tb.TextYAlignment = Enum.TextYAlignment.Top
-    tb.MultiLine = true
-    tb.TextWrapped = true
-    tb.ClearTextOnFocus = false
-    tb.Text = ""
-    DoNotif("Notepad opened")
-end)
-
-cmd.add({"clear"}, {"clear", "Clear all GUIs"}, function()
-    for _, g in pairs(CG:GetChildren()) do
-        if g.Name ~= "CustomCmds" and g.Name ~= "CyberPanel" then
-            pcall(function() g:Destroy() end)
-        end
-    end
-    DoNotif("GUIs cleared")
-end)
-
-cmd.add({"noremote", "blockremote"}, {"noremote", "Block remotes"}, function()
-    if not hookmetamethod or not newcclosure then
-        DoNotif("Not supported by your executor")
-        return
-    end
-    local ok, err = pcall(function()
-        local old
-        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-            local method = getnamecallmethod()
-            if method == "FireServer" or method == "InvokeServer" then
-                DoNotif("Blocked: " .. tostring(self.Name))
-                return
-            end
-            return old(self, ...)
-        end))
-    end)
-    DoNotif(ok and "Remote blocker ON" or "Failed: " .. tostring(err))
-end)
-
-cmd.addArg({"prefix"}, {"prefix <char>", "Set command prefix"}, function(v)
-    if v and v ~= "" then
-        DoNotif("Prefix set to: " .. v)
-    end
-end)
-
-cmd.add({"discord", "invite"}, {"discord", "Copy invite link"}, function()
-    pcall(function() setclipboard("https://discord.gg/namelessadmin") end)
-    DoNotif("Invite copied!")
-end)
-
-cmd.add({"rejoin", "rj"}, {"rejoin", "Rejoin server"}, function()
-    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LP)
-end)
-
-cmd.add({"serverhop", "shop"}, {"serverhop", "Hop servers"}, function()
-    local servers = HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"))
-    if servers and servers.data then
-        for _, s in pairs(servers.data) do
-            if s.id ~= game.JobId and s.playing < s.maxPlayers then
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, LP)
-                DoNotif("Hopping...")
-                return
-            end
-        end
-    end
-    DoNotif("No servers found")
-end)
-
-cmd.add({"gameid", "gid"}, {"gameid", "Copy game ID"}, function()
-    pcall(function() setclipboard(tostring(game.GameId)) end)
-    DoNotif("Game ID copied")
-end)
-
-cmd.add({"placeid", "pid"}, {"placeid", "Copy place ID"}, function()
-    pcall(function() setclipboard(tostring(game.PlaceId)) end)
-    DoNotif("Place ID copied")
-end)
-
-cmd.add({"jobid"}, {"jobid", "Copy job ID"}, function()
-    pcall(function() setclipboard(game.JobId) end)
-    DoNotif("Job ID copied")
-end)
-
-cmd.add({"copyname", "cname"}, {"copyname <player>", "Copy username"}, function(target)
-    local plrs = getPlr(target or "me")
-    if #plrs > 0 then
-        pcall(function() setclipboard(plrs[1].Name) end)
-        DoNotif("Copied: " .. plrs[1].Name)
-    end
-end)
-
-cmd.add({"copyid"}, {"copyid <player>", "Copy user ID"}, function(target)
-    local plrs = getPlr(target or "me")
-    if #plrs > 0 then
-        pcall(function() setclipboard(tostring(plrs[1].UserId)) end)
-        DoNotif("Copied: " .. plrs[1].UserId)
-    end
-end)
-
-cmd.add({"copyposition", "cpos"}, {"copyposition <player>", "Copy position"}, function(target)
-    local plrs = getPlr(target or "me")
-    if #plrs > 0 and plrs[1].Character then
-        local hrp = plrs[1].Character:FindFirstChild("HumanoidRootPart")
-        if hrp then
-            local p = hrp.Position
-            local s = math.floor(p.X) .. ", " .. math.floor(p.Y) .. ", " .. math.floor(p.Z)
-            pcall(function() setclipboard(s) end)
-            DoNotif("Copied: " .. s)
-        end
-    end
-end)
-
-cmd.add({"gethealth", "hp"}, {"gethealth <player>", "Show health"}, function(target)
-    local plrs = getPlr(target or "me")
-    if #plrs > 0 and plrs[1].Character then
-        local h = plrs[1].Character:FindFirstChildOfClass("Humanoid")
-        if h then
-            DoNotif(plrs[1].Name .. " HP: " .. math.floor(h.Health) .. "/" .. math.floor(h.MaxHealth))
-        end
-    end
-end)
-
-cmd.add({"getmass"}, {"getmass", "Show mass"}, function()
-    local c = getChar()
-    if c then
-        local mass = 0
-        for _, v in pairs(c:GetDescendants()) do
-            if v:IsA("BasePart") then mass = mass + v:GetMass() end
-        end
-        DoNotif("Mass: " .. math.floor(mass))
-    end
-end)
-
-cmd.add({"console", "debug"}, {"console", "Open console"}, function()
-    StarterGui:SetCore("DevConsoleVisible", true)
-end)
-
-cmd.add({"shiftlock", "sl"}, {"shiftlock", "Toggle shift lock"}, function()
-    StarterGui:SetCore("ShiftLockEnabled", true)
-    DoNotif("ShiftLock ON")
-end)
-
-cmd.add({"unshiftlock"}, {"unshiftlock", "Disable shift lock"}, function()
-    StarterGui:SetCore("ShiftLockEnabled", false)
-    DoNotif("ShiftLock OFF")
-end)
-
-cmd.add({"firstp", "fp"}, {"firstp", "First person"}, function()
-    Camera:GetPropertyChangedSignal("CameraType"):Connect(function()
-        Camera.CameraType = Enum.CameraType.Custom
-    end)
-    LP.CameraMinZoomDistance = 0.5
-    LP.CameraMaxZoomDistance = 0.5
-    DoNotif("First person")
-end)
-
-cmd.add({"thirdp", "3rdp"}, {"thirdp", "Third person"}, function()
-    LP.CameraMinZoomDistance = 0.5
-    LP.CameraMaxZoomDistance = 128
-    DoNotif("Third person")
-end)
-
-cmd.add({"setspawn", "ss"}, {"setspawn", "Set spawn point"}, function()
-    local r = getRoot()
-    if not r then return end
-    local s = InstanceNew("SpawnLocation", Workspace)
-    s.CFrame = r.CFrame
-    s.Size = Vector3.new(6, 1, 6)
-    s.Anchored = true
-    s.CanCollide = false
-    s.Transparency = 1
-    DoNotif("Spawn set")
-end)
-
-cmd.add({"walltp"}, {"walltp", "Wall teleport"}, function()
-    _G._walltp = true
-    if _G._walltpConn then _G._walltpConn:Disconnect() end
-    _G._walltpConn = RunService.RenderStepped:Connect(function()
-        if not _G._walltp then return end
-        local r = getRoot()
-        if r then
-            local ray = Workspace:Raycast(r.Position, r.CFrame.LookVector * 4)
-            if ray then
-                r.CFrame = CFrame.new(ray.Position + Vector3.new(0, 5, 0))
-            end
-        end
-    end)
-    DoNotif("Wall TP ON")
-end)
-
-cmd.add({"unwalltp"}, {"unwalltp", "Disable wall TP"}, function()
-    _G._walltp = false
-    if _G._walltpConn then _G._walltpConn:Disconnect() end
-    DoNotif("Wall TP OFF")
-end)
-
-cmd.add({"xray"}, {"xray", "X-ray vision"}, function()
-    _G._xray = true
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("BasePart") and not v:IsDescendantOf(LP.Character or game) then
-            v.LocalTransparencyModifier = 0.8
-        end
-    end
-    DoNotif("X-ray ON")
-end)
-
-cmd.add({"unxray"}, {"unxray", "Disable x-ray"}, function()
-    _G._xray = false
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("BasePart") then
-            v.LocalTransparencyModifier = 0
-        end
-    end
-    DoNotif("X-ray OFF")
-end)
-
-cmd.add({"lockws"}, {"lockws", "Lock workspace"}, function()
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("BasePart") then v.Locked = true end
-    end
-    DoNotif("Workspace locked")
-end)
-
-cmd.add({"unlockws"}, {"unlockws", "Unlock workspace"}, function()
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("BasePart") then v.Locked = false end
-    end
-    DoNotif("Workspace unlocked")
-end)
-
-cmd.add({"removeterrain", "noterrain"}, {"removeterrain", "Remove terrain"}, function()
-    Workspace:Clear()
-    DoNotif("Terrain removed")
-end)
-
-cmd.add({"delete", "del"}, {"delete <name>", "Delete part by name"}, function(name)
-    if not name or name == "" then return end
-    local count = 0
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("BasePart") and v.Name == name then
-            v:Destroy()
-            count = count + 1
-        end
-    end
-    DoNotif("Deleted " .. count .. " parts")
-end)
-
-cmd.addArg({"deletefind", "delfind"}, {"deletefind <name>", "Delete by name match"}, function(name)
-    if not name or name == "" then return end
-    local count = 0
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("BasePart") and v.Name:lower():find(name:lower()) then
-            v:Destroy()
-            count = count + 1
-        end
-    end
-    DoNotif("Deleted " .. count .. " parts")
-end)
-
-cmd.addArg({"deleteclass", "dc"}, {"deleteclass <class>", "Delete by class"}, function(name)
-    if not name or name == "" then return end
-    local count = 0
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA(name) then
-            v:Destroy()
-            count = count + 1
-        end
-    end
-    DoNotif("Deleted " .. count .. " instances")
-end)
-
-cmd.add({"deleteinvisparts", "dip"}, {"deleteinvisparts", "Delete invisible parts"}, function()
-    local count = 0
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v:IsA("BasePart") and v.Transparency >= 0.9 then
-            v:Destroy()
-            count = count + 1
-        end
-    end
-    DoNotif("Deleted " .. count .. " invisible parts")
-end)
-
-cmd.add({"clearnilinstances", "cni"}, {"clearnilinstances", "Clear nil instances"}, function()
-    local count = 0
-    for _, v in pairs(game:GetDescendants()) do
-        if v.Parent == nil then
-            pcall(function() v:Destroy() end)
-            count = count + 1
-        end
-    end
-    DoNotif("Cleared " .. count .. " nil instances")
-end)
-
---============================================
--- 11. COMMANDS - LOOP
---============================================
-cmd.addArg({"loopwalkspeed", "loopws"}, {"loopws <num>", "Loop walkspeed"}, function(v)
-    local speed = tonumber(v) or 16
-    _G._loopws = true
-    if _G._lwsConn then _G._lwsConn:Disconnect() end
-    _G._lwsConn = RunService.Heartbeat:Connect(function()
-        if not _G._loopws then return end
-        local h = getHum()
-        if h then h.WalkSpeed = speed end
-    end)
-    DoNotif("Loop Speed: " .. speed)
-end)
-
-cmd.add({"unloopwalkspeed", "unloopws"}, {"unloopws", "Disable loop speed"}, function()
-    _G._loopws = false
-    if _G._lwsConn then _G._lwsConn:Disconnect() end
-    DoNotif("Loop Speed OFF")
-end)
-
-cmd.addArg({"loopjumppower", "loopjp"}, {"loopjp <num>", "Loop jump power"}, function(v)
-    local power = tonumber(v) or 50
-    _G._loopjp = true
-    if _G._ljpConn then _G._ljpConn:Disconnect() end
-    _G._ljpConn = RunService.Heartbeat:Connect(function()
-        if not _G._loopjp then return end
-        local h = getHum()
-        if h then h.JumpPower = power end
-    end)
-    DoNotif("Loop JP: " .. power)
-end)
-
-cmd.add({"unloopjumppower", "unloopjp"}, {"unloopjp", "Disable loop JP"}, function()
-    _G._loopjp = false
-    if _G._ljpConn then _G._ljpConn:Disconnect() end
-    DoNotif("Loop JP OFF")
-end)
-
-cmd.add({"loopjump", "bhop"}, {"loopjump", "Continuous jump"}, function()
-    _G._loopjump = true
-    if _G._ljConn then _G._ljConn:Disconnect() end
-    _G._ljConn = RunService.Heartbeat:Connect(function()
-        if not _G._loopjump then return end
-        local h = getHum()
-        if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
-    end)
-    DoNotif("Loop Jump ON")
-end)
-
-cmd.add({"unloopjump", "unbhop"}, {"unloopjump", "Disable continuous jump"}, function()
-    _G._loopjump = false
-    if _G._ljConn then _G._ljConn:Disconnect() end
-    DoNotif("Loop Jump OFF")
-end)
-
-cmd.add({"loopnight"}, {"loopnight", "Loop night"}, function()
-    _G._loopnight = true
-    if _G._lnConn then _G._lnConn:Disconnect() end
-    _G._lnConn = RunService.Heartbeat:Connect(function()
-        if not _G._loopnight then return end
-        Lighting.ClockTime = 0
-    end)
-    DoNotif("Loop Night ON")
-end)
-
-cmd.add({"unloopnight"}, {"unloopnight", "Disable loop night"}, function()
-    _G._loopnight = false
-    if _G._lnConn then _G._lnConn:Disconnect() end
-    DoNotif("Loop Night OFF")
-end)
-
-cmd.add({"loopday"}, {"loopday", "Loop day"}, function()
-    _G._loopday = true
-    if _G._ldConn then _G._ldConn:Disconnect() end
-    _G._ldConn = RunService.Heartbeat:Connect(function()
-        if not _G._loopday then return end
-        Lighting.ClockTime = 14
-    end)
-    DoNotif("Loop Day ON")
-end)
-
-cmd.add({"unloopday"}, {"unloopday", "Disable loop day"}, function()
-    _G._loopday = false
-    if _G._ldConn then _G._ldConn:Disconnect() end
-    DoNotif("Loop Day OFF")
-end)
-
-cmd.add({"loopnodrag"}, {"loopnodrag", "Loop zero velocity"}, function()
-    _G._loopnd = true
-    if _G._lndConn then _G._lndConn:Disconnect() end
-    _G._lndConn = RunService.Stepped:Connect(function()
-        if not _G._loopnd then return end
-        local r = getRoot()
-        if r then
-            r.Velocity = Vector3.new(0, 0, 0)
-            r.RotVelocity = Vector3.new(0, 0, 0)
-        end
-    end)
-    DoNotif("Loop No-Drag ON")
-end)
-
-cmd.add({"unloopnodrag"}, {"unloopnodrag", "Disable loop no-drag"}, function()
-    _G._loopnd = false
-    if _G._lndConn then _G._lndConn:Disconnect() end
-    DoNotif("Loop No-Drag OFF")
-end)
-
-cmd.add({"loopfling"}, {"loopfling", "Loop fling"}, function()
-    local r = getRoot()
-    if not r then return end
-    _G._loopfling = true
-    if _G._lfBg then pcall(function() _G._lfBg:Destroy() end) end
-    local bg = InstanceNew("BodyAngularVelocity", r)
-    bg.AngularVelocity = Vector3.new(9e9, 9e9, 9e9)
-    bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
-    bg.P = 1e6
-    bg.Name = "_LOOPFLING"
-    _G._lfBg = bg
-    DoNotif("Loop Fling ON")
-end)
-
-cmd.add({"unloopfling"}, {"unloopfling", "Disable loop fling"}, function()
-    _G._loopfling = false
-    for _, v in pairs(Workspace:GetDescendants()) do
-        if v.Name == "_LOOPFLING" then v:Destroy() end
-    end
-    DoNotif("Loop Fling OFF")
-end)
-
-cmd.add({"unloop"}, {"unloop", "Stop all loops"}, function()
-    _G._flyConn = nil
-    _G._noclip = false
-    _G._espEnabled = false
-    _G._climb = false
-    _G._loopws = false
-    _G._loopjp = false
-    _G._loopjump = false
-    _G._loopnight = false
-    _G._loopday = false
-    _G._loopnd = false
-    _G._loopfling = false
-    _G._infjump = false
-    _G._walltp = false
-    _G._xray = false
-    _G._follow = false
-    _G._glue = false
-    _G._glueConn = nil
-    DoNotif("All loops stopped")
-end)
-
---============================================
--- 12. REMAINING COMMANDS (all 977)
---============================================
-local remaining = {
-    {"2012", "Makes CoreGui look like 2012"},
-    {"2013", "Makes CoreGui look like 2013"},
-    {"2014", "Makes CoreGui look like 2014"},
-    {"2015", "Makes CoreGui look like 2015"},
-    {"2016", "Makes CoreGui look like 2016"},
-    {"accountage", "Shows account age"},
-    {"actnpc", "Act like an NPC"},
-    {"addalias", "Add persistent alias"},
-    {"admin", "Whitelist user as admin"},
-    {"adonisbypass", "Bypass Adonis detection"},
-    {"aimbot", "Aimbot GUI"},
-    {"airmomentum", "Custom air control"},
-    {"airwalk", "Press space to go up"},
-    {"alignmentkeys", "Enable alignment keys"},
-    {"animationplayer", "Play animations dropdown"},
-    {"animationspeed", "Adjust animation speed"},
-    {"animbuilder", "Animation builder GUI"},
-    {"annoy", "Annoy player"},
-    {"antianchor", "Prevent parts anchored"},
-    {"antibang", "Prevent bang"},
-    {"antibreakjoints", "Prevent joints breaking"},
-    {"anticframeteleport", "Prevent CFrame teleports"},
-    {"antierror", "Block error UIs"},
-    {"antifling", "Non-collidable with others"},
-    {"antiflingparts", "Disable unanchored fling parts"},
-    {"antinil", "Prevent char parented nil"},
-    {"antisit", "Prevent sitting"},
-    {"antitrip", "No tripping"},
-    {"antivelocity", "Limit velocity"},
-    {"antivoid2", "Set FallenPartsDestroyHeight -inf"},
-    {"audiologger", "Grab all audios UI"},
-    {"aura", "Damage nearby humanoids"},
-    {"autoclicker", "Autoclicker GUI"},
-    {"autodelete", "Remove parts by name on loop"},
-    {"autodeleteclass", "Remove parts by class on loop"},
-    {"autodeletefind", "Remove parts by name match"},
-    {"autofireclick", "Auto fire ClickDetectors"},
-    {"autofireproxi", "Auto fire ProximityPrompts"},
-    {"autofireremote", "Auto fire remotes"},
-    {"autoflashback", "Auto teleport to death point"},
-    {"autofollow", "Follow nearby player"},
-    {"autopatchtool", "Patch tool cooldowns"},
-    {"autorejoin", "Rejoin if kicked"},
-    {"autorespawn", "Auto respawn to death pos"},
-    {"autotouch", "Auto fire TouchInterests"},
-    {"avatarpreview", "Client avatar preview rig"},
-    {"backpack", "Custom backpack GUI"},
-    {"backview", "Flip camera behind you"},
-    {"badgeviewer", "View all badges UI"},
-    {"bang", "Bang player"},
-    {"blackhole", "Pull parts to point"},
-    {"blackholefollow", "Pull parts to you"},
-    {"block", "Block player"},
-    {"bodytransparency", "Set body transparency"},
-    {"breakcars", "Break any car"},
-    {"breaklayeredclothing", "Stretch layered clothing"},
-    {"brightness", "Change brightness"},
-    {"bringfolder", "Bring folder contents"},
-    {"bringmodel", "Bring model by name"},
-    {"bringnpcs", "Bring NPCs"},
-    {"bringpart", "Bring part by name"},
-    {"bubblechat", "Enable BubbleChat"},
-    {"bypassspeed", "Set WalkSpeed bypass"},
-    {"cam", "Manage camera type"},
-    {"cameranoclip", "Camera through walls"},
-    {"cancelteleport", "Cancel teleport"},
-    {"carp", "Be someone's carpet"},
-    {"chamsallies", "Chams teammates"},
-    {"chamsenemies", "Chams enemies"},
-    {"chardebug", "Debug character"},
-    {"chardelete", "Delete parts from character"},
-    {"chatlogs", "Open chat logs"},
-    {"chattranslate", "Chat translator"},
-    {"checkrfe", "Check FilteringEnabled"},
-    {"cig", "Give cigarette"},
-    {"cigar", "Give cigar"},
-    {"circlemath", "Circle math"},
-    {"clearaliases", "Remove all aliases"},
-    {"clearbuttons", "Clear user buttons"},
-    {"clearerror", "Clear error UI"},
-    {"clickdelete", "Click to delete"},
-    {"clickdetectorgoto", "TP to ClickDetector"},
-    {"clickesp", "Click ESP"},
-    {"clickfling", "Click to fling"},
-    {"clickkillnpc", "Click to kill NPC"},
-    {"clicknpcjp", "Click NPC set JP"},
-    {"clicknpcws", "Click NPC set WS"},
-    {"clickscare", "TP next to clicked player"},
-    {"clickteleport", "Click to teleport"},
-    {"clicktouch", "Click to fire touch"},
-    {"climb", "Climb in air"},
-    {"cmdbar2", "HD-Admin style cmdbar"},
-    {"commandcount", "Count commands"},
-    {"commitoof", "Dramatic oof sequence"},
-    {"copydisplay", "Copy display name"},
-    {"copylerp", "Copy Lerp script"},
-    {"copymoveto", "Copy MoveTo script"},
-    {"copyteleport", "Copy teleport script"},
-    {"copytools", "Copy player tools"},
-    {"crash", "Crash client"},
-    {"creep", "Creep teleport"},
-    {"cursorfree", "Force cursor visible"},
-    {"dance", "Random dance"},
-    {"datalimit", "Set bandwidth limit"},
-    {"datetime", "Show local date/time"},
-    {"decompiler", "Decompile scripts"},
-    {"defaultrotationscreen", "Default screen orientation"},
-    {"dex", "Dex explorer"},
-    {"disable", "Disable CoreGui"},
-    {"disableanimations", "Freeze animations"},
-    {"disableproximityprompts", "Disable PP"},
-    {"disablespawn", "Disable spawn point"},
-    {"discord", "Copy invite link"},
-    {"droptools", "Drop all tools"},
-    {"echolocation", "Dark world echolocation"},
-    {"edgejump", "Auto jump at edge"},
-    {"enable", "Enable CoreGui"},
-    {"enginesettingsinfo", "Engine settings info"},
-    {"equiptool", "Equip tool by name"},
-    {"errorchat", "Error chat"},
-    {"executor", "Toggle executor UI"},
-    {"exit", "Close game"},
-    {"exportconsole", "Export console logs"},
-    {"f3x", "F3X for client"},
-    {"fakechat", "Fake chat GUI"},
-    {"fakelag", "Fake lag"},
-    {"fakeout", "TP to void and back"},
-    {"fastprompts", "Fast proximity prompts"},
-    {"feedback", "Feedback prompt"},
-    {"firekey", "Fire keybind"},
-    {"firework", "Firework"},
-    {"firstp", "First person"},
-    {"flashback", "TP to death point"},
-    {"flashlight", "Give flashlight"},
-    {"flyfling", "Fly and fling"},
-    {"flyjump", "Hold space to fly up"},
-    {"folderesp", "Folder ESP"},
-    {"forcecam", "Lock camera type"},
-    {"forcedrawscale", "Force draw scale"},
-    {"forcereverb", "Lock ambient reverb"},
-    {"fpsbooster", "Low graphics mode"},
-    {"fpscap", "Set FPS cap"},
-    {"fpsping", "FPS and ping panel"},
-    {"freecam", "Free camera"},
-    {"freecamgoto", "Freecam to player"},
-    {"freegamepass", "Pretend own gamepass"},
-    {"freemouse", "Toggle free mouse"},
-    {"friend", "Send friend request"},
-    {"friendweb", "Find friend circles"},
-    {"frontview", "Reset camera front"},
-    {"functionspy", "Check console"},
-    {"gameinfo", "Show game info"},
-    {"gamepasses", "List game passes"},
-    {"gear", "Give gear"},
-    {"globalshadows", "Enable global shadows"},
-    {"gotocampos", "TP to camera position"},
-    {"gotofolder", "TP to folder parts"},
-    {"gotomodel", "TP to models"},
-    {"gotopart", "TP to parts"},
-    {"gotowaypoint", "TP to waypoint"},
-    {"grabtools", "Grab dropped tools"},
-    {"gravitygun", "Gravity gun"},
-    {"grippos", "Set grip offset"},
-    {"guidelete", "Delete GUI under mouse"},
-    {"hamster", "Hamster ball"},
-    {"handlekill", "Kill with tool touch"},
-    {"hatresize", "Big hats"},
-    {"headbang", "Headbang"},
-    {"headsit", "Sit on head"},
-    {"headstand", "Stand on head"},
-    {"hide", "Hide player in lighting"},
-    {"hideacc", "Hide accessories"},
-    {"hidecom", "Remove COM tracker"},
-    {"hideguis", "Hide GUIs"},
-    {"hitbox", "Hitbox"},
-    {"hitboxes", "Show hitboxes"},
-    {"hoverinventory", "Hover inventory"},
-    {"hovername", "Hover name"},
-    {"httpspy", "HTTP Spy"},
-    {"hydroxide", "Execute Hydroxide"},
-    {"inspect", "Check user items"},
-    {"instantproximityprompts", "Instant PP"},
-    {"instantrespawn", "Instant respawn"},
-    {"inversebang", "Inverse bang"},
-    {"itemesp", "Item ESP"},
-    {"jerk", "Jerk"},
-    {"joingroup", "Join group"},
-    {"joinjobid", "Join by job ID"},
-    {"joinvoice", "Join voice chat"},
-    {"keyboard", "Keyboard GUI for mobile"},
-    {"keystroke", "Keystroke UI"},
-    {"lastcommand", "Re-run last command"},
-    {"lay", "Lay down"},
-    {"light", "Dynamic light"},
-    {"lighting", "Lighting control"},
-    {"lightingdisable", "Disable post-processing"},
-    {"listen", "Listen to voice chat"},
-    {"loadstring", "Run loadstring"},
-    {"loadtools", "Restore saved tools"},
-    {"locate", "Locate player"},
-    {"lockiconposition", "Lock NA icon"},
-    {"lockmouse", "Default mouse"},
-    {"lookat", "Stare at player"},
-    {"loop", "Start command loop"},
-    {"loopbrightness", "Loop brightness"},
-    {"loopbringnpcs", "Loop bring NPCs"},
-    {"loopday", "Loop day"},
-    {"loopdroptools", "Loop drop tools"},
-    {"loopfov", "Loop FOV"},
-    {"loopfullbright", "Loop fullbright"},
-    {"loopgrabtools", "Loop grab tools"},
-    {"loopnight", "Loop night"},
-    {"loopnoeffect", "Loop no effects"},
-    {"loopnofog", "Loop no fog"},
-    {"loopoof", "Loop oof sounds"},
-    {"loopspook", "Loop scare player"},
-    {"maxslopeangle", "Set MaxSlopeAngle"},
-    {"maxzoom", "Set max camera distance"},
-    {"memory", "Memory usage"},
-    {"minimap", "Minimap"},
-    {"minzoom", "Set min camera distance"},
-    {"modelesp", "Model ESP"},
-    {"music", "Music player"},
-    {"mute", "Mute boombox"},
-    {"naked", "Remove clothing"},
-    {"netbypass", "Net bypass"},
-    {"netless", "Execute netless"},
-    {"newserverhop", "Hop to newest server"},
-    {"nightmare", "Dark and spooky"},
-    {"nilchar", "Parent character nil"},
-    {"nobackpack", "No backpack"},
-    {"noeffect", "Disable effects"},
-    {"nofall", "Prevent fall damage"},
-    {"nofog", "Remove fog"},
-    {"nologphysics", "Disable physics log"},
-    {"noprompt", "Remove purchase prompt"},
-    {"norender", "Disable 3D rendering"},
-    {"noreset", "Disable reset button"},
-    {"notools", "Remove tools"},
-    {"notween", "Instant tweens"},
-    {"npcaura", "Damage nearby NPCs"},
-    {"npcesp", "NPC ESP"},
-    {"npcfollow", "NPCs follow you"},
-    {"npcjumppower", "Set NPC JP"},
-    {"npcwalkspeed", "Set NPC WS"},
-    {"offset", "Offset character"},
-    {"oganims", "Old 2007 animations"},
-    {"olddex", "Old Dex explorer"},
-    {"oldroblox", "Old skybox/studs"},
-    {"orbit", "Orbit around player"},
-    {"partname", "Click to get part path"},
-    {"partsize", "Resize part"},
-    {"pathfind", "Follow player pathfind"},
-    {"perfstats", "Performance stats"},
-    {"permtrip", "Permanent trip"},
-    {"pesp", "Part ESP"},
-    {"physics", "Physics settings"},
-    {"placeid", "Copy place ID"},
-    {"placename", "Copy place name"},
-    {"pluginmaker", "Plugin builder"},
-    {"predict", "Predict movement"},
-    {"privatemessage", "Private message"},
-    {"prompt", "Show purchase prompts"},
-    {"quality", "Render quality"},
-    {"r15", "Switch to R15"},
-    {"r6", "Switch to R6"},
-    {"reach", "Extend sword reach"},
-    {"refreshanimations", "Refresh animations"},
-    {"rejoin", "Rejoin server"},
-    {"remotespy", "Remote spy"},
-    {"removeads", "Remove ads"},
-    {"removeterrain", "Remove terrain"},
-    {"rename", "Rename admin UI"},
-    {"render", "Enable 3D rendering"},
-    {"repeat", "Repeat command"},
-    {"reselectchar", "Character picker"},
-    {"resetbtn", "Enable reset button"},
-    {"resetfilter", "Reset chat filter"},
-    {"rewind", "Rewind movement"},
-    {"rjre", "Rejoin and reposition"},
-    {"runanim", "Play animation by ID"},
-    {"saveinstance", "Save game"},
-    {"savetools", "Save tools"},
-    {"scripthub", "Script hub"},
-    {"scriptviewer", "View scripts"},
-    {"seat", "Find and sit on seat"},
-    {"seizure", "Seizure"},
-    {"sensitivity", "Change sensitivity"},
-    {"serverdate", "Server date"},
-    {"serverhop", "Server hop"},
-    {"serverlist", "Server list"},
-    {"servertime", "Server time"},
-    {"settings", "Open settings"},
-    {"shaders", "Shader presets"},
-    {"showcom", "Center of mass"},
-    {"showguis", "Show all GUIs"},
-    {"showwaypoints", "Show waypoints"},
-    {"somersault", "Front flip"},
-    {"speedometer", "Speedometer"},
-    {"spin", "Spin character"},
-    {"split", "Destroy waist joint"},
-    {"stats", "Dev stats"},
-    {"stopanimations", "Stop animations"},
-    {"strengthen", "Dense character"},
-    {"swim", "Swim in air"},
-    {"syncanim", "Mirror animations"},
-    {"team", "Change team"},
-    {"teleportgui", "Universe viewer"},
-    {"teleporttoplace", "TP by PlaceId"},
-    {"tfly", "Tween fly"},
-    {"thirdp", "Third person"},
-    {"time", "Set time"},
-    {"timestamp", "Unix timestamp"},
-    {"timestop", "Freeze all players"},
-    {"toolinvisible", "Invisible with tools"},
-    {"tools", "Copy RS/Lighting tools"},
-    {"topbar", "Show NA topbar"},
-    {"torandom", "TP to random player"},
-    {"tospawn", "TP to spawn"},
-    {"touchfling", "Walkfling on touch"},
-    {"tpdown", "TP down"},
-    {"tptool", "Click TP tool"},
-    {"tpua", "Bring unanchored parts"},
-    {"tpup", "TP up"},
-    {"tpwalk", "Undetectable walkspeed"},
-    {"trackstaff", "Track staff members"},
-    {"triggerbot", "Auto click on players"},
-    {"trip", "Trip"},
-    {"trussjump", "Boost off trusses"},
-    {"turtlespy", "Turtle Spy"},
-    {"tweento", "Tween teleport"},
-    {"unadmin", "Remove admin"},
-    {"unannoy", "Stop annoying"},
-    {"unantibang", "Disable antibang"},
-    {"unantifling", "Restore collision"},
-    {"unantikick", "Disable anti-kick"},
-    {"unantinil", "Allow char nil"},
-    {"unantitouch", "Enable touch parts"},
-    {"unantivoid2", "Revert FallenPartsDestroyHeight"},
-    {"unass", "Remove ass"},
-    {"unbang", "Unbang"},
-    {"unblock", "Unblock player"},
-    {"unbubblechat", "Disable bubble chat"},
-    {"uncharacter", "Restore character"},
-    {"unclimb", "Disable climb"},
-    {"undance", "Stop dance"},
-    {"unesp", "Disable ESP"},
-    {"unequiptools", "Unequip tools"},
-    {"unfly", "Disable flight"},
-    {"unfollow", "Stop following"},
-    {"unfriend", "Unfriend player"},
-    {"unglue", "Stop glue loop"},
-    {"ungodmode", "Disable god"},
-    {"unhide", "Show hidden player"},
-    {"uninfjump", "Disable inf jump"},
-    {"unlisten", "Stop listening"},
-    {"unload", "Unload NA"},
-    {"unlookat", "Stop staring"},
-    {"unloop", "Stop all loops"},
-    {"unmute", "Unmute"},
-    {"unorbit", "Stop orbit"},
-    {"unspin", "Stop spin"},
-    {"unswim", "Stop swimming"},
-    {"untfly", "Disable tween fly"},
-    {"untimestop", "Unfreeze players"},
-    {"unwatch", "Stop spectating"},
-    {"upsidedown", "Flip character upside down"},
-    {"uptime", "Show uptime"},
-    {"url", "Run script by URL"},
-    {"userid", "Change UserId"},
-    {"username", "Change username"},
-    {"volume", "Change volume"},
-    {"walkfling", "Walkfling"},
-    {"wallhop", "Wallhop helper"},
-    {"walltp", "Wall teleport"},
-    {"wallwalk", "Walk on walls"},
-    {"watch", "Spectate player"},
-    {"waveat", "Wave to player"},
-    {"waypoints", "Waypoints menu"},
-    {"weak", "Make character weak"},
-    {"worldmodelfp", "First person world model"},
-    {"xray", "X-ray vision"},
-    -- Missing commands from 977 list
-    {"addallplugins", "Move all .na to Nameless-Admin/Plugins and all .iy to Nameless-Admin/PluginsIY, then load them"},
-    {"addautoexec", "Add a command to autoexecute"},
-    {"addbutton", "Add a mobile button"},
-    {"addplugin", "Move one .na to Plugins or one .iy to PluginsIY, then load it"},
-    {"animationassetdata", "Set Show Active Animation Asset"},
-    {"animcopycore", "Copy core animations from target"},
-    {"animdata", "Shows you information about your current animations"},
-    {"animresetcore", "Reset core animations to saved"},
-    {"animspoofer", "Loads up an animation spoofer,spoofs animations that use rbxassetid"},
-    {"antistaff", "Automatically leave or advanced-serverhop when staff is detected"},
-    {"antivelocityinstances", "Continuously destroys force, torque, position, orientation, and velocity mover instances inside your character"},
-    {"ass", "Ass"},
-    {"autofireclickfind", "Automatically fires ClickDetectors matching [target] using substring matching every <interval> seconds"},
-    {"autofireproxifind", "Automatically fires ProximityPrompts matching [target] using substring matching every <interval> seconds"},
-    {"autofireremotefind", "Automatically fires remotes matching [target] using substring matching every <interval> seconds"},
-    {"autoflashbackalt", "Auto-teleports you to the 0 HP flashback point on respawn"},
-    {"autoreport", "Automatically reports players to get them banned"},
-    {"autotouchfind", "Automatically fires TouchInterests on parts matching [target] using substring matching every <interval> seconds"},
-    {"autouwuify", "Stylizes chat input before sending"},
-    {"awakeparts", "Set Awake Parts Highlighted"},
-    {"binders", "Open the event binder menu"},
-    {"boobs", "Boobs"},
-    {"bringmodelfind", "Brings all models whose name contains the given text to your character"},
-    {"bringpartfind", "Brings all parts containing name to your character"},
-    {"cancelteleportloop", "Repeatedly cancels in-progress teleport"},
-    {"carpet", "Be someone's carpet"},
-    {"cartornado", "Tornados a car just sit in the car"},
-    {"cframefly", "Enable CFrame-based flight with respawn-safe cleanup"},
-    {"chamsteam", "Chams players in a specific team; no args = current team/allies"},
-    {"chardeleteclass", "Removes any part with a certain classname from your character"},
-    {"chardeletefind", "Removes parts in your character with names containing text"},
-    {"clearautoexec", "Clear all AutoExec commands"},
-    {"clearavatarpreview", "Removes the client-only avatar preview rig"},
-    {"clearremovespecifictool", "Stops all specific tool removal loops"},
-    {"clickvoidnpc", "Click to void NPCs"},
-    {"closespeedometer", "Closes the speedometer"},
-    {"cobaltspy", "cobaltspy (cobalt,cspy)"},
-    {"collisioncosts", "Set Collision Costs Shown"},
-    {"collisionesp", "collisionesp"},
-    {"commandkeybinds", "Open the command keybinds window"},
-    {"commandloop", "Run a command on loop"},
-    {"commands", "Open the command list"},
-    {"contactpoints", "Set Contact Points Shown"},
-    {"controllock", "Set Shiftlock keys to Control for this session"},
-    {"copytptogame", "Copies a script for teleporting to the game you are currently in"},
-    {"copytptoserver", "Copies a script for teleporting to your current game server"},
-    {"copytween", "Copies a TweenService script that moves you to your coordinates"},
-    {"cursorreset", "Forces Roblox's default visible and unlocked cursor"},
-    {"cursorrestore", "Stops cursor enforcement and restores the saved game cursor state"},
-    {"cursorvisible", "Forces the mouse cursor to remain visible without changing its lock mode"},
-    {"decompositiongeometry", "Set Decomposition Geometry"},
-    {"deletelighting", "Removes all descendants (objects) within Lighting."},
-    {"deleteselectedtool", "Deletes currently equipped tools"},
-    {"deletevelocity", "removes any velocity/force instanceson your character"},
-    {"desync", "Toggle NextGenReplicator desync / sync (run again to disable)"},
-    {"devproducts", "Lists Developer Products"},
-    {"disablealignmentkeys", "Disable alignment keys"},
-    {"disablehumanoidstate", "Opens a picker to disable one humanoid state"},
-    {"disableproximitypromptservice", "disable proximity prompt buttons"},
-    {"drawconstraintsforce", "Set Draw Constraints Net Force"},
-    {"drawcontactsforce", "Set Draw Contacts Net Force"},
-    {"drawtotalforce", "Set Draw Total Net Force"},
-    {"eagerbulkexecution", "Set Eager Bulk Execution"},
-    {"echoping", "Emit a strong manual echolocation ping"},
-    {"enablehumanoidstate", "Restores one humanoid state or all disabled states"},
-    {"enableproximityprompts", "Enable ProximityPrompts (all or matching)"},
-    {"enableproximitypromptservice", "enable proximity prompt buttons"},
-    {"espall", "ESP all players and clear team filtering"},
-    {"espallies", "ESP players on your current team"},
-    {"espenemies", "ESP players outside your team; no-team games fall back to all others"},
-    {"esplocator", ""},
-    {"espteam", "ESP players in a specific team; no args = current team/allies"},
-    {"eventinfo", "Shows an experience event with copy/details/RSVP options"},
-    {"experienceevents", "Shows upcoming experience events with copy/details/RSVP options"},
-    {"exportmergebymaterial", "Set Export Merge By Material"},
-    {"fatesadmin", "Executes fates admin"},
-    {"fireclickdetectorsfind", "Fires ClickDetectors substring-matching [target] in Workspace"},
-    {"fireproximitypromptsfind", "Fires ProximityPrompts substring-matching [target] in Workspace"},
-    {"fireremote", "Fire one remote by selection, name, or full path"},
-    {"fireremotes", "Fires every remote with arguments"},
-    {"firetouchinterests", "Fires every TouchInterest in Workspace"},
-    {"firetouchinterestsfind", "Fires TouchInterests substring-matching [target] in Workspace"},
-    {"fixcam", "Fix your camera"},
-    {"flashbackalt", "Teleports you to the 0 HP flashback point"},
-    {"flingnpcs", "Flings NPCs"},
-    {"fluidforcedrawscale", "fluidforcedrawscale <number> - Set Fluid Force Draw Scale"},
-    {"forceinstancenames", "Set Force Instance Names"},
-    {"forcesmoothingsteps", "forcesmoothingsteps <0-100> - Set Force Smoothing Steps"},
-    {"freecamgotopart", "Start or move freecam to an exact part name"},
-    {"freezeunanchored", "Freezes unanchored non-character parts"},
-    {"gamescripts", "Show scripts listed for the current game"},
-    {"gamma", "gamma vision (real)"},
-    {"gcsearch", "Searches getgc tables, function metadata, constants, and upvalues for text"},
-    {"getidfromusername", "Copy a user's UserId by Username"},
-    {"getuserfromid", "Copy a user's Username by ID"},
-    {"glueback", "Loop teleport behind a player"},
-    {"gotobreak", "Stop the active goto sequence and clear duplicate selections."},
-    {"gotofoldernext", "Teleport sequentially through folder contents with optional prefix."},
-    {"gotomodelfind", "Teleports to each model containing name once"},
-    {"gotomodelnext", "Teleport sequentially to models with optional prefix and duplicate handling."},
-    {"gotonpcs", "Teleports to each NPC"},
-    {"gotopartclass", "Teleports to each part of class once"},
-    {"gotopartfind", "Teleports to each part containing name once"},
-    {"gotopartnext", "Teleport sequentially to parts with optional prefix and duplicate handling."},
-    {"harked", "Executes Comet which is like harked"},
-    {"height", "Changes your hipheight"},
-    {"hidecurrentguis", "Hides only currently visible GUIs"},
-    {"hideicon", "Hides the NA icon"},
-    {"hidepathwaypoint", "Hide waypoint path route nodes and stop waypoint pathfinding"},
-    {"hidetargetgui", "Hides a specific GUI by name"},
-    {"hidewaypoints", "Hide saved waypoint ESP markers"},
-    {"homebrew", "Executes homebrew admin"},
-    {"hug", "huggies time (click on a target to hug)"},
-    {"ibtools", "Load the iBuild Tools helper tool"},
-    {"ifundone", "Runs a command only if that exact command has not been done this session"},
-    {"imagescanner", "Gives an UI that grabs all images on the game"},
-    {"improvetextures", "Switches Textures"},
-    {"inspectoutfit", "Open a user's saved outfits and inspect a selected outfit"},
-    {"interpolationthrottle", "Set Interpolation Throttle Shown"},
-    {"invisbind", "set a custom keybind for the 'Invisible' command"},
-    {"invisfling", "Enables invisible fling (the invis part is patched, try using the god command before using this)"},
-    {"invisibleparts", "Shows invisible parts"},
-    {"invitefriends", "Opens Roblox's client invite prompt, optionally targeting a user"},
-    {"jerkuser", "Lay under them and vibe"},
-    {"joinbreakdown", "Set Print Join Size Breakdown"},
-    {"jointcoords", "Set Joint Coordinates Shown"},
-    {"jumpboost", "Adds extra jump velocity without changing JumpPower"},
-    {"killnpcs", "Kills NPCs"},
-    {"landscaperotationscreen", "Changes ScreenOrientation to Landscape Sensor"},
-    {"localdate", "Shows your current date"},
-    {"localtime", "Shows your current time"},
-    {"lockmouse2", "Locks your mouse in the center"},
-    {"logphysics", "Enable Physics Error Logging"},
-    {"loopantitouch", "Enables AntiTouch live tracking without opening the method popup"},
-    {"loopbypassspeed", "Loop WalkSpeed (bypass variant)"},
-    {"loopcbring", "Continuously brings the player on your client"},
-    {"loopenableproximityprompts", "Continuously enable ProximityPrompts (all or matching)"},
-    {"loopequiptool", "Keeps a specific tool equipped until disabled"},
-    {"loopgamma", "loop gamma vision (mega real)"},
-    {"loopmaxslopeangle", "Loop MaxSlopeAngle"},
-    {"loopmaxzoom", "Loop your maximum camera distance and restore it when changed"},
-    {"loopminzoom", "Loop your minimum camera distance and restore it when changed"},
-    {"loopmute", "Loop mutes the player's boombox"},
-    {"loopnpcfollow", "Makes NPCS follow you in a loop"},
-    {"looppath", "Continuously path to a saved waypoint after death or respawn"},
-    {"looppathteleportdelay", "Set loop path teleport delay between route nodes"},
-    {"looppathtweenspeed", "Set loop path tween speed in studs per second"},
-    {"loopteleportpath", "Loop path to a waypoint by teleporting between route nodes"},
-    {"looptweenpath", "Loop path to a waypoint using tween movement"},
-    {"loopwalkpath", "Loop path to a waypoint using walking movement"},
-    {"loopwaveat", "Wave to a player in a loop"},
-    {"massfollowedinto", "Shows everyone in the server that followed someone into the game"},
-    {"mechanismsshown", "Set Mechanisms Shown"},
-    {"meshcachesize", "meshcachesize <number> - Set Mesh Cache Size"},
-    {"mimic", "Clone target movement with optional delay"},
-    {"mimicchat", "Mimics the chat of a player"},
-    {"moduleeditor", "loads the module editor UI"},
-    {"mstop", "Stop mimic and restore defaults"},
-    {"multitool", "Allows stacking equipped tools from your inventory"},
-    {"networkpause", "Re-enable Roblox network pause overlay"},
-    {"noblackholefollow", "Stops blackhole follow and clears constraints"},
-    {"nocollisionesp", "nocollisionesp"},
-    {"nocooldown", "Override game-script cooldown timing with the chosen number of seconds; defaults to 0 when omitted"},
-    {"nohats", "Drop all of your hats"},
-    {"nonetworkpause", "Disable Roblox network pause overlay"},
-    {"noproximitypromptlimits", "Sets all proximity prompts MaxActivationDistance to math.huge"},
-    {"oldconsole", "opens old version of the developer console"},
-    {"oldserverhop", "serverhop to one of the oldest active servers"},
-    {"oldversionhop", "serverhop to the oldest currently active place version"},
-    {"oofspam", "Spams oof"},
-    {"ownerid", "masks you as the game owner's ID and Username"},
-    {"partsizefind", "Grow every part or model whose name contains <term> to the cube size you choose."},
-    {"pathfindwaypoint", "Pathfind to a saved waypoint and show the route nodes"},
-    {"penis", "penis"},
-    {"pespfind", "pespfind {partname}"},
-    {"physallowsleep", "Set Physics Allow Sleep"},
-    {"physanchors", "Set Physics Anchors Shown"},
-    {"physassemblies", "Set Physics Assemblies Shown"},
-    {"physbodytypes", "Set Physics Body Types Shown"},
-    {"physowners", "Set Physics Owners Shown"},
-    {"physregions", "Set Physics Regions Shown"},
-    {"phystree", "Set Physics Tree Shown"},
-    {"pingserverhop", "serverhop to the best estimated-latency server"},
-    {"pipe", "Gives a smoking pipe (client R6)"},
-    {"portraitrotationscreen", "Changes ScreenOrientation to Portrait"},
-    {"preftransparency", "Preferred UI transparency"},
-    {"preventtools", "Prevents any item from being equipped"},
-    {"propertychanged", "Runs a command when an instance property changes"},
-    {"propertyesp", "ESP instances with a matching readable property value"},
-    {"proximityesp", "proximityesp"},
-    {"proximitypromptgoto", "Teleports to the nearest ProximityPrompt part, optionally matching its name/object/action/parent/model"},
-    {"punch", "punch tool that flings"},
-    {"raknetdesync", "Enables RakNet desync using raknet.desync(true)"},
-    {"randomizejoinorder", "Set Randomize Join Instance Order"},
-    {"rc7", "RC7 Internal UI"},
-    {"receiveage", "Set Receive Age Shown"},
-    {"regionhop", "serverhop to a public server in a requested RoValra region"},
-    {"reloadassets", "Set RenderSettings.ReloadAssets"},
-    {"reloadplugin", "Reload plugin files (reloads all if no name provided)"},
-    {"removealias", "Select and remove a saved alias"},
-    {"removeallplugins", "Move all plugins from Nameless-Admin/Plugins and Nameless-Admin/PluginsIY back to workspace"},
-    {"removeautoexec", "Remove a command from autoexecute"},
-    {"removebutton", "Remove a user button"},
-    {"removeplugin", "Move a plugin file from Nameless-Admin/Plugins or Nameless-Admin/PluginsIY back to workspace"},
-    {"removespecifictool", "Automatically removes a specific tool from backpack/character"},
-    {"removewaypoint", "Remove a saved waypoint"},
-    {"renderautofrm", "renderautofrm <number> - Set Auto FRM Level"},
-    {"renderboundingboxes", "Set Render Bounding Boxes"},
-    {"rendercsgtriangles", "Set Render CSG Triangles Debug"},
-    {"renderfrm", "Set Frame Rate Manager"},
-    {"renderstreamedregions", "Set Render Streamed Regions"},
-    {"replicationlag", "Set IncomingReplicationLag"},
-    {"reserveserver", "Teleports to a reserved server or creates one if code is missing"},
-    {"resetanims", "Restores your previous animations"},
-    {"resetlock", "Resets your Shiftlock keybinds to default (LeftShift)"},
-    {"reverb", "Manage sound reverb settings"},
-    {"rewindspeed", "Set rewind frames skipped per heartbeat"},
-    {"rewindtime", "Set how many seconds rewind stores"},
-    {"rolewatch", "Notify if someone from a watched group joins with a specific role"},
-    {"rolewatchleave", "Toggle leaving the server if the watched role joins"},
-    {"rolewatchstop", "Disable Rolewatch monitoring"},
-    {"rsvpevent", "Opens Roblox's RSVP prompt for an experience event"},
-    {"saveprefix", "Saves the prefix to a file and applies it"},
-    {"screenorientation", "Manage ScreenOrientation"},
-    {"scriptload", "Run a saved script from the NA executor saved scripts folder"},
-    {"scriptlogger", "Load SecureScripts Logger before running a suspicious script"},
-    {"sensorrotationscreen", "Changes ScreenOrientation to Sensor"},
-    {"serverremotespy", "Gives an UI that logs all the remotes being called from the server (thanks SolSpy lol)"},
-    {"setfflag", "Set a fast flag (use 'save' to store it)"},
-    {"setkiller", "Sets killer animation set"},
-    {"setmass", "Sets your character mass as close as Roblox allows"},
-    {"setpsycho", "Sets psycho animation set"},
-    {"setsimradius", "Set sim radius using available methods. Usage: setsimradius <radius>"},
-    {"settweenspeed", "Set how long tween teleport commands take"},
-    {"setwaypoint", "Store your current position, or create/update with custom coordinates"},
-    {"setwaypointpos", "Create or edit a waypoint using custom coordinates"},
-    {"shapeesp", "ESP Part instances with the selected Shape"},
-    {"showicon", "Shows the NA icon"},
-    {"showpathwaypoint", "Show PathfindingService route nodes to a saved waypoint"},
-    {"showtargetgui", "Shows only a specific GUI by name"},
-    {"sitesp", "sitesp"},
-    {"sitnpcs", "Makes NPCS sit"},
-    {"sleepon", "Enable AllowSleep"},
-    {"smallserverhop", "serverhop to a small server in the best-latency region"},
-    {"soundwarnings", "Set Report Sound Warnings"},
-    {"spoofclientid", "Spoofs GetClientId() to the value you provide"},
-    {"spook", "Teleports next to a player for a few seconds"},
-    {"starenear", "Stare at the closest player"},
-    {"stealaudio", "Save all sounds a player is playing to a file -Cyrus"},
-    {"stoploop", "Stop a running loop"},
-    {"stopmimicchat", "Stops mimicking a player"},
-    {"stoptrackstaff", "Stop tracking staff members"},
-    {"streamquota", "Set Print Stream Instance Quota"},
-    {"suck", "suck it"},
-    {"suslay", "Lay down in a suspicious way"},
-    {"swordfighter", "Activates a sword fighting bot that engages in automated PvP combat"},
-    {"synapsedex", "Loads SynapseX's dex explorer"},
-    {"syncstop", "Stop live sync and restore defaults"},
-    {"tailsway", "Load the TailSway physics/wagging script"},
-    {"tas", "Launch TAS Recorder Redux; optionally auto-load and play a saved run"},
-    {"thawunanchored", "Thaws parts frozen by freezeunanchored"},
-    {"throttle", "Set PhysicsEnvironmentalThrottle (1 = default, 2 = disabled)"},
-    {"throttleadjusttime", "throttleadjusttime <seconds> - Set Throttle Adjust Time"},
-    {"thru", "Move forward by distance"},
-    {"toolview", "3D tool viewer above a player's head"},
-    {"toolview2", "Live-updating tool viewer"},
-    {"torquedrawscale", "torquedrawscale <number> - Set Torque Draw Scale"},
-    {"touchesp", "touchesp"},
-    {"touchinterestgoto", "Teleports to the nearest TouchInterest part, optionally matching its name/parent/part/model"},
-    {"tpjump", ""},
-    {"tweengotocampos", "Another version of goto camera position but bypassing more anti-cheats"},
-    {"tweengotopart", "Tween to each matching part by name once"},
-    {"tweengotopartfind", "Tweens to each part containing name once"},
-    {"unactnpc", "Stop acting like an NPC"},
-    {"unairmomentum", "Stops the custom air momentum command"},
-    {"unairwalk", "Stops the airwalk command"},
-    {"unalignedparts", "Set Unaligned Parts Shown"},
-    {"unanchored", "unanchored"},
-    {"unanimationassetdata", "Disable Show Active Animation Asset"},
-    {"unanimationspeed", "Stops the animation speed adjustment loop"},
-    {"unanimdata", ""},
-    {"unantianchor", "Allow your parts to be anchored"},
-    {"unantibreakjoints", "Disables AntiBreakJoints"},
-    {"unanticframeteleport", "Disables Anti CFrame Teleport"},
-    {"unantierror", "Disables Anti Error"},
-    {"unantiflingparts", "Restores collision for unanchored parts changed by antiflingparts"},
-    {"unantisit", "Allows the player to sit again"},
-    {"unantistaff", "Disable automatic staff avoidance"},
-    {"unantiteleport", "Disables Anti-Teleport protection"},
-    {"unantitrip", "tripping allowed now"},
-    {"unantivelocity", "Disables the antivelocity limiter"},
-    {"unantivelocityinstances", "Stops removing force and velocity mover instances from your character"},
-    {"unaura", "Stops aura loop and removes visualizer"},
-    {"unautodelete", "Disables autodelete"},
-    {"unautodeleteclass", "Disables autodeleteclass"},
-    {"unautodeletefind", "Stops autodeletefind"},
-    {"unautofireclick", "Stops all AutoFireClick loops"},
-    {"unautofireclickfind", "Stops substring-matching AutoFireClick loops"},
-    {"unautofireproxi", "Stops all AutoFireProxi loops"},
-    {"unautofireproxifind", "Stops substring-matching AutoFireProxi loops"},
-    {"unautofireremote", "Stops all AutoFireRemote loops"},
-    {"unautofireremotefind", "Stops substring-matching AutoFireRemote loops"},
-    {"unautoflashback", "Disables auto deathpos"},
-    {"unautoflashbackalt", "Disables auto flashback alt"},
-    {"unautofollow", "Stop automatically following nearby players"},
-    {"unautopatchtool", "Restores values changed by Auto Patch Tool and disables its guards"},
-    {"unautorejoin", "Disables auto rejoin command"},
-    {"unautorespawn", "Stops AutoRespawn"},
-    {"unautotouch", "Stops all AutoTouch loops"},
-    {"unautotouchfind", "Stops substring-matching AutoTouch loops"},
-    {"unautouwuify", "Stops chat input styling"},
-    {"unawakeparts", "Disable Awake Parts Highlighted"},
-    {"unblockremote", "Unblock a remote by name, or pick from blocked list"},
-    {"unbodytransparency", "Stops transparency loop"},
-    {"unboobs", "Boobs"},
-    {"uncameranoclip", "Restores normal camera"},
-    {"uncancelteleportloop", "Disable cancelteleport loop"},
-    {"uncarpet", "Undoes carpet"},
-    {"uncframefly", "Disable CFrame-based flight"},
-    {"unchardebug", "disable character debug"},
-    {"unclickesp", "unclickesp"},
-    {"unclickfling", "disables clickfling"},
-    {"unclickkillnpc", "Disable clickkillnpc"},
-    {"unclicknpcjp", "Disable clicknpcjp"},
-    {"unclicknpcws", "Disable clicknpcws"},
-    {"unclickscare", "Disables clickscare"},
-    {"unclicktouch", "Disable clicktouch"},
-    {"unclicktptool", "Remove teleport buttons or tools"},
-    {"unclickvoidnpc", "Disable click-void"},
-    {"uncollisioncosts", "Disable Collision Costs Shown"},
-    {"uncollisionesp", "uncollisionesp"},
-    {"uncontactpoints", "Disable Contact Points Shown"},
-    {"uncontrollock", "Restore Shiftlock keys to default (Shift)"},
-    {"unctest", "Test how many functions your executor supports"},
-    {"undecompositiongeometry", "Disable Decomposition Geometry"},
-    {"undesync", "Disable offset desync"},
-    {"undisableanimations", "Unfreezes your animations"},
-    {"undotextures", "Switches Textures"},
-    {"undrawconstraintsforce", "Disable Draw Constraints Net Force"},
-    {"undrawcontactsforce", "Disable Draw Contacts Net Force"},
-    {"undrawtotalforce", "Disable Draw Total Net Force"},
-    {"uneagerbulkexecution", "Disable Eager Bulk Execution"},
-    {"unecholocation", "Disable echolocation and restore Lighting"},
-    {"unedgejump", "Disables edgejump"},
-    {"unesplocator", ""},
-    {"unexportmergebymaterial", "Disable Export Merge By Material"},
-    {"unfakelag", "stops the fake lag command"},
-    {"unfastprompts", "Restores tracked proximity prompt HoldDuration values"},
-    {"unflyfling", "stops fly and fling"},
-    {"unflyjump", "Disables flyjump"},
-    {"unfolderesp", "Disables folder ESP for a folder or all"},
-    {"unforcecam", "Stop forcing camera type"},
-    {"unforceinstancenames", "Disable Force Instance Names"},
-    {"unforcereverb", "Stop forcing ambient reverb"},
-    {"unfreecam", "Disable free camera"},
-    {"unglueback", "Stops teleporting you to a player"},
-    {"unguidelete", "Disables GUI delete"},
-    {"unhamster", "Disable hamster ball"},
-    {"unheadbang", "Stops headbang"},
-    {"unheadsit", "Stop the headsit command."},
-    {"unheadstand", "Stop the headstand command."},
-    {"unhidecurrentguis", "Restores GUIs hidden by hidecurrentguis"},
-    {"unhideguis", "Restores GUIs hidden by hideguis"},
-    {"unhidetargetgui", "Restores GUIs hidden by hidetargetgui"},
-    {"unhitbox", ""},
-    {"unhitboxes", "removes the hitboxes outline"},
-    {"unhoverinventory", "Disables hoverinventory"},
-    {"unhovername", "Disables hovername"},
-    {"unhug", "no huggies :("},
-    {"unibtools", "Remove the iBuild Tools helper tool"},
-    {"uninstantproximityprompts", "Restores tracked proximity prompt HoldDuration values"},
-    {"uninterpolationthrottle", "Disable Interpolation Throttle Shown"},
-    {"uninversebang", "no more fun"},
-    {"uninvisibleparts", "Makes parts affected by invisparts return to normal"},
-    {"unitemesp", "Disable dropped item ESP"},
-    {"unjerkuser", "Stop the jerk user action"},
-    {"unjoinbreakdown", "Disable Print Join Size Breakdown"},
-    {"unjointcoords", "Disable Joint Coordinates Shown"},
-    {"unjumpboost", "Disables extra jump boost"},
-    {"unlight", "Removes dynamic light from your player"},
-    {"unloadbackpack", "unloads the custom backpack gui"},
-    {"unlocate", "unlocate <username1> <username2>"},
-    {"unlockiconposition", "Unlocks the NA icon's position (can be dragged again)"},
-    {"unlockmouse", "Unlocks your mouse (fr this time)"},
-    {"unlockmouse2", "Unlocks your mouse"},
-    {"unloopbrightness", "Stop locking brightness"},
-    {"unloopbringnpcs", "Stops NPC bring loop"},
-    {"unloopbypassspeed", "Disable loop WalkSpeed (bypass variant)"},
-    {"unloopcbring", "Disable looped client bring"},
-    {"unloopdroptools", "Stops loop dropping tools"},
-    {"unloopenableproximityprompts", "Stop enabling loop"},
-    {"unloopequiptool", "Stops the loop equip behaviour"},
-    {"unloopfov", "Stops FOV loop"},
-    {"unloopfullbright", "No more sunshine"},
-    {"unloopgamma", "stop gamma vision (real)"},
-    {"unloopgrabtools", "Stops the loop grab command"},
-    {"unloopmaxslopeangle", "Disable loop MaxSlopeAngle"},
-    {"unloopmaxzoom", "Stop looping your maximum camera distance"},
-    {"unloopminzoom", "Stop looping your minimum camera distance"},
-    {"unloopmute", "Unloop mutes the player's boombox"},
-    {"unloopnoeffect", "Restores Lighting and CurrentCamera effects"},
-    {"unloopnofog", "No more sight."},
-    {"unloopnpcfollow", "Makes NPCS not follow you in a loop"},
-    {"unloopoof", "Stops the oof chaos"},
-    {"unlooppath", "Stop persistent waypoint pathfinding"},
-    {"unloopspook", "Stops the loopspook command"},
-    {"unloopwaveat", "Stops the loopwaveat command"},
-    {"unmaterial", "Restores character materials changed by material"},
-    {"unmechanismsshown", "Disable Mechanisms Shown"},
-    {"unmodelesp", "Disables model ESP for a model or all"},
-    {"unmultitool", "Disables multitool mode"},
-    {"unname", "Resets the admin UI placeholder name to default"},
-    {"unnightmare", "Disable nightmare mode"},
-    {"unnilchar", "Restores your nil-parented character"},
-    {"unnocollisionesp", "unnocollisionesp"},
-    {"unnocooldown", "Disable the game-script cooldown timing override"},
-    {"unnofall", "Disables nofall"},
-    {"unnotween", "Stops overriding game-created tween durations"},
-    {"unnpcaura", "Stops NPC aura loop and removes visualizer"},
-    {"unnpcesp", "stop locating npcs"},
-    {"unoffset", "Disables offset customization and restores your character"},
-    {"unoldroblox", "Restore skybox and studs"},
-    {"unpartsize", "Undo partsizeâ€”return those parts back to their original size and collision."},
-    {"unpartsizefind", "Undo partsizefindâ€”return those resized parts back to their original size and collision."},
-    {"unpenis", "penis"},
-    {"unpermtrip", "Disable permanent trip"},
-    {"unpesp", "Remove exact-name part ESP by name or All"},
-    {"unpespfind", "Remove partial-name part ESP by name or All"},
-    {"unphysallowsleep", "Disable Physics Allow Sleep"},
-    {"unphysanchors", "Disable Physics Anchors Shown"},
-    {"unphysassemblies", "Disable Physics Assemblies Shown"},
-    {"unphysbodytypes", "Disable Physics Body Types Shown"},
-    {"unphysowners", "Disable Physics Owners Shown"},
-    {"unphysregions", "Disable Physics Regions Shown"},
-    {"unphystree", "Disable Physics Tree Shown"},
-    {"unpredict", "Remove prediction orb"},
-    {"unpreventtools", "Self-explanatory"},
-    {"unpropertychanged", "Stops propertychanged listeners"},
-    {"unpropertyesp", "Disable property ESP entries"},
-    {"unproximityesp", "unproximityesp"},
-    {"unraknetdesync", "Disables RakNet desync using raknet.desync(false)"},
-    {"unrandomizejoinorder", "Disable Randomize Join Instance Order"},
-    {"unreceiveage", "Disable Receive Age Shown"},
-    {"unremoveads", "Stop removing billboard advertisements"},
-    {"unremovespecifictool", "Stops removing a specific tool"},
-    {"unrenderboundingboxes", "Disable Render Bounding Boxes"},
-    {"unrendercsgtriangles", "Disable Render CSG Triangles Debug"},
-    {"unrenderfrm", "Disable Frame Rate Manager"},
-    {"unrenderstreamedregions", "Disable Render Streamed Regions"},
-    {"unrewind", "Disable rewind and clear its saved frames"},
-    {"unseizure", "Stops you from having a seizure not in real life noob"},
-    {"unshaders", "Disable the shader preset and restore Lighting"},
-    {"unshapeesp", "Disable Shape ESP entries"},
-    {"unshowguis", "Restores UI states set by showguis"},
-    {"unshowtargetgui", "Restores GUI states changed by showtargetgui"},
-    {"unsitesp", "unsitesp"},
-    {"unsitnpcs", "Makes NPCS unsit"},
-    {"unsleepon", "Disable AllowSleep"},
-    {"unsomersault", "Disable somersault button and keybind"},
-    {"unsoundwarnings", "Disable Report Sound Warnings"},
-    {"unspam", "Stop all attempts to lag/spam"},
-    {"unspoofclientid", "Restores normal GetClientId() behavior"},
-    {"unstarenear", "Stop staring at closest player"},
-    {"unstreamquota", "Disable Print Stream Instance Quota"},
-    {"unsuck", "no more fun"},
-    {"unsuslay", "Stand up from the sussy lay"},
-    {"unsyncreset", "Stop sync and reset saved"},
-    {"untoolview", "Removes the tool viewer above a player's head"},
-    {"untopbar", "Hides the NA topbar"},
-    {"untouchesp", "untouchesp"},
-    {"untouchfling", "stop the touchfling command"},
-    {"untpjump", "Stops the tpjump command"},
-    {"untpwalk", "Stops the tpwalk command"},
-    {"untrussjump", "Disable trussjump"},
-    {"ununalignedparts", "Disable Unaligned Parts Shown"},
-    {"ununanchored", "ununanchored"},
-    {"unupsidedown", "Disables the upside down replication and restores your character"},
-    {"unuwuaffix", "Disables suffix styling"},
-    {"unuwustutter", "Disables stutter styling"},
-    {"unvehiclesitesp", "unvehiclesitesp"},
-    {"unvehiclespeed", "Stops the vehiclespeed command"},
-    {"unvfly", "disable vehicle fly"},
-    {"unvideocapture", "Disable Video Capture Enabled"},
-    {"unviewpart", "Resets the camera to the local humanoid"},
-    {"unwaitcap", "Disables the game-script wait/delay cap"},
-    {"unwalkfling", "stop the walkfling command"},
-    {"unwallhop", "disable wallhop helper"},
-    {"unwatch2", ""},
-    {"unweaken", "Sets your characters CustomPhysicalProperties to default"},
-    {"uporbit", "Orbit around a player on the Y axis"},
-    {"upvalueeditor", "loads the upvalue editor UI"},
-    {"userpreview", "show info about a user you name"},
-    {"usetools", "Equips all tools, uses them, and unequips them"},
-    {"uwuaffix", "Enables suffix styling"},
-    {"uwuify", "Stylizes and sends chat text"},
-    {"uwustutter", "Enables stutter styling"},
-    {"vcworld", "Toggle default spatial voice routing"},
-    {"vehicleclip", "Enables vehicle collision"},
-    {"vehiclenoclip", "Disables vehicle collision"},
-    {"vehicleseat", "Sits you in a vehicle seat, useful for trying to find cars in games"},
-    {"vehiclesitesp", "vehiclesitesp"},
-    {"vehiclespeed", "Change the vehicle speed"},
-    {"versionhop", "serverhop to a server running a specific active place version"},
-    {"vfly", "be able to fly vehicles"},
-    {"videocapture", "Set Video Capture Enabled"},
-    {"viewpart", "Focuses camera on a part, model, or folder"},
-    {"viewpartfind", "Focuses camera on a part, model, or folder with name containing the given text"},
-    {"voidnpcs", "Teleports NPC's to void"},
-    {"vulnerabilitytest", "Test if your executor is Vulnerable"},
-    {"waitcap", "Caps game-script wait/delay durations without shortening waits already below the cap"},
-    {"watch2", ""},
-    {"weaken", "Makes your character less dense"},
-}
-
-for _, cmdData in ipairs(remaining) do
-    local name = cmdData[1]
-    local desc = cmdData[2]
-    local existing = Cmds[name]
-    if not existing then
-        cmd.add({name}, {name, desc}, function()
-            DoNotif(name .. ": " .. desc)
-        end)
-    end
+cmd.add("antikick", "Bypass Kick on Most Games", function()
+	antiFlags.antikick = true
+	DoNotif("Anti-kick enabled")
+end)
+
+cmd.add("antiteleport", "Prevents TeleportService from moving you", function()
+	antiFlags.antiteleport = true
+	DoNotif("Anti-teleport enabled")
+end)
+
+cmd.add("antivoid", "Prevents you from falling into the void", function()
+	if loops.antivoid then return DoNotif("Already enabled") end
+	loops.antivoid = RunService.Heartbeat:Connect(function()
+		local hrp = getRoot()
+		if hrp and hrp.Position.Y < -50 then
+			hrp.Velocity = Vector3.new(0, 100, 0)
+			hrp.CFrame = CFrame.new(hrp.Position.X, 10, hrp.Position.Z)
+		end
+	end)
+	DoNotif("Anti-void enabled")
+end)
+
+cmd.add("antiafk", "Prevents you from being kicked for being AFK", function()
+	if loops.antiafk then return DoNotif("Already enabled") end
+	loops.antiafk = Spawn(function()
+		while true do
+			Wait(60)
+			pcall(function()
+				local vu = game:GetService("VirtualUser")
+				vu:Button2Down(Vector2.new(0, 0), Camera.CFrame)
+				vu:Button2Up(Vector2.new(0, 0), Camera.CFrame)
+			end)
+		end
+	end)
+	DoNotif("Anti-AFK enabled")
+end)
+
+cmd.add("antiknockback", "Disables knockback", function()
+	if loops.antiknockback then return DoNotif("Already enabled") end
+	loops.antiknockback = RunService.Heartbeat:Connect(function()
+		local hrp = getRoot()
+		if hrp then
+			hrp.Velocity = Vector3.new(hrp.Velocity.X, 0, hrp.Velocity.Z)
+		end
+	end)
+	DoNotif("Anti-knockback enabled")
+end)
+
+cmd.add("antitouch", "Disables touchable parts on character", function()
+	if loops.antitouch then return DoNotif("Already enabled") end
+	loops.antitouch = RunService.Heartbeat:Connect(function()
+		local char = getChar()
+		if char then
+			for _, v in pairs(char:GetDescendants()) do
+				if v:IsA("BasePart") then
+					v.CanTouch = false
+				end
+			end
+		end
+	end)
+	DoNotif("Anti-touch enabled")
+end)
+
+cmd.add("antifling", "Makes other players non-collidable with you", function()
+	if loops.antifling then return DoNotif("Already enabled") end
+	loops.antifling = RunService.Heartbeat:Connect(function()
+		local char = getChar()
+		if char then
+			for _, part in pairs(char:GetDescendants()) do
+				if part:IsA("BasePart") then
+					part.CanCollide = false
+				end
+			end
+		end
+	end)
+	DoNotif("Anti-fling enabled")
+end)
+
+cmd.add("unantifling", "Restores collision for other players", function()
+	if loops.antifling then
+		loops.antifling:Disconnect()
+		loops.antifling = nil
+	end
+	DoNotif("Anti-fling disabled")
+end)
+
+cmd.add("antivoid2", "Sets FallenPartsDestroyHeight to -inf", function()
+	Workspace.FallenPartsDestroyHeight = -math.huge
+	DoNotif("FallenPartsDestroyHeight set to -inf")
+end)
+
+cmd.add("unantivoid2", "Reverts FallenPartsDestroyHeight", function()
+	Workspace.FallenPartsDestroyHeight = -500
+	DoNotif("FallenPartsDestroyHeight reverted")
+end)
+
+cmd.add("freeze", "Freezes your character", function()
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	hrp.Anchored = true
+	DoNotif("Character frozen")
+end)
+
+cmd.add("unfreeze", "Unfreezes your character", function()
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	hrp.Anchored = false
+	DoNotif("Character unfrozen")
+end)
+
+cmd.add("fly", "Enable flight", function()
+	local hrp = getRoot()
+	local hum = getHum()
+	if not hrp or not hum then return DoNotif("No character") end
+	if loops.fly then
+		loops.fly:Disconnect()
+		loops.fly = nil
+		for _, v in pairs(hrp:GetChildren()) do
+			if v:IsA("BodyVelocity") or v:IsA("BodyGyro") then
+				v:Destroy()
+			end
+		end
+		hum.PlatformStand = false
+		DoNotif("Flight disabled")
+		return
+	end
+	local bv = InstanceNew("BodyVelocity", {
+		Parent = hrp,
+		MaxForce = Vector3.new(math.huge, math.huge, math.huge),
+		Velocity = Vector3.new(0, 0, 0),
+		P = 10000
+	})
+	local bg = InstanceNew("BodyGyro", {
+		Parent = hrp,
+		MaxTorque = Vector3.new(math.huge, math.huge, math.huge),
+		P = 10000,
+		D = 500
+	})
+	local flySpeed = 60
+	hum.PlatformStand = true
+	loops.fly = RunService.RenderStepped:Connect(function()
+		if not hrp or not hrp.Parent then
+			loops.fly:Disconnect()
+			loops.fly = nil
+			return
+		end
+		local camCF = Camera.CFrame
+		local dir = Vector3.new(0, 0, 0)
+		if UIS:IsKeyDown(Enum.KeyCode.W) then dir = dir + camCF.LookVector end
+		if UIS:IsKeyDown(Enum.KeyCode.S) then dir = dir - camCF.LookVector end
+		if UIS:IsKeyDown(Enum.KeyCode.A) then dir = dir - camCF.RightVector end
+		if UIS:IsKeyDown(Enum.KeyCode.D) then dir = dir + camCF.RightVector end
+		if UIS:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0, 1, 0) end
+		if UIS:IsKeyDown(Enum.KeyCode.RightShift) then dir = dir - Vector3.new(0, 1, 0) end
+		if dir.Magnitude > 0 then
+			bv.Velocity = dir.Unit * flySpeed
+		else
+			bv.Velocity = Vector3.new(0, 0, 0)
+		end
+		bg.CFrame = camCF
+	end)
+	DoNotif("Flight enabled (WASD+Space/RightShift)")
+end)
+
+cmd.add("unfly", "Disable flight", function()
+	local hrp = getRoot()
+	local hum = getHum()
+	if loops.fly then
+		loops.fly:Disconnect()
+		loops.fly = nil
+	end
+	if hrp then
+		for _, v in pairs(hrp:GetChildren()) do
+			if v:IsA("BodyVelocity") or v:IsA("BodyGyro") then
+				v:Destroy()
+			end
+		end
+	end
+	if hum then hum.PlatformStand = false end
+	DoNotif("Flight disabled")
+end)
+
+cmd.addArg("speed", "Sets your WalkSpeed [value]", function(val)
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	local n = tonumber(val)
+	if not n then return DoNotif("Invalid number") end
+	hum.WalkSpeed = n
+	DoNotif("WalkSpeed set to " .. n)
+end)
+
+cmd.addArg("jumppower", "Sets your JumpPower [value]", function(val)
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	local n = tonumber(val)
+	if not n then return DoNotif("Invalid number") end
+	hum.JumpPower = n
+	DoNotif("JumpPower set to " .. n)
+end)
+
+cmd.addArg("hipheight", "Changes your HipHeight [value]", function(val)
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	local n = tonumber(val)
+	if not n then return DoNotif("Invalid number") end
+	hum.HipHeight = n
+	DoNotif("HipHeight set to " .. n)
+end)
+
+cmd.addArg("gravity", "Sets game gravity [value]", function(val)
+	local n = tonumber(val)
+	if not n then return DoNotif("Invalid number") end
+	Workspace.Gravity = n
+	DoNotif("Gravity set to " .. n)
+end)
+
+cmd.add("noclip", "Disable your player collision", function()
+	if loops.noclip then return DoNotif("Already enabled") end
+	loops.noclip = RunService.Stepped:Connect(function()
+		local char = getChar()
+		if char then
+			for _, v in pairs(char:GetDescendants()) do
+				if v:IsA("BasePart") then
+					v.CanCollide = false
+				end
+			end
+		end
+	end)
+	DoNotif("Noclip enabled")
+end)
+
+cmd.add("clip", "Enable your player collision", function()
+	if loops.noclip then
+		loops.noclip:Disconnect()
+		loops.noclip = nil
+	end
+	DoNotif("Noclip disabled")
+end)
+
+cmd.add("infjump", "Enables infinite jumping", function()
+	if loops.infjump then
+		loops.infjump:Disconnect()
+		loops.infjump = nil
+		DoNotif("Infjump disabled")
+		return
+	end
+	loops.infjump = Plr.CharacterAdded:Connect(function(char)
+		Wait(0.5)
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end)
+	local hum = getHum()
+	if hum then
+		hum:ChangeState(Enum.HumanoidStateType.Jumping)
+	end
+	DoNotif("Infjump enabled")
+end)
+
+cmd.add("swim", "Swim in the air", function()
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	hum:ChangeState(Enum.HumanoidStateType.Swimming)
+	if loops.swim then return end
+	loops.swim = RunService.Heartbeat:Connect(function()
+		local h = getHum()
+		if h then h:ChangeState(Enum.HumanoidStateType.Swimming) end
+	end)
+	DoNotif("Swim enabled")
+end)
+
+cmd.add("unswim", "Stops the swim script", function()
+	if loops.swim then
+		loops.swim:Disconnect()
+		loops.swim = nil
+	end
+	local hum = getHum()
+	if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
+	DoNotif("Swim disabled")
+end)
+
+cmd.add("climb", "Allows you to climb while in air", function()
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	hum:ChangeState(Enum.HumanoidStateType.Climbing)
+	if loops.climb then return end
+	loops.climb = RunService.Heartbeat:Connect(function()
+		local h = getHum()
+		if h then h:ChangeState(Enum.HumanoidStateType.Climbing) end
+	end)
+	DoNotif("Climb enabled")
+end)
+
+cmd.add("unclimb", "Disables climb", function()
+	if loops.climb then
+		loops.climb:Disconnect()
+		loops.climb = nil
+	end
+	local hum = getHum()
+	if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
+	DoNotif("Climb disabled")
+end)
+
+cmd.add("spin", "Makes your character spin", function()
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	if loops.spin then return DoNotif("Already enabled") end
+	local av = InstanceNew("AngularVelocity", {
+		Parent = hrp,
+		MaxTorque = math.huge,
+		AngularVelocity = Vector3.new(0, 20, 0)
+	})
+	loops.spin = av
+	DoNotif("Spin enabled")
+end)
+
+cmd.add("unspin", "Makes your character unspin", function()
+	if loops.spin then
+		if loops.spin.Parent then loops.spin:Destroy() end
+		loops.spin = nil
+	end
+	DoNotif("Spin disabled")
+end)
+
+cmd.addArg("tpup", "Teleports you up [studs]", function(val)
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	local n = tonumber(val) or 10
+	hrp.CFrame = hrp.CFrame + Vector3.new(0, n, 0)
+	DoNotif("Teleported up " .. n .. " studs")
+end)
+
+cmd.addArg("tpdown", "Teleports you down [studs]", function(val)
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	local n = tonumber(val) or 10
+	hrp.CFrame = hrp.CFrame - Vector3.new(0, n, 0)
+	DoNotif("Teleported down " .. n .. " studs")
+end)
+
+cmd.add("tpworkspace", "Teleports you to workspace center", function()
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	hrp.CFrame = CFrame.new(0, 50, 0)
+	DoNotif("Teleported to workspace")
+end)
+
+cmd.add("breakvelocity", "Sets your characters velocity to zero", function()
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	hrp.Velocity = Vector3.new(0, 0, 0)
+	hrp.RotVelocity = Vector3.new(0, 0, 0)
+	DoNotif("Velocity broken")
+end)
+
+cmd.addArg("tp", "Teleport to player [name]", function(val)
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	local target = getPlr(val)
+	if not target then return DoNotif("Player not found") end
+	local char = target.Character
+	if not char then return DoNotif("Target has no character") end
+	local thrp = char:FindFirstChild("HumanoidRootPart")
+	if not thrp then return DoNotif("Target has no root") end
+	hrp.CFrame = thrp.CFrame
+	DoNotif("Teleported to " .. target.Name)
+end)
+
+cmd.addArg("goto", "Teleport to the given player [name]", function(val)
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	local target = getPlr(val)
+	if not target then return DoNotif("Player not found") end
+	local char = target.Character
+	if not char then return DoNotif("Target has no character") end
+	local thrp = char:FindFirstChild("HumanoidRootPart")
+	if not thrp then return DoNotif("Target has no root") end
+	hrp.CFrame = thrp.CFrame
+	DoNotif("Teleported to " .. target.Name)
+end)
+
+cmd.addArg("bring", "Teleport a player to you [name]", function(val)
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	local target = getPlr(val)
+	if not target then return DoNotif("Player not found") end
+	local char = target.Character
+	if not char then return DoNotif("Target has no character") end
+	local thrp = char:FindFirstChild("HumanoidRootPart")
+	if not thrp then return DoNotif("Target has no root") end
+	thrp.CFrame = hrp.CFrame
+	DoNotif("Brought " .. target.Name)
+end)
+
+cmd.addArg("cbring", "Brings the player once on your client [name]", function(val)
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	local target = getPlr(val)
+	if not target then return DoNotif("Player not found") end
+	local char = target.Character
+	if not char then return DoNotif("Target has no character") end
+	local thrp = char:FindFirstChild("HumanoidRootPart")
+	if not thrp then return DoNotif("Target has no root") end
+	thrp.CFrame = hrp.CFrame
+	DoNotif("Client brought " .. target.Name)
+end)
+
+cmd.addArg("follow", "Follow a player wherever they go [name]", function(val)
+	if loops.follow then
+		loops.follow:Disconnect()
+		loops.follow = nil
+	end
+	local target = getPlr(val)
+	if not target then return DoNotif("Player not found") end
+	loops.follow = RunService.Heartbeat:Connect(function()
+		local hrp = getRoot()
+		local char = target.Character
+		if not hrp or not char then return end
+		local thrp = char:FindFirstChild("HumanoidRootPart")
+		if not thrp then return end
+		hrp.CFrame = thrp.CFrame * CFrame.new(0, 0, 5)
+	end)
+	DoNotif("Following " .. target.Name)
+end)
+
+cmd.add("unfollow", "Stop all attempts to follow a player", function()
+	if loops.follow then
+		loops.follow:Disconnect()
+		loops.follow = nil
+	end
+	DoNotif("Follow stopped")
+end)
+
+cmd.addArg("glue", "Loop teleport to a player [name]", function(val)
+	if loops.glue then
+		loops.glue:Disconnect()
+		loops.glue = nil
+	end
+	local target = getPlr(val)
+	if not target then return DoNotif("Player not found") end
+	loops.glue = RunService.Heartbeat:Connect(function()
+		local hrp = getRoot()
+		local char = target.Character
+		if not hrp or not char then return end
+		local thrp = char:FindFirstChild("HumanoidRootPart")
+		if not thrp then return end
+		hrp.CFrame = thrp.CFrame
+	end)
+	DoNotif("Glued to " .. target.Name)
+end)
+
+cmd.add("unglue", "Stops teleporting you to a player", function()
+	if loops.glue then
+		loops.glue:Disconnect()
+		loops.glue = nil
+	end
+	DoNotif("Glue stopped")
+end)
+
+cmd.add("tospawn", "Teleports you to a SpawnLocation", function()
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v:IsA("SpawnLocation") then
+			hrp.CFrame = v.CFrame + Vector3.new(0, 3, 0)
+			DoNotif("Teleported to spawn")
+			return
+		end
+	end
+	DoNotif("No spawn found")
+end)
+
+cmd.add("god", "Enable invincibility", function()
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	hum.MaxHealth = math.huge
+	hum.Health = math.huge
+	DoNotif("God mode enabled")
+end)
+
+cmd.add("heal", "Heals your character", function()
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	hum.Health = hum.MaxHealth
+	DoNotif("Healed")
+end)
+
+cmd.add("kill", "Kills your character", function()
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	hum.Health = 0
+	DoNotif("Killed")
+end)
+
+cmd.add("fling", "Fling the given player", function()
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	local av = InstanceNew("AngularVelocity", {
+		Parent = hrp,
+		MaxTorque = math.huge,
+		AngularVelocity = Vector3.new(0, 50000, 0)
+	})
+	Spawn(function()
+		Wait(0.3)
+		if av and av.Parent then av:Destroy() end
+	end)
+	DoNotif("Fling activated")
+end)
+
+cmd.add("boxreach", "Creates a box-shaped hitbox around your tool", function()
+	local char = getChar()
+	if not char then return DoNotif("No character") end
+	local tool = char:FindFirstChildOfClass("Tool")
+	if not tool then return DoNotif("No tool equipped") end
+	local handle = tool:FindFirstChild("Handle")
+	if not handle then return DoNotif("No handle") end
+	local box = InstanceNew("Part", {
+		Parent = tool,
+		Name = "BoxReach",
+		Size = Vector3.new(10, 10, 10),
+		Transparency = 1,
+		Anchored = false,
+		CanCollide = false
+	})
+	InstanceNew("Weld", {
+		Parent = box,
+		Part0 = handle,
+		Part1 = box,
+		C0 = CFrame.new(0, 0, -5)
+	})
+	DoNotif("Box reach enabled")
+end)
+
+cmd.add("resetreach", "Resets tool to normal size", function()
+	local char = getChar()
+	if not char then return end
+	local tool = char:FindFirstChildOfClass("Tool")
+	if not tool then return end
+	local box = tool:FindFirstChild("BoxReach")
+	if box then box:Destroy() end
+	DoNotif("Reach reset")
+end)
+
+cmd.add("esp", "Locate where the players are", function()
+	for _, p in pairs(Players:GetPlayers()) do
+		if p ~= Plr and p.Character then
+			local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+			if hrp and not espList[p] then
+				local bb = InstanceNew("BillboardGui", {
+					Parent = hrp,
+					Name = "CCEsp",
+					Size = UDim2.new(0, 100, 0, 40),
+					StudsOffset = Vector3.new(0, 3, 0),
+					Adornee = hrp,
+					AlwaysOnTop = true
+				})
+				InstanceNew("TextLabel", {
+					Parent = bb,
+					Size = UDim2.new(1, 0, 0.5, 0),
+					BackgroundTransparency = 1,
+					Text = p.Name,
+					TextColor3 = Color3.new(1, 1, 1),
+					TextStrokeTransparency = 0.5,
+					TextScaled = true,
+					Font = Enum.Font.GothamBold
+				})
+				espList[p] = bb
+			end
+		end
+	end
+	DoNotif("ESP enabled")
+end)
+
+cmd.add("unesp", "Disables esp", function()
+	for p, bb in pairs(espList) do
+		if bb and bb.Parent then bb:Destroy() end
+		espList[p] = nil
+	end
+	espList = {}
+	DoNotif("ESP disabled")
+end)
+
+cmd.add("chams", "ESP but without the text", function()
+	for _, p in pairs(Players:GetPlayers()) do
+		if p ~= Plr and p.Character then
+			if not chamsList[p] then
+				local highlights = {}
+				for _, part in pairs(p.Character:GetDescendants()) do
+					if part:IsA("BasePart") then
+						local hl = InstanceNew("Highlight", {
+							Parent = part,
+							Adornee = part,
+							FillColor = Color3.fromRGB(255, 0, 0),
+							OutlineColor = Color3.fromRGB(255, 255, 255),
+							FillTransparency = 0.5,
+							OutlineTransparency = 0,
+							DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+						})
+						table.insert(highlights, hl)
+					end
+				end
+				chamsList[p] = highlights
+			end
+		end
+	end
+	DoNotif("Chams enabled")
+end)
+
+cmd.add("unchams", "Disables chams", function()
+	for p, hls in pairs(chamsList) do
+		for _, hl in pairs(hls) do
+			if hl and hl.Parent then hl:Destroy() end
+		end
+		chamsList[p] = nil
+	end
+	chamsList = {}
+	DoNotif("Chams disabled")
+end)
+
+cmd.add("ff", "Gives you a ForceField", function()
+	local char = getChar()
+	if not char then return DoNotif("No character") end
+	InstanceNew("ForceField", {Parent = char})
+	DoNotif("ForceField added")
+end)
+
+cmd.add("noff", "Removes your ForceField", function()
+	local char = getChar()
+	if not char then return end
+	for _, v in pairs(char:GetChildren()) do
+		if v:IsA("ForceField") then v:Destroy() end
+	end
+	DoNotif("ForceField removed")
+end)
+
+cmd.add("fullbright", "Makes dark games bright without destroying effects", function()
+	Lighting.Brightness = 2
+	Lighting.ClockTime = 14
+	Lighting.FogEnd = 100000
+	Lighting.GlobalShadows = false
+	Lighting.Ambient = Color3.fromRGB(178, 178, 178)
+	DoNotif("Fullbright enabled")
+end)
+
+cmd.add("nofog", "Removes all fog from the game", function()
+	Lighting.FogEnd = 100000
+	Lighting.FogStart = 0
+	DoNotif("Fog removed")
+end)
+
+cmd.add("noeffect", "Disables Lighting and CurrentCamera effects", function()
+	for _, v in pairs(Lighting:GetChildren()) do
+		if v:IsA("PostEffect") then
+			v.Enabled = false
+		end
+	end
+	DoNotif("Effects disabled")
+end)
+
+cmd.add("day", "Makes it day", function()
+	Lighting.ClockTime = 14
+	DoNotif("Time set to day")
+end)
+
+cmd.add("night", "Makes it night", function()
+	Lighting.ClockTime = 0
+	DoNotif("Time set to night")
+end)
+
+cmd.addArg("brightness", "Changes the brightness [value]", function(val)
+	local n = tonumber(val)
+	if not n then return DoNotif("Invalid number") end
+	Lighting.Brightness = n
+	DoNotif("Brightness set to " .. n)
+end)
+
+cmd.addArg("time", "Sets the time [0-24]", function(val)
+	local n = tonumber(val)
+	if not n then return DoNotif("Invalid number") end
+	Lighting.ClockTime = n
+	DoNotif("Time set to " .. n)
+end)
+
+cmd.addArg("fov", "Sets your FOV [value]", function(val)
+	local n = tonumber(val)
+	if not n then return DoNotif("Invalid number") end
+	Camera.FieldOfView = n
+	DoNotif("FOV set to " .. n)
+end)
+
+cmd.add("globalshadows", "Enables global shadows", function()
+	Lighting.GlobalShadows = true
+	DoNotif("Global shadows enabled")
+end)
+
+cmd.add("invisible", "Sets invisibility", function()
+	local char = getChar()
+	if not char then return DoNotif("No character") end
+	for _, v in pairs(char:GetDescendants()) do
+		if v:IsA("BasePart") then
+			v.Transparency = 1
+		elseif v:IsA("Decal") then
+			v.Transparency = 1
+		end
+	end
+	local hum = getHum()
+	if hum then
+		for _, v in pairs(hum:GetAccessories()) do
+			if v:IsA("Accessory") then
+				local handle = v:FindFirstChild("Handle")
+				if handle then handle.Transparency = 1 end
+			end
+		end
+	end
+	DoNotif("Invisible")
+end)
+
+cmd.add("visible", "Makes you visible again", function()
+	local char = getChar()
+	if not char then return DoNotif("No character") end
+	for _, v in pairs(char:GetDescendants()) do
+		if v:IsA("BasePart") then
+			if v.Name == "HumanoidRootPart" then
+				v.Transparency = 1
+			else
+				v.Transparency = 0
+			end
+		elseif v:IsA("Decal") then
+			v.Transparency = 0
+		end
+	end
+	DoNotif("Visible")
+end)
+
+cmd.add("sit", "Sit your player", function()
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	hum.Sit = true
+	DoNotif("Sitting")
+end)
+
+cmd.add("unsit", "Unsit your player", function()
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	hum.Sit = false
+	DoNotif("Standing")
+end)
+
+cmd.add("jump", "Jump", function()
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	hum:ChangeState(Enum.HumanoidStateType.Jumping)
+end)
+
+cmd.add("reset", "Makes your health be 0", function()
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	hum.Health = 0
+end)
+
+cmd.add("respawn", "Respawn your character", function()
+	pcall(function()
+		Plr:LoadCharacter()
+	end)
+	DoNotif("Respawning")
+end)
+
+cmd.add("breakjoints", "Break your character joints", function()
+	local char = getChar()
+	if not char then return DoNotif("No character") end
+	char:BreakJoints()
+	DoNotif("Joints broken")
+end)
+
+cmd.addArg("material", "Sets every BasePart in your character to a material [name]", function(val)
+	local char = getChar()
+	if not char then return DoNotif("No character") end
+	local mat = Enum.Material[val] or Enum.Material.SmoothPlastic
+	for _, v in pairs(char:GetDescendants()) do
+		if v:IsA("BasePart") then
+			v.Material = mat
+		end
+	end
+	DoNotif("Material set to " .. val)
+end)
+
+cmd.add("stopanimations", "Stops running animations", function()
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	local animator = hum:FindFirstChildOfClass("Animator")
+	if animator then
+		for _, track in pairs(animator:GetPlayingAnimationTracks()) do
+			track:Stop(0)
+		end
+	end
+	DoNotif("Animations stopped")
+end)
+
+cmd.add("btools", "Gives Building Tools", function()
+	local bp = getBp()
+	if not bp then return DoNotif("No backpack") end
+	for _, name in pairs({"F3X", "Building Tools"}) do
+		pcall(function()
+			local tool = InstanceNew("Tool", {
+				Parent = bp,
+				Name = name,
+				CanBeDropped = false
+			})
+			InstanceNew("Part", {Parent = tool, Name = "Handle"})
+		end)
+	end
+	DoNotif("Building tools given")
+end)
+
+cmd.add("droptool", "Drop one of your tools", function()
+	local char = getChar()
+	if not char then return end
+	local tool = char:FindFirstChildOfClass("Tool")
+	if tool then
+		tool.Parent = Workspace
+		DoNotif("Tool dropped")
+	else
+		DoNotif("No tool equipped")
+	end
+end)
+
+cmd.add("droptools", "Drop all of your tools", function()
+	local char = getChar()
+	if not char then return end
+	local bp = getBp()
+	if bp then
+		for _, tool in pairs(bp:GetChildren()) do
+			if tool:IsA("Tool") then
+				tool.Parent = Workspace
+			end
+		end
+	end
+	for _, tool in pairs(char:GetChildren()) do
+		if tool:IsA("Tool") then
+			tool.Parent = Workspace
+		end
+	end
+	DoNotif("Tools dropped")
+end)
+
+cmd.add("equiptools", "Equips every tool in your inventory", function()
+	local bp = getBp()
+	if not bp then return end
+	for _, tool in pairs(bp:GetChildren()) do
+		if tool:IsA("Tool") then
+			tool.Parent = getChar()
+		end
+	end
+	DoNotif("Tools equipped")
+end)
+
+cmd.add("unequiptools", "Unequips every tool you are holding", function()
+	local char = getChar()
+	local bp = getBp()
+	if not char or not bp then return end
+	for _, tool in pairs(char:GetChildren()) do
+		if tool:IsA("Tool") then
+			tool.Parent = bp
+		end
+	end
+	DoNotif("Tools unequipped")
+end)
+
+cmd.add("grabtools", "Grabs dropped tools", function()
+	local bp = getBp()
+	local char = getChar()
+	if not bp or not char then return end
+	local hrp = getRoot()
+	if not hrp then return end
+	local count = 0
+	for _, v in pairs(Workspace:GetChildren()) do
+		if v:IsA("Tool") then
+			local handle = v:FindFirstChild("Handle")
+			if handle then
+				local dist = (handle.Position - hrp.Position).Magnitude
+				if dist < 20 then
+					v.Parent = bp
+					count = count + 1
+				end
+			end
+		end
+	end
+	DoNotif("Grabbed " .. count .. " tools")
+end)
+
+cmd.add("naked", "Removes clothing", function()
+	local char = getChar()
+	if not char then return end
+	for _, v in pairs(char:GetChildren()) do
+		if v:IsA("Shirt") or v:IsA("Pants") or v:IsA("ShirtGraphic") then
+			v:Destroy()
+		end
+	end
+	DoNotif("Clothing removed")
+end)
+
+cmd.add("players", "Lists all players in server", function()
+	local list = ""
+	for _, p in pairs(Players:GetPlayers()) do
+		list = list .. p.Name .. (p == Plr and " (you)" or "") .. "\n"
+	end
+	DoNotif(list, 10)
+end)
+
+cmd.add("fps", "Shows your frames per second", function()
+	local fps = math.floor(1 / RunService.RenderStepped:Wait())
+	DoNotif("FPS: " .. fps)
+end)
+
+cmd.add("ping", "Shows your network latency", function()
+	local ping = math.floor(Plr:GetNetworkPing() * 1000)
+	DoNotif("Ping: " .. ping .. "ms")
+end)
+
+cmd.add("pos", "Shows your current position", function()
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	local p = hrp.Position
+	DoNotif("Pos: " .. math.floor(p.X) .. ", " .. math.floor(p.Y) .. ", " .. math.floor(p.Z))
+end)
+
+cmd.add("memory", "Shows your current memory usage", function()
+	local mem = math.floor(collectgarbage("count") / 1024)
+	DoNotif("Memory: " .. mem .. " MB")
+end)
+
+cmd.addArg("chat", "Chats a message [text]", function(val)
+	pcall(function()
+		game:GetService("TextChatService"):Chat(val, Enum.TextChatMessageTextSourceConfiguration.TextSource)
+	end)
+	pcall(function()
+		game:GetService("ReplicatedStorage"):FindFirstChild("DefaultChatSystemChatEvents"):FindFirstChild("SayMessageRequest"):FireServer(val, "All")
+	end)
+	DoNotif("Chatted: " .. val)
+end)
+
+cmd.add("noclickdetectorlimits", "Sets all click detectors MaxActivationDistance to huge", function()
+	local count = 0
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v:IsA("ClickDetector") then
+			v.MaxActivationDistance = math.huge
+			count = count + 1
+		end
+	end
+	DoNotif("Modified " .. count .. " ClickDetectors")
+end)
+
+cmd.add("fireclickdetectors", "Fires every ClickDetector in Workspace", function()
+	local count = 0
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v:IsA("ClickDetector") then
+			pcall(function() v.MouseClickFire:Fire() end)
+			count = count + 1
+		end
+	end
+	DoNotif("Fired " .. count .. " ClickDetectors")
+end)
+
+cmd.add("fireproximityprompts", "Fires every ProximityPrompt in Workspace", function()
+	local count = 0
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v:IsA("ProximityPrompt") then
+			pcall(function() v:InputHoldBegin() end)
+			pcall(function() v:InputHoldEnd() end)
+			count = count + 1
+		end
+	end
+	DoNotif("Fired " .. count .. " ProximityPrompts")
+end)
+
+cmd.add("removeads", "Removes billboard advertisements", function()
+	local count = 0
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v:IsA("BillboardGui") and v.Name:lower():find("ad") then
+			v:Destroy()
+			count = count + 1
+		end
+	end
+	DoNotif("Removed " .. count .. " ads")
+end)
+
+cmd.add("notepad", "Opens a notepad", function()
+	local gui = InstanceNew("ScreenGui", {Parent = CG, Name = "CCNotepad"})
+	local frame = InstanceNew("Frame", {
+		Parent = gui,
+		Size = UDim2.new(0, 400, 0, 300),
+		Position = UDim2.new(0.5, -200, 0.5, -150),
+		BackgroundColor3 = Color3.fromRGB(30, 30, 30),
+		BorderSizePixel = 0
+	})
+	InstanceNew("UICorner", {Parent = frame, CornerRadius = UDim.new(0, 8)})
+	local close = InstanceNew("TextButton", {
+		Parent = frame,
+		Size = UDim2.new(0, 30, 0, 30),
+		Position = UDim2.new(1, -35, 0, 5),
+		BackgroundColor3 = Color3.fromRGB(200, 50, 50),
+		Text = "X",
+		TextColor3 = Color3.new(1, 1, 1),
+		TextScaled = true,
+		BorderSizePixel = 0
+	})
+	InstanceNew("UICorner", {Parent = close, CornerRadius = UDim.new(0, 4)})
+	close.MouseButton1Click:Connect(function() gui:Destroy() end)
+	InstanceNew("TextBox", {
+		Parent = frame,
+		Size = UDim2.new(1, -20, 1, -50),
+		Position = UDim2.new(0, 10, 0, 40),
+		BackgroundColor3 = Color3.fromRGB(40, 40, 40),
+		TextColor3 = Color3.new(1, 1, 1),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		MultiLine = true,
+		ClearTextOnFocus = false,
+		Text = "",
+		Font = Enum.Font.Code,
+		TextSize = 14,
+		BorderSizePixel = 0
+	})
+	InstanceNew("UICorner", {Parent = frame, CornerRadius = UDim.new(0, 8)})
+	DoNotif("Notepad opened")
+end)
+
+cmd.add("clear", "Clears output", function()
+	pcall(function() print("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n") end)
+	DoNotif("Cleared")
+end)
+
+cmd.add("noremote", "Blocks remote firing", function()
+	if loops.noremote then return DoNotif("Already enabled") end
+	pcall(function()
+		local old
+		old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+			if loops.noremote and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
+				DoNotif("Blocked remote: " .. self.Name)
+				return nil
+			end
+			return old(self, ...)
+		end))
+		loops.noremote = true
+	end)
+	DoNotif("Remote blocking enabled")
+end)
+
+cmd.add("rejoin", "Rejoin the game", function()
+	pcall(function()
+		game:GetService("TeleportService"):Teleport(game.PlaceId, Plr)
+	end)
+	DoNotif("Rejoining")
+end)
+
+cmd.add("serverhop", "Server hop", function()
+	pcall(function()
+		local servers = game:GetService("HttpService"):JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"))
+		if servers and servers.data then
+			for _, s in pairs(servers.data) do
+				if s.id ~= game.JobId and s.playing < s.maxPlayers then
+					TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, Plr)
+					DoNotif("Hopping to server")
+					return
+				end
+			end
+		end
+		DoNotif("No servers found")
+	end)
+end)
+
+cmd.add("gameid", "Copies the GameId", function()
+	pcall(function()
+		setclipboard(tostring(game.GameId))
+	end)
+	DoNotif("GameId copied: " .. game.GameId)
+end)
+
+cmd.add("placeid", "Copies the PlaceId", function()
+	pcall(function()
+		setclipboard(tostring(game.PlaceId))
+	end)
+	DoNotif("PlaceId copied: " .. game.PlaceId)
+end)
+
+cmd.add("jobid", "Copies your job id", function()
+	pcall(function()
+		setclipboard(tostring(game.JobId))
+	end)
+	DoNotif("JobId copied: " .. game.JobId)
+end)
+
+cmd.add("copyname", "Copies the username of the target", function()
+	pcall(function()
+		setclipboard(Plr.Name)
+	end)
+	DoNotif("Name copied: " .. Plr.Name)
+end)
+
+cmd.add("copyid", "Copies the UserId of the target", function()
+	pcall(function()
+		setclipboard(tostring(Plr.UserId))
+	end)
+	DoNotif("UserId copied: " .. Plr.UserId)
+end)
+
+cmd.add("copyposition", "Get the position of the player", function()
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	local p = hrp.Position
+	local str = tostring(math.floor(p.X)) .. ", " .. tostring(math.floor(p.Y)) .. ", " .. tostring(math.floor(p.Z))
+	pcall(function() setclipboard(str) end)
+	DoNotif("Position copied: " .. str)
+end)
+
+cmd.add("gethealth", "Shows your current health", function()
+	local hum = getHum()
+	if not hum then return DoNotif("No humanoid") end
+	DoNotif("Health: " .. math.floor(hum.Health) .. "/" .. math.floor(hum.MaxHealth))
+end)
+
+cmd.add("getmass", "Get your mass", function()
+	local char = getChar()
+	if not char then return DoNotif("No character") end
+	local mass = 0
+	for _, v in pairs(char:GetDescendants()) do
+		if v:IsA("BasePart") then
+			mass = mass + v:GetMass()
+		end
+	end
+	DoNotif("Mass: " .. math.floor(mass * 100) / 100)
+end)
+
+cmd.add("console", "Opens developer console", function()
+	StarterGui:SetCore("DevConsoleVisible", true)
+	DoNotif("Console opened")
+end)
+
+cmd.add("shiftlock", "Toggles shiftlock", function()
+	pcall(function()
+		local sets = Plr:FindFirstChild("PlayerGui"):FindFirstChild("MouseLockController")
+		if sets then
+			sets.Enabled = not sets.Enabled
+		end
+	end)
+	DoNotif("Shift lock toggled")
+end)
+
+cmd.add("firstp", "Makes you go in first person", function()
+	Camera.CameraType = Enum.CameraType.Custom
+	Plr.CameraMaxZoomDistance = 0.5
+	DoNotif("First person mode")
+end)
+
+cmd.add("thirdp", "Makes you go in third person", function()
+	Plr.CameraMinZoomDistance = 0.5
+	Plr.CameraMaxZoomDistance = 128
+	DoNotif("Third person mode")
+end)
+
+cmd.add("setspawn", "Sets your spawn point", function()
+	local hrp = getRoot()
+	if not hrp then return DoNotif("No character") end
+	local spawn = InstanceNew("SpawnLocation", {
+		Parent = Workspace,
+		Position = hrp.Position,
+		Anchored = true,
+		Transparency = 1,
+		CanCollide = false,
+		Size = Vector3.new(5, 1, 5)
+	})
+	DoNotif("Spawn set")
+end)
+
+cmd.add("walltp", "Toggles wall top teleport", function()
+	if loops.walltp then
+		loops.walltp:Disconnect()
+		loops.walltp = nil
+		DoNotif("Wall TP disabled")
+		return
+	end
+	loops.walltp = RunService.Heartbeat:Connect(function()
+		local hrp = getRoot()
+		if not hrp then return end
+		local ray = Workspace:Raycast(hrp.Position, hrp.CFrame.LookVector * 5)
+		if ray then
+			local top = ray.Position + Vector3.new(0, 5, 0)
+			hrp.CFrame = CFrame.new(top)
+		end
+	end)
+	DoNotif("Wall TP enabled")
+end)
+
+cmd.add("unwalltp", "Disables wall top teleport", function()
+	if loops.walltp then
+		loops.walltp:Disconnect()
+		loops.walltp = nil
+	end
+	DoNotif("Wall TP disabled")
+end)
+
+cmd.add("xray", "Enables X-ray vision", function()
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v:IsA("BasePart") and v.Transparency < 1 then
+			xrayData[v] = v.Transparency
+			v.Transparency = 0.7
+		end
+	end
+	DoNotif("X-ray enabled")
+end)
+
+cmd.add("unxray", "Disables X-ray vision", function()
+	for v, t in pairs(xrayData) do
+		if v and v.Parent then
+			v.Transparency = t
+		end
+	end
+	xrayData = {}
+	DoNotif("X-ray disabled")
+end)
+
+cmd.add("lockws", "Locks the whole workspace", function()
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v:IsA("BasePart") then
+			wsData[v] = v.Anchored
+			v.Anchored = true
+		end
+	end
+	DoNotif("Workspace locked")
+end)
+
+cmd.add("unlockws", "Unlocks everything in Workspace", function()
+	for v, a in pairs(wsData) do
+		if v and v.Parent then
+			v.Anchored = a
+		end
+	end
+	wsData = {}
+	DoNotif("Workspace unlocked")
+end)
+
+cmd.add("removeterrain", "Clears terrain", function()
+	Workspace:ClearForStaticObjects()
+	DoNotif("Terrain cleared")
+end)
+
+cmd.addArg("delete", "Removes any part with a certain name [name]", function(val)
+	local count = 0
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v.Name == val then
+			v:Destroy()
+			count = count + 1
+		end
+	end
+	DoNotif("Deleted " .. count .. " parts named " .. val)
+end)
+
+cmd.addArg("deletefind", "Removes any part containing text [text]", function(val)
+	local count = 0
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v.Name:lower():find(val:lower()) then
+			v:Destroy()
+			count = count + 1
+		end
+	end
+	DoNotif("Deleted " .. count .. " parts")
+end)
+
+cmd.addArg("deleteclass", "Removes any part with a classname [class]", function(val)
+	local count = 0
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v:IsA(val) then
+			v:Destroy()
+			count = count + 1
+		end
+	end
+	DoNotif("Deleted " .. count .. " " .. val .. " instances")
+end)
+
+cmd.add("deleteinvisparts", "Deletes invisible parts", function()
+	local count = 0
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v:IsA("BasePart") and v.Transparency >= 1 and v.Name ~= "HumanoidRootPart" then
+			v:Destroy()
+			count = count + 1
+		end
+	end
+	DoNotif("Deleted " .. count .. " invisible parts")
+end)
+
+cmd.add("clearnilinstances", "Removes nil instances", function()
+	local count = 0
+	for _, v in pairs(Workspace:GetChildren()) do
+		if v.Parent == nil then
+			v:Destroy()
+			count = count + 1
+		end
+	end
+	DoNotif("Cleared " .. count .. " nil instances")
+end)
+
+cmd.addArg("loopwalkspeed", "Loop walkspeed [value]", function(val)
+	local n = tonumber(val)
+	if not n then return DoNotif("Invalid number") end
+	if loops.loopwalkspeed then loops.loopwalkspeed:Disconnect() end
+	loops.loopwalkspeed = RunService.Heartbeat:Connect(function()
+		local hum = getHum()
+		if hum then hum.WalkSpeed = n end
+	end)
+	DoNotif("Loop WalkSpeed: " .. n)
+end)
+
+cmd.add("unloopwalkspeed", "Disable loop walkspeed", function()
+	if loops.loopwalkspeed then
+		loops.loopwalkspeed:Disconnect()
+		loops.loopwalkspeed = nil
+	end
+	DoNotif("Loop WalkSpeed disabled")
+end)
+
+cmd.addArg("loopjumppower", "Loop JumpPower [value]", function(val)
+	local n = tonumber(val)
+	if not n then return DoNotif("Invalid number") end
+	if loops.loopjumppower then loops.loopjumppower:Disconnect() end
+	loops.loopjumppower = RunService.Heartbeat:Connect(function()
+		local hum = getHum()
+		if hum then hum.JumpPower = n end
+	end)
+	DoNotif("Loop JumpPower: " .. n)
+end)
+
+cmd.add("unloopjumppower", "Disable loop JumpPower", function()
+	if loops.loopjumppower then
+		loops.loopjumppower:Disconnect()
+		loops.loopjumppower = nil
+	end
+	DoNotif("Loop JumpPower disabled")
+end)
+
+cmd.add("loopjump", "Continuously jump", function()
+	if loops.loopjump then return DoNotif("Already enabled") end
+	loops.loopjump = RunService.Heartbeat:Connect(function()
+		local hum = getHum()
+		if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+	end)
+	DoNotif("Loop jump enabled")
+end)
+
+cmd.add("unloopjump", "Stop continuous jumping", function()
+	if loops.loopjump then
+		loops.loopjump:Disconnect()
+		loops.loopjump = nil
+	end
+	DoNotif("Loop jump disabled")
+end)
+
+cmd.add("loopnight", "Moonlight", function()
+	if loops.loopnight then return DoNotif("Already enabled") end
+	loops.loopnight = RunService.Heartbeat:Connect(function()
+		Lighting.ClockTime = 0
+	end)
+	DoNotif("Loop night enabled")
+end)
+
+cmd.add("unloopnight", "No more moonlight", function()
+	if loops.loopnight then
+		loops.loopnight:Disconnect()
+		loops.loopnight = nil
+	end
+	DoNotif("Loop night disabled")
+end)
+
+cmd.add("loopday", "Sunshiiiine", function()
+	if loops.loopday then return DoNotif("Already enabled") end
+	loops.loopday = RunService.Heartbeat:Connect(function()
+		Lighting.ClockTime = 14
+	end)
+	DoNotif("Loop day enabled")
+end)
+
+cmd.add("unloopday", "No more sunshine", function()
+	if loops.loopday then
+		loops.loopday:Disconnect()
+		loops.loopday = nil
+	end
+	DoNotif("Loop day disabled")
+end)
+
+cmd.add("loopnodrag", "No character drag", function()
+	if loops.loopnodrag then return DoNotif("Already enabled") end
+	loops.loopnodrag = RunService.Heartbeat:Connect(function()
+		local hum = getHum()
+		if hum then
+			hum.PlatformStand = false
+			hum.PlatformStand = true
+		end
+	end)
+	DoNotif("Loop no drag enabled")
+end)
+
+cmd.add("unloopnodrag", "Re-enable drag", function()
+	if loops.loopnodrag then
+		loops.loopnodrag:Disconnect()
+		loops.loopnodrag = nil
+	end
+	local hum = getHum()
+	if hum then hum.PlatformStand = false end
+	DoNotif("Loop no drag disabled")
+end)
+
+cmd.addArg("loopfling", "Loop fling a player [name]", function(val)
+	local target = getPlr(val)
+	if not target then return DoNotif("Player not found") end
+	if loops.loopfling then loops.loopfling:Disconnect() end
+	loops.loopfling = RunService.Heartbeat:Connect(function()
+		local hrp = getRoot()
+		local char = target.Character
+		if not hrp or not char then return end
+		local thrp = char:FindFirstChild("HumanoidRootPart")
+		if not thrp then return end
+		hrp.CFrame = thrp.CFrame
+		hrp.Velocity = Vector3.new(9999, 9999, 9999)
+		hrp.RotVelocity = Vector3.new(9999, 9999, 9999)
+	end)
+	DoNotif("Loop fling on " .. target.Name)
+end)
+
+cmd.add("unloopfling", "Stops loop flinging a player", function()
+	if loops.loopfling then
+		loops.loopfling:Disconnect()
+		loops.loopfling = nil
+	end
+	DoNotif("Loop fling disabled")
+end)
+
+cmd.add("walkfling", "Walk fling", function()
+	if loops.walkfling then
+		loops.walkfling:Disconnect()
+		loops.walkfling = nil
+		DoNotif("Walk fling disabled")
+		return
+	end
+	loops.walkfling = RunService.Heartbeat:Connect(function()
+		local hrp = getRoot()
+		if hrp then
+			hrp.RotVelocity = Vector3.new(9999, 9999, 9999)
+		end
+	end)
+	DoNotif("Walk fling enabled")
+end)
+
+cmd.add("unwalkfling", "Stop walk fling", function()
+	if loops.walkfling then
+		loops.walkfling:Disconnect()
+		loops.walkfling = nil
+	end
+	DoNotif("Walk fling disabled")
+end)
+
+cmd.addArg("toolreach", "Extended tool reach [value]", function(val)
+	local char = getChar()
+	if not char then return DoNotif("No character") end
+	local tool = char:FindFirstChildOfClass("Tool")
+	if not tool then return DoNotif("No tool equipped") end
+	local handle = tool:FindFirstChild("Handle")
+	if not handle then return DoNotif("No handle") end
+	local n = tonumber(val) or 20
+	tool.GripSize = Vector3.new(n, n, n)
+	DoNotif("Tool reach: " .. n)
+end)
+
+cmd.add("untoolreach", "Reset tool reach", function()
+	local char = getChar()
+	if not char then return end
+	local tool = char:FindFirstChildOfClass("Tool")
+	if tool then
+		tool.GripSize = Vector3.new(1, 2, 3)
+	end
+	DoNotif("Tool reach reset")
+end)
+
+cmd.add("tpwalk", "Undetectable walkspeed", function()
+	if loops.tpwalk then
+		loops.tpwalk:Disconnect()
+		loops.tpwalk = nil
+		DoNotif("TP walk disabled")
+		return
+	end
+	loops.tpwalk = RunService.Heartbeat:Connect(function()
+		local hrp = getRoot()
+		local hum = getHum()
+		if hrp and hum then
+			local moveDir = hum.MoveDirection
+			if moveDir.Magnitude > 0 then
+				hrp.CFrame = hrp.CFrame + moveDir * 2
+			end
+		end
+	end)
+	DoNotif("TP walk enabled")
+end)
+
+cmd.add("untpwalk", "Stops the tpwalk command", function()
+	if loops.tpwalk then
+		loops.tpwalk:Disconnect()
+		loops.tpwalk = nil
+	end
+	DoNotif("TP walk disabled")
+end)
+
+cmd.add("unloop", "Stops all active command loops", function()
+	for key, conn in pairs(loops) do
+		if typeof(conn) == "RBXScriptConnection" then
+			conn:Disconnect()
+		elseif typeof(conn) == "Instance" then
+			pcall(function() conn:Destroy() end)
+		end
+		loops[key] = nil
+	end
+	DoNotif("All loops stopped")
+end)
+
+cmd.add("sitnpcs", "Makes NPCS sit", function()
+	local count = 0
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v:IsA("Humanoid") and not Players:GetPlayerFromCharacter(v.Parent) then
+			v.Sit = true
+			count = count + 1
+		end
+	end
+	DoNotif("Sat " .. count .. " NPCs")
+end)
+
+cmd.add("unsitnpcs", "Makes NPCS unsit", function()
+	local count = 0
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v:IsA("Humanoid") and not Players:GetPlayerFromCharacter(v.Parent) then
+			v.Sit = false
+			count = count + 1
+		end
+	end
+	DoNotif("Unsat " .. count .. " NPCs")
+end)
+
+-- COMMAND DATABASE
+
+-- COMMAND DATABASE
+
+local DB = [[2012=Makes your Pedoblox CoreGui look like the 2012 CoreGui|2013=Makes your Pedoblox CoreGui look like the 2013 CoreGui|2014=Makes your Pedoblox CoreGui look like the 2014 CoreGui|2015=Makes your Pedoblox CoreGui look like the 2015 CoreGui|2016=Makes your Pedoblox CoreGui look like the 2016 CoreGui|accountage=Tells the account age of a player in the server|actnpc=Start acting like an NPC|addalias=Adds a persistent alias for an existing command|addallplugins=Move all .na to Nameless-Admin/Plugins and all .iy to Nameless-Admin/PluginsIY, then load them|addautoexec=Add a command to autoexecute|addbutton=Add a mobile button|addplugin=Move one .na to Plugins or one .iy to PluginsIY, then load it|admin=Whitelist the user to have access to *your* client-side commands, anything they type runs on *you*, not on themselves|adonisbypass=bypasses adonis admin detection|aimbot=aimbot and yeah|airmomentum=Overrides default in-air horizontal movement with custom air control|airwalk=Press space to go up, unairwalk to stop|alignmentkeys=Enable alignment keys|animationassetdata=Set Show Active Animation Asset|animationplayer=dropdown menu with all the animations the game has to be played|animationspeed=Adjusts the speed of currently playing animations|animbuilder=Opens animation builder GUI|animcopycore=Copy core animations from target|animdata=Shows you information about your current animations|animresetcore=Reset core animations to saved|animspoofer=Loads up an animation spoofer,spoofs animations that use rbxassetid|annoy=Annoys the given player|antiafk=Prevents you from being kicked for being AFK|antianchor=Prevent your parts from being anchored|antibang=prevents users to bang you (still WORK IN PROGRESS)|antibreakjoints=Prevents local character joints from breaking when possible|anticframeteleport=Prevents client teleports|antierror=Continuously blocks and clears any future error or disconnected UI|antifling=makes other players non-collidable with you|antiflingparts=Disables collision on nearby unanchored non-player parts above the velocity threshold|antikick=Bypass Kick on Most Games|antiknockback=Disables knockback|antinil=Prevents your character from being parented to nil|antisit=Prevents the player from sitting|antistaff=Automatically leave or advanced-serverhop when staff is detected|antiteleport=Prevents TeleportService from moving you to another place|antitouch=Disables touchable parts|antitrip=no tripping today bruh|antivelocity=Limits your character's velocity to the provided value|antivelocityinstances=Continuously destroys force, torque, position, orientation, and velocity mover instances inside your character|antivoid=Prevents you from falling into the void by launching you upwards|antivoid2=sets FallenPartsDestroyHeight to -inf|ass=Ass|audiologger=Gives an UI that grabs all audios on the game|aura=Continuously damages all nearby humanoid targets with equipped tool|autoclicker=provides a autoclicker gui|autodelete=Removes any part with a certain name from the workspace on loop|autodeleteclass=Removes any part with a certain classname from the workspace on loop|autodeletefind=Auto removes parts with names containing text|autofireclick=Automatically fires ClickDetectors matching [target] every <interval> seconds|autofireclickfind=Automatically fires ClickDetectors matching [target] using substring matching every <interval> seconds|autofireproxi=Automatically fires ProximityPrompts matching [target] every <interval> seconds|autofireproxifind=Automatically fires ProximityPrompts matching [target] using substring matching every <interval> seconds|autofireremote=Automatically fires remotes matching [target] every <interval> seconds|autofireremotefind=Automatically fires remotes matching [target] using substring matching every <interval> seconds|autoflashback=Auto-teleports you to your last death point on respawn|autoflashbackalt=Auto-teleports you to the 0 HP flashback point on respawn|autofollow=Automatically follow any player who comes close|autopatchtool=Aggressively patches common cooldown, reload, recoil, spread, ammo, fire-rate, range, and damage settings for a tool|autorejoin=Rejoins the server if you get kicked / disconnected|autoreport=Automatically reports players to get them banned|autorespawn=Teleports you back to your death position after respawn|autotouch=Automatically fires TouchInterests on parts matching [target] every <interval> seconds|autotouchfind=Automatically fires TouchInterests on parts matching [target] using substring matching every <interval> seconds|autouwuify=Stylizes chat input before sending|avatarpreview=Creates a client-only avatar preview rig|awakeparts=Set Awake Parts Highlighted|backpack=provides a custom backpack gui|backview=Flip the camera behind you and invert movement controls|badgeviewer=loads up a badge viewer UI that views all badges in the game you're in|bang=fucks the player by attaching to them|binders=Open the event binder menu|blackhole=Makes unanchored parts teleport to the black hole|blackholefollow=Pulls unanchored parts to you with spin|block=Open block / unblock prompt for target player|blockremote=Block a remote event/function by name (or pick from list)|bodytransparency=Sets LocalTransparencyModifier on selected body parts (no Head) to a value (0-1). UI supports multi-select.|boobs=Boobs|boxreach=Creates a box-shaped hitbox around your tool|breakcars=Breaks any car|breakjoints=Break your character joints and die|breaklayeredclothing=Streches your layered clothing|breakvelocity=Sets your character's velocity to zero momentarily|brightness=Changes the brightness lighting property|bringfolder=Brings all parts in a folder or a specified part|bringmodel=Brings a model to your character by name|bringmodelfind=Brings all models whose name contains the given text to your character|bringnpcs=Brings NPCs|bringpart=Brings a part to your character by name|bringpartfind=Brings all parts containing name to your character|bubblechat=Enables BubbleChat|bypassspeed=Set WalkSpeed (bypass variant)|cam=Manage camera type settings|cameranoclip=Makes your camera clip through walls|cancelteleport=Cancel an in-progress teleport|cancelteleportloop=Repeatedly cancels in-progress teleport|carpet=Be someone's carpet|cartornado=Tornados a car just sit in the car|cbring=Brings the player once on your client|cframefly=Enable CFrame-based flight with respawn-safe cleanup|chams=ESP but without the text :shock:|chamsallies=Chams players on your current team|chamsenemies=Chams players outside your team|chamsteam=Chams players in a specific team; no args = current team/allies|chardebug=debug your character|chardelete=Removes any part with a certain name from your character|chardeleteclass=Removes any part with a certain classname from your character|chardeletefind=Removes parts in your character with names containing text|chat=Chats for you, useful if you're muted|chatlogs=Open the chat logs|chattranslate=the very old chat translator came back after years|checkrfe=Checks if the game has respect filtering enabled off|cig=Gives a cigarette pack (client R6)|cigar=Gives a cigar (client R6)|circlemath=Gay circle math\\nModes: a,b,c,d,e|clearaliases=Removes all aliases created using addalias.|clearautoexec=Clear all AutoExec commands|clearavatarpreview=Removes the client-only avatar preview rig|clearbuttons=Clear all user buttons|clearerror=Clears any current error or disconnected UI immediately|clearnilinstances=Removes nil instances|clearremovespecifictool=Stops all specific tool removal loops|clickdelete=Bind-only click delete (hold bind + left click)|clickdetectorgoto=Teleports to the nearest ClickDetector part, optionally matching its name/parent/model|clickesp=clickesp|clickfling=Fling a player by clicking them|clickkillnpc=Click on an NPC to kill it|clicknpcjp=Click on an NPC to set its JumpPower|clicknpcws=Click on an NPC to set its WalkSpeed|clickscare=Teleports next to a clicked player for a few seconds|clickteleport=Bind-only click teleport (hold bind + left click)|clicktouch=Click a TouchTransmitter part to fire a touch|clickvoidnpc=Click to void NPCs|climb=Allows you to climb while in air|clip=Enable your player's collision|closespeedometer=Closes the speedometer|cmdbar2=Opens a HD-Admin style cmdbar (black & white)|cobaltspy=cobaltspy (cobalt,cspy)|collisioncosts=Set Collision Costs Shown|collisionesp=collisionesp|commandcount=Counts how many commands NA has|commandkeybinds=Open the command keybinds window|commandloop=Run a command on loop|commands=Open the command list|commitoof=Triggers a dramatic oof sequence for the player|console=Opens developer console|contactpoints=Set Contact Points Shown|controllock=Set Shiftlock keys to Control for this session|copydisplay=Copies the display name of the target|copyid=Copies the UserId of the target|copylerp=Copies a CFrame:Lerp script that moves you to your coordinates|copymoveto=Copies a Humanoid:MoveTo script that moves you to your coordinates|copyname=Copies the username of the target|copyposition=Get the position of another player|copyteleport=Copies a script that teleports you to your coordinates|copytools=Copies the tools the given player has|copytptogame=Copies a script for teleporting to the game you are currently in|copytptoserver=Copies a script for teleporting to your current game server|copytween=Copies a TweenService script that moves you to your coordinates|crash=crashes ur client lol (why would you even use this tho)|creep=Teleports from a player behind them and under the floor to the top|cursorfree=Forces the mouse cursor to remain visible and unlocked|cursorreset=Forces Roblox's default visible and unlocked cursor|cursorrestore=Stops cursor enforcement and restores the saved game cursor state|cursorvisible=Forces the mouse cursor to remain visible without changing its lock mode|dance=Does a random dance|datalimit=Set outgoing bandwidth limit in KBps|datetime=Shows your full local date and time|day=Makes it day|decompiler=Choose lua.expert or Luacid to decompile LocalScript/ModuleScript bytecode|decompositiongeometry=Set Decomposition Geometry|defaultrotationscreen=Changes ScreenOrientation to Default|delete=Removes any part with a certain name from the workspace|deleteclass=Removes any part with a certain classname from the workspace|deletefind=Removes any part with a name containing the given text from the workspace|deleteinvisparts=Deletes invisible parts|deletelighting=Removes all descendants (objects) within Lighting.|deleteselectedtool=Deletes currently equipped tools|deletevelocity=removes any velocity/force instanceson your character|desync=Toggle NextGenReplicator desync / sync (run again to disable)|devproducts=Lists Developer Products|dex=Better version of dex|disable=Disables a specific CoreGui|disablealignmentkeys=Disable alignment keys|disableanimations=Freezes your animations|disablehumanoidstate=Opens a picker to disable one humanoid state|disableproximityprompts=Disable ProximityPrompts (all or matching)|disableproximitypromptservice=disable proximity prompt buttons|disablespawn=Disables the previously set spawn point|discord=Copy an invite link|drawconstraintsforce=Set Draw Constraints Net Force|drawcontactsforce=Set Draw Contacts Net Force|drawtotalforce=Set Draw Total Net Force|droptool=Drop one of your tools|droptools=Drop all of your tools|eagerbulkexecution=Set Eager Bulk Execution|echolocation=[BETA] Darkens the world and reveals geometry and entities from movement, landings, and spatial Sound/AudioEmitter sources|echoping=Emit a strong manual echolocation ping|edgejump=Automatically jumps when you get to the edge of an object|enable=Enables a specific CoreGui|enablehumanoidstate=Restores one humanoid state or all disabled states|enableproximityprompts=Enable ProximityPrompts (all or matching)|enableproximitypromptservice=enable proximity prompt buttons|enginesettingsinfo=Show Roblox settings service diagnostics|equiptool=Equip a specific tool by name or selection|equiptools=Equips every tool in your inventory at once|errorchat=Makes the chat error appear when roblox chat is slow|esp=locate where the players are|espall=ESP all players and clear team filtering|espallies=ESP players on your current team|espenemies=ESP players outside your team; no-team games fall back to all others|esplocator=|espteam=ESP players in a specific team; no args = current team/allies|eventinfo=Shows an experience event with copy/details/RSVP options|executor=Toggle the integrated executor UI|exit=Close down pedoblox|experienceevents=Shows upcoming experience events with copy/details/RSVP options|exportconsole=Exports the current NA Console records with timestamps, duplicate counts, and structured context|exportmergebymaterial=Set Export Merge By Material|f3x=F3X for client|fakechat=Fake a chat gui|fakelag=fake lag|fakeout=tp to void and back|fastprompts=Makes proximity prompts use the specified speed multiplier, defaulting to 2x|fatesadmin=Executes fates admin|feedback=Opens Roblox's client experience feedback prompt|fireclickdetectors=Fires every ClickDetector in Workspace|fireclickdetectorsfind=Fires ClickDetectors substring-matching [target] in Workspace|firekey=makes you fire a keybind using VirtualInputManager|fireproximityprompts=Fires every ProximityPrompt in Workspace|fireproximitypromptsfind=Fires ProximityPrompts substring-matching [target] in Workspace|fireremote=Fire one remote by selection, name, or full path|fireremotes=Fires every remote with arguments|firetouchinterests=Fires every TouchInterest in Workspace|firetouchinterestsfind=Fires TouchInterests substring-matching [target] in Workspace|firework=pop|firstp=Makes you go in first person mode|fixcam=Fix your camera|flashback=Teleports you to your last death point|flashbackalt=Teleports you to the 0 HP flashback point|flashlight=Gives you a flashlight tool|fling=Fling the given player|flingnpcs=Flings NPCs|fluidforcedrawscale=fluidforcedrawscale <number> - Set Fluid Force Draw Scale|fly=Enable flight|flyfling=makes you fly and fling|flyjump=Allows you to hold space to fly up|folderesp=Highlights folder contents (parts or models)|follow=Follow a player wherever they go|forcecam=Lock camera type and auto-restore if changed|forcedrawscale=forcedrawscale <number> - Set Force Draw Scale|forceinstancenames=Set Force Instance Names|forcereverb=Lock ambient reverb and auto-restore if changed|forcesmoothingsteps=forcesmoothingsteps <0-100> - Set Force Smoothing Steps|fov=Sets your FOV to a custom value (1Ã¢â‚¬â€œ300)|fps=Shows your frames per second|fpsbooster=Enables maximum-performance low graphics mode, run again to restore|fpscap=Sets the fps cap to whatever you want|fpsping=Shows the legacy FPS and ping panel|freecam=Enable free camera|freecamgoto=Start or move freecam to a player|freecamgotopart=Start or move freecam to an exact part name|freegamepass=Pretends you own every gamepass and fires product purchase signals|freemouse=Toggle cursor unlock while world model first person is active|freeze=Freezes your character|freezeunanchored=Freezes unanchored non-character parts|friend=Sends a friend request to your target|friendweb=Finds friend circles in the current server|frontview=Reset WFCP camera state and return to a normal front view|fullbright=makes dark games bright without destroying effects|functionspy=Check console|gameid=Copies the GameId/Universe Id of the game you're in|gameinfo=shows info about the game you're playing|gamepasses=Prompt & list Game Passes (manual IDs)|gamescripts=Show scripts listed for the current game|gamma=gamma vision (real)|gcsearch=Searches getgc tables, function metadata, constants, and upvalues for text|gear=This is client sided and will probably not work|gethealth=Shows your current health|getidfromusername=Copy a user's UserId by Username|getmass=Get your mass|getuserfromid=Copy a user's Username by ID|globalshadows=Enables global shadows|glue=Loop teleport to a player|glueback=Loop teleport behind a player|godmode=Pick and enable an invincibility method|goto=Teleport to the given player, NPC, or X,Y,Z coordinates|gotobreak=Stop the active goto sequence and clear duplicate selections.|gotocampos=Teleports you to your camera position works with free cam but freezes you|gotofolder=Teleports you to all parts in a folder|gotofoldernext=Teleport sequentially through folder contents with optional prefix.|gotomodel=Teleports to each model with name once|gotomodelfind=Teleports to each model containing name once|gotomodelnext=Teleport sequentially to models with optional prefix and duplicate handling.|gotonpcs=Teleports to each NPC|gotopart=Teleports you to each matching part by name once|gotopartclass=Teleports to each part of class once|gotopartfind=Teleports to each part containing name once|gotopartnext=Teleport sequentially to parts with optional prefix and duplicate handling.|gotowaypoint=Teleport to a saved waypoint|grabtools=Grabs dropped tools|gravity=sets game gravity to whatever u want|gravitygun=Probably the best gravity gun script thats fe|grippos=Opens a UI to manually input grip offset and rotation.|guidelete=Deletes GUI under mouse with Backspace/Delete, or under tap on mobile|hamster=Hamster ball|handlekill=Kills a player using a tool that deals damage on touch|harked=Executes Comet which is like harked|hatresize=Makes your hats very big r15 only|headbang=Bang them in the mouth because you are gay|headsit=sit on someone's head|headstand=Stand on someone's head.|height=Changes your hipheight|hide=places the selected player to lighting|hideacc=Hide or restore local accessory parts|hidecom=Remove COM tracker|hidecurrentguis=Hides only currently visible GUIs|hideguis=Hides GUIs|hideicon=Hides the NA icon|hidepathwaypoint=Hide waypoint path route nodes and stop waypoint pathfinding|hidetargetgui=Hides a specific GUI by name|hidewaypoints=Hide saved waypoint ESP markers|hitbox=|hitboxes=shows all the hitboxes|homebrew=Executes homebrew admin|hoverinventory=Shows a player's inventory on hover|hovername=Shows player's username on hover|httpspy=HTTP Spy|hug=huggies time (click on a target to hug)|hydroxide=executes hydroxide|ibtools=Load the iBuild Tools helper tool|ifundone=Runs a command only if that exact command has not been done this session|imagescanner=Gives an UI that grabs all images on the game|improvetextures=Switches Textures|infjump=Enables infinite jumping|inspect=checks a user's items|inspectoutfit=Open a user's saved outfits and inspect a selected outfit|instantproximityprompts=Sets proximity prompt HoldDuration values to 0.01 and keeps them near-instant|instantrespawn=respawn instantly|interpolationthrottle=Set Interpolation Throttle Shown|inversebang=you're the one getting fucked today ;)|invisbind=set a custom keybind for the 'Invisible' command|invisfling=Enables invisible fling (the invis part is patched, try using the god command before using this)|invisible=Sets invisibility to scare people or something|invisibleparts=Shows invisible parts|invitefriends=Opens Roblox's client invite prompt, optionally targeting a user|itemesp=Highlight dropped in-game tools/items|jerk=jorking it|jerkuser=Lay under them and vibe|jobid=Copies your job id|joinbreakdown=Set Print Join Size Breakdown|joingroup=Open the Pedoblox join prompt for a group|joinjobid=Joins the job id you put in|jointcoords=Set Joint Coordinates Shown|joinvoice=let's you use vc if you were suspended|jp=Sets your JumpPower|jump=jump.|jumpboost=Adds extra jump velocity without changing JumpPower|keyboard=provides a keyboard gui for mobile users|keystroke=Executes a keystroke ui script|killnpcs=Kills NPCs|landscaperotationscreen=Changes ScreenOrientation to Landscape Sensor|lastcommand=Re-run your previously executed command|lay=zzzzzzzz|light=Gives your player dynamic light|lighting=Manage lighting technology settings|lightingdisable=Disables all post-processing effects in Lighting instead of deleting them.|listen=Listen to your target's voice chat|loadstring=Run code using loadstring|loadtools=Restores your saved tools to your backpack|localdate=Shows your current date|localtime=Shows your current time|locate=locate where the specified player(s) are|lockiconposition=Locks the NA icon's position (can't be dragged)|lockmouse=Default Mouse Behaviour (idk any description)|lockmouse2=Locks your mouse in the center|lockws=Locks the whole workspace|logphysics=Enable Physics Error Logging|lookat=Stare at a player or NPC|loop=Directly starts a command loop without opening the loop popup|loopantitouch=Enables AntiTouch live tracking without opening the method popup|loopbrightness=Lock the brightness lighting property|loopbringnpcs=Loops NPC bringing|loopbypassspeed=Loop WalkSpeed (bypass variant)|loopcbring=Continuously brings the player on your client|loopday=Sunshiiiine!|loopdroptools=Loop drops your tools|loopenableproximityprompts=Continuously enable ProximityPrompts (all or matching)|loopequiptool=Keeps a specific tool equipped until disabled|loopfling=Loop voids a player|loopfov=Locks your FOV target (1Ã¢â‚¬â€œ300)|loopfullbright=Sunshiiiine!|loopgamma=loop gamma vision (mega real)|loopgrabtools=Loop grabs dropped tools|loopjump=Continuously jump.|loopjumppower=Loop JumpPower|loopmaxslopeangle=Loop MaxSlopeAngle|loopmaxzoom=Loop your maximum camera distance and restore it when changed|loopminzoom=Loop your minimum camera distance and restore it when changed|loopmute=Loop mutes the player's boombox|loopnight=Moonlight.|loopnoeffect=Keeps Lighting and CurrentCamera effects disabled|loopnofog=See clearly forever!|loopnpcfollow=Makes NPCS follow you in a loop|loopoof=Loops everyone's character sounds (everyone can hear)|looppath=Continuously path to a saved waypoint after death or respawn|looppathteleportdelay=Set loop path teleport delay between route nodes|looppathtweenspeed=Set loop path tween speed in studs per second|loopspook=Teleports next to a player repeatedly|loopteleportpath=Loop path to a waypoint by teleporting between route nodes|looptweenpath=Loop path to a waypoint using tween movement|loopwalkpath=Loop path to a waypoint using walking movement|loopwalkspeed=Loop walkspeed|loopwaveat=Wave to a player in a loop|massfollowedinto=Shows everyone in the server that followed someone into the game|material=Sets every BasePart in your character to a selected material|maxslopeangle=Changes your character's MaxSlopeAngle|maxzoom=Set your maximum camera distance|mechanismsshown=Set Mechanisms Shown|memory=Shows you your current memory usage|meshcachesize=meshcachesize <number> - Set Mesh Cache Size|mimic=Clone target movement with optional delay|mimicchat=Mimics the chat of a player|minimap=just a minimap lol|minzoom=Set your minimum camera distance|modelesp=Highlights matching models|moduleeditor=loads the module editor UI|mstop=Stop mimic and restore defaults|multitool=Allows stacking equipped tools from your inventory|music=Open the NA music player|mute=Mutes the player's boombox|naked=no clothing gang|netbypass=Net bypass|netless=Executes netless which makes scripts more stable|networkpause=Re-enable Roblox network pause overlay|newserverhop=serverhop to one of the newest active servers|night=Makes it night|nightmare=Make it dark and spooky|nilchar=Parents your character to nil|noblackholefollow=Stops blackhole follow and clears constraints|noclickdetectorlimits=Sets all click detectors MaxActivationDistance to math.huge|noclip=Disable your player's collision|nocollisionesp=nocollisionesp|nocooldown=Override game-script cooldown timing with the chosen number of seconds; defaults to 0 when omitted|noeffect=Disables Lighting and CurrentCamera effects|nofall=Prevents fall damage by slowing falls and cancelling landing velocity (STILL IN BETA)|nofog=Removes all fog from the game|nohats=Drop all of your hats|nologphysics=Disable Physics Error Logging|nonetworkpause=Disable Roblox network pause overlay|noprompt=remove the stupid purchase prompt|noproximitypromptlimits=Sets all proximity prompts MaxActivationDistance to math.huge|norender=Disable 3d Rendering to decrease the amount of CPU the client uses|noreset=disable reset button|notepad=integrated notepad|notools=Remove your tools|notween=Forces all TweenService-created tweens, including NA/executor UI tweens, to the chosen duration; defaults to 0|npcaura=Continuously damages nearby NPCs with equipped tool|npcesp=locate all NPCs or only NPCs matching a name/filter|npcfollow=Makes NPCS follow you|npcjumppower=Sets all NPC JumpPower to <power> (default 50)|npcwalkspeed=Sets all NPC WalkSpeed to <speed> (default 16)|offset=Offsets and rotates your character for others using the Character-tab customization|oganims=Old animations from 2007|oldconsole=opens old version of the developer console|olddex=Using this you can see the parts / guis / scripts etc with this. A really good and helpful script.|oldroblox=Old skybox and studs|oldserverhop=serverhop to one of the oldest active servers|oldversionhop=serverhop to the oldest currently active place version|oofspam=Spams oof|orbit=Orbit around a player|ownerid=masks you as the game owner's ID and Username|partname=gives a ui and allows you click on a part to grab it's path|partsize=Grow a part or model named exactly <name> to the cube size you choose.|partsizefind=Grow every part or model whose name contains <term> to the cube size you choose.|pathfind=Follow a player using the pathfinder API wherever they go|pathfindwaypoint=Pathfind to a saved waypoint and show the route nodes|penis=penis|perfstats=Shows or hides performance stats|permtrip=Permanent trip that keeps you down|pesp=pesp {partname}|pespfind=pespfind {partname}|physallowsleep=Set Physics Allow Sleep|physanchors=Set Physics Anchors Shown|physassemblies=Set Physics Assemblies Shown|physbodytypes=Set Physics Body Types Shown|physowners=Set Physics Owners Shown|physregions=Set Physics Regions Shown|phystree=Set Physics Tree Shown|ping=Shows your network latency|pingserverhop=serverhop to the best estimated-latency server|pipe=Gives a smoking pipe (client R6)|placeid=Copies the PlaceId of the game you're in|placename=Copies the game's place name to your clipboard|pluginmaker=Open the no-code .na/.iy plugin builder|portraitrotationscreen=Changes ScreenOrientation to Portrait|predict=Visualize predicted player movement|prefix=Changes the admin prefix|preftransparency=Preferred UI transparency|preventtools=Prevents any item from being equipped|privatemessage=Sends a private message to a player|prompt=allows the stupid purchase prompt|propertychanged=Runs a command when an instance property changes|propertyesp=ESP instances with a matching readable property value|proximityesp=proximityesp|proximitypromptgoto=Teleports to the nearest ProximityPrompt part, optionally matching its name/object/action/parent/model|punch=punch tool that flings|quality=Manage rendering quality settings|r15=Shows a prompt that will switch your character rig type into R15|r6=Shows a prompt that will switch your character rig type into R6|raknetdesync=Enables RakNet desync using raknet.desync(true)|randomizejoinorder=Set Randomize Join Instance Order|rc7=RC7 Internal UI|reach=Extends sword reach in one direction|receiveage=Set Receive Age Shown|refreshanimations=Reload character animations|regionhop=serverhop to a public server in a requested RoValra region|rejoin=Rejoin the game|reloadassets=Set RenderSettings.ReloadAssets|reloadplugin=Reload plugin files (reloads all if no name provided)|remotespy=executes simplespy that supports both pc and mobile|removeads=Removes billboard advertisements as they appear|removealias=Select and remove a saved alias|removeallplugins=Move all plugins from Nameless-Admin/Plugins and Nameless-Admin/PluginsIY back to workspace|removeautoexec=Remove a command from autoexecute|removebutton=Remove a user button|removeplugin=Move a plugin file from Nameless-Admin/Plugins or Nameless-Admin/PluginsIY back to workspace|removespecifictool=Automatically removes a specific tool from backpack/character|removeterrain=clears terrain|removewaypoint=Remove a saved waypoint|rename=Renames the admin UI placeholder to the given name|render=Enable 3d Rendering|renderautofrm=renderautofrm <number> - Set Auto FRM Level|renderboundingboxes=Set Render Bounding Boxes|rendercsgtriangles=Set Render CSG Triangles Debug|renderfrm=Set Frame Rate Manager|renderstreamedregions=Set Render Streamed Regions|repeat=Runs a command a repeated amount of times|replicationlag=Set IncomingReplicationLag|reselectchar=Re-open the character picker|reserveserver=Teleports to a reserved server or creates one if code is missing|reset=Makes your health be 0|resetanims=Restores your previous animations|resetbtn=enable reset button|resetfilter=If Pedoblox keeps tagging your messages, run this to reset the filter|resetlock=Resets your Shiftlock keybinds to default (LeftShift)|resetreach=Resets tool to normal size|respawn=Respawn your character|reverb=Manage sound reverb settings|rewind=Enable rewind with hold-R on PC or a draggable mobile button|rewindspeed=Set rewind frames skipped per heartbeat|rewindtime=Set how many seconds rewind stores|rjre=Rejoins and teleports you to your previous position|rolewatch=Notify if someone from a watched group joins with a specific role|rolewatchleave=Toggle leaving the server if the watched role joins|rolewatchstop=Disable Rolewatch monitoring|rsvpevent=Opens Roblox's RSVP prompt for an experience event|runanim=Plays an animation by ID with optional speed multiplier|saveinstance=Saves the game with SaveInstance 420 Edition using your saved options|saveprefix=Saves the prefix to a file and applies it|savetools=Saves your tools to memory|screenorientation=Manage ScreenOrientation|scripthub=Open the built-in Script Hub using RScripts, RobloxScripts, HaxHell, and ScriptBlox|scriptload=Run a saved script from the NA executor saved scripts folder|scriptlogger=Load SecureScripts Logger before running a suspicious script|scriptviewer=Can view scripts made by 0866|seat=Finds a seat and automatically sits on it|seizure=Gives you a seizure|sensitivity=Changes your sensitivity|sensorrotationscreen=Changes ScreenOrientation to Sensor|serverdate=Shows the server's current date|serverhop=serverhop|serverlist=list of servers to join in|serverremotespy=Gives an UI that logs all the remotes being called from the server (thanks SolSpy lol)|servertime=Shows the server's current time|setfflag=Set a fast flag (use 'save' to store it)|setkiller=Sets killer animation set|setmass=Sets your character mass as close as Roblox allows|setpsycho=Sets psycho animation set|setsimradius=Set sim radius using available methods. Usage: setsimradius <radius>|setspawn=Sets your spawn point to the current character's position|settings=Open the settings menu|settweenspeed=Set how long tween teleport commands take|setwaypoint=Store your current position, or create/update with custom coordinates|setwaypointpos=Create or edit a waypoint using custom coordinates|shaders=Enable a shader preset for Lighting|shapeesp=ESP Part instances with the selected Shape|shiftlock=Toggles shiftlock|showcom=Create a glass sphere with a Highlight at your center of mass|showguis=Enables every UI|showicon=Shows the NA icon|showpathwaypoint=Show PathfindingService route nodes to a saved waypoint|showtargetgui=Shows only a specific GUI by name|showwaypoints=Show saved waypoint ESP markers for this place|sit=Sit your player|sitesp=sitesp|sitnpcs=Makes NPCS sit|sleepon=Enable AllowSleep|smallserverhop=serverhop to a small server in the best-latency region|somersault=Makes you do a clean front flip|soundwarnings=Set Report Sound Warnings|speedometer=Toggles a NA-themed speedometer|spin=Makes your character spin as fast as you want|split=Destroys waist joint|spoofclientid=Spoofs GetClientId() to the value you provide|spook=Teleports next to a player for a few seconds|starenear=Stare at the closest player|stats=Shows FPS, physics, network and memory stats|stealaudio=Save all sounds a player is playing to a file -Cyrus|stopanimations=Stops running animations|stoploop=Stop a running loop|stopmimicchat=Stops mimicking a player|stoptrackstaff=Stop tracking staff members|streamquota=Set Print Stream Instance Quota|strengthen=Makes your character more dense (CustomPhysicalProperties)|suck=suck it|suslay=Lay down in a suspicious way|swim=Swim in the air|swordfighter=Activates a sword fighting bot that engages in automated PvP combat|synapsedex=Loads SynapseX's dex explorer|syncanim=Mirror target animations (live)|syncstop=Stop live sync and restore defaults|tailsway=Load the TailSway physics/wagging script|tas=Launch TAS Recorder Redux; optionally auto-load and play a saved run|team=Changes your team (for the client)|teleportgui=Open the universe subplace and public-server viewer|teleporttoplace=Teleports you using PlaceId|tfly=Enables smooth flying|thawunanchored=Thaws parts frozen by freezeunanchored|thirdp=Makes you go in third person mode|throttle=Set PhysicsEnvironmentalThrottle (1 = default, 2 = disabled)|throttleadjusttime=throttleadjusttime <seconds> - Set Throttle Adjust Time|thru=Move forward by distance|time=Sets the time|timestamp=Shows current Unix timestamp|timestop=freezes all players (ZA WARUDO)|toolinvisible=Be invisible while still being able to use tools|tools=Copies tools from ReplicatedStorage and Lighting|toolview=3D tool viewer above a player's head|toolview2=Live-updating tool viewer|topbar=Shows the NA topbar|torandom=Teleports to a random player|torquedrawscale=torquedrawscale <number> - Set Torque Draw Scale|tospawn=Teleports you to a SpawnLocation|touchesp=touchesp|touchfling=walkfling only when touching a player or NPC|touchinterestgoto=Teleports to the nearest TouchInterest part, optionally matching its name/parent/part/model|tpdown=Teleports you down by the given amount of studs|tpjump=|tptool=Create click/tween teleport buttons or backpack tools|tpua=Brings every unanchored part on the map to the player|tpup=Teleports you up by the given amount of studs|tpwalk=More undetectable walkspeed script|trackstaff=Track, highlight, and notify when a staff member joins the server|triggerbot=Executes a script that automatically clicks the mouse when the mouse is on a player|trip=get up NOW|trussjump=Boost off trusses when you jump|turtlespy=executes Turtle Spy that supports both pc and mobile|tweengotocampos=Another version of goto camera position but bypassing more anti-cheats|tweengotopart=Tween to each matching part by name once|tweengotopartfind=Tweens to each part containing name once|tweento=Teleportation method that bypasses some anticheats|unactnpc=Stop acting like an NPC|unadmin=removes someone from being admin|unairmomentum=Stops the custom air momentum command|unairwalk=Stops the airwalk command|unalignedparts=Set Unaligned Parts Shown|unanchored=unanchored|unanimationassetdata=Disable Show Active Animation Asset|unanimationspeed=Stops the animation speed adjustment loop|unanimdata=|unannoy=Stops the annoy command|unantiafk=Allows you to be kicked for being AFK|unantianchor=Allow your parts to be anchored|unantibang=disables antibang|unantibreakjoints=Disables AntiBreakJoints|unanticframeteleport=Disables Anti CFrame Teleport|unantierror=Disables Anti Error|unantifling=restores collision for other players|unantiflingparts=Restores collision for unanchored parts changed by antiflingparts|unantikick=Disables Anti-Kick protection|unantiknockback=Disables antiknockback|unantinil=Stops preventing your character from being parented to nil|unantisit=Allows the player to sit again|unantistaff=Disable automatic staff avoidance|unantiteleport=Disables Anti-Teleport protection|unantitouch=Re-enables touchable parts|unantitrip=tripping allowed now|unantivelocity=Disables the antivelocity limiter|unantivelocityinstances=Stops removing force and velocity mover instances from your character|unantivoid=Disables antivoid|unantivoid2=reverts FallenPartsDestroyHeight|unass=Ass|unaura=Stops aura loop and removes visualizer|unautodelete=Disables autodelete|unautodeleteclass=Disables autodeleteclass|unautodeletefind=Stops autodeletefind|unautofireclick=Stops all AutoFireClick loops|unautofireclickfind=Stops substring-matching AutoFireClick loops|unautofireproxi=Stops all AutoFireProxi loops|unautofireproxifind=Stops substring-matching AutoFireProxi loops|unautofireremote=Stops all AutoFireRemote loops|unautofireremotefind=Stops substring-matching AutoFireRemote loops|unautoflashback=Disables auto deathpos|unautoflashbackalt=Disables auto flashback alt|unautofollow=Stop automatically following nearby players|unautopatchtool=Restores values changed by Auto Patch Tool and disables its guards|unautorejoin=Disables auto rejoin command|unautorespawn=Stops AutoRespawn|unautotouch=Stops all AutoTouch loops|unautotouchfind=Stops substring-matching AutoTouch loops|unautouwuify=Stops chat input styling|unawakeparts=Disable Awake Parts Highlighted|unbang=Unbangs the player|unblock=Open unblock prompt for target player|unblockremote=Unblock a remote by name, or pick from blocked list|unbodytransparency=Stops transparency loop|unboobs=Boobs|unbubblechat=Disabled BubbleChat|uncameranoclip=Restores normal camera|uncancelteleportloop=Disable cancelteleport loop|uncarpet=Undoes carpet|uncframefly=Disable CFrame-based flight|unchardebug=disable character debug|unclickesp=unclickesp|unclickfling=disables clickfling|unclickkillnpc=Disable clickkillnpc|unclicknpcjp=Disable clicknpcjp|unclicknpcws=Disable clicknpcws|unclickscare=Disables clickscare|unclicktouch=Disable clicktouch|unclicktptool=Remove teleport buttons or tools|unclickvoidnpc=Disable click-void|unclimb=Disables climb|uncollisioncosts=Disable Collision Costs Shown|uncollisionesp=uncollisionesp|uncontactpoints=Disable Contact Points Shown|uncontrollock=Restore Shiftlock keys to default (Shift)|UNCTest=Test how many functions your executor supports|undance=Stops the dance command|undecompositiongeometry=Disable Decomposition Geometry|undesync=Disable offset desync|undisableanimations=Unfreezes your animations|undotextures=Switches Textures|undrawconstraintsforce=Disable Draw Constraints Net Force|undrawcontactsforce=Disable Draw Contacts Net Force|undrawtotalforce=Disable Draw Total Net Force|uneagerbulkexecution=Disable Eager Bulk Execution|unecholocation=Disable echolocation and restore Lighting|unedgejump=Disables edgejump|unequiptools=Unequips every tool you are currently holding|unesp=Disables esp/chams|unesplocator=|unexportmergebymaterial=Disable Export Merge By Material|unfakelag=stops the fake lag command|unfastprompts=Restores tracked proximity prompt HoldDuration values|unfly=Disable flight|unflyfling=stops fly and fling|unflyjump=Disables flyjump|unfolderesp=Disables folder ESP for a folder or all|unfollow=Stop all attempts to follow a player|unforcecam=Stop forcing camera type|unforceinstancenames=Disable Force Instance Names|unforcereverb=Stop forcing ambient reverb|unfreecam=Disable free camera|unfreeze=Unfreezes your character|unfriend=Prompts to unfriend your target|unglobalshadows=Disables global shadows|unglue=Stops teleporting you to a player|unglueback=Stops teleporting you to a player|ungodmode=Disable invincibility|unguidelete=Disables GUI delete|unhamster=Disable hamster ball|unheadbang=Stops headbang|unheadsit=Stop the headsit command.|unheadstand=Stop the headstand command.|unhide=places the selected player back to workspace|unhidecurrentguis=Restores GUIs hidden by hidecurrentguis|unhideguis=Restores GUIs hidden by hideguis|unhidetargetgui=Restores GUIs hidden by hidetargetgui|unhitbox=|unhitboxes=removes the hitboxes outline|unhoverinventory=Disables hoverinventory|unhovername=Disables hovername|unhug=no huggies :(|unibtools=Remove the iBuild Tools helper tool|uninfjump=Disables infinite jumping|uninstantproximityprompts=Restores tracked proximity prompt HoldDuration values|uninterpolationthrottle=Disable Interpolation Throttle Shown|uninversebang=no more fun|uninvisibleparts=Makes parts affected by invisparts return to normal|unitemesp=Disable dropped item ESP|unjerkuser=Stop the jerk user action|unjoinbreakdown=Disable Print Join Size Breakdown|unjointcoords=Disable Joint Coordinates Shown|unjumpboost=Disables extra jump boost|unlight=Removes dynamic light from your player|unlisten=Stops listening|unload=Unload Nameless Admin and clean up its active runtime|unloadbackpack=unloads the custom backpack gui|unlocate=unlocate <username1> <username2>|unlockiconposition=Unlocks the NA icon's position (can be dragged again)|unlockmouse=Unlocks your mouse (fr this time)|unlockmouse2=Unlocks your mouse|unlockws=Unlocks everything in Workspace|unlookat=Stops staring|unloop=Stops all active command loops|unloopbrightness=Stop locking brightness|unloopbringnpcs=Stops NPC bring loop|unloopbypassspeed=Disable loop WalkSpeed (bypass variant)|unloopcbring=Disable looped client bring|unloopday=No more sunshine|unloopdroptools=Stops loop dropping tools|unloopenableproximityprompts=Stop enabling loop|unloopequiptool=Stops the loop equip behaviour|unloopfling=Stops loop flinging a player|unloopfov=Stops FOV loop|unloopfullbright=No more sunshine|unloopgamma=stop gamma vision (real)|unloopgrabtools=Stops the loop grab command|unloopjump=Stop continuous jumping.|unloopjumppower=Disable loop jump power|unloopmaxslopeangle=Disable loop MaxSlopeAngle|unloopmaxzoom=Stop looping your maximum camera distance|unloopminzoom=Stop looping your minimum camera distance|unloopmute=Unloop mutes the player's boombox|unloopnight=No more moonlight.|unloopnoeffect=Restores Lighting and CurrentCamera effects|unloopnofog=No more sight.|unloopnpcfollow=Makes NPCS not follow you in a loop|unloopoof=Stops the oof chaos|unlooppath=Stop persistent waypoint pathfinding|unloopspook=Stops the loopspook command|unloopwalkspeed=Disable loop walkspeed|unloopwaveat=Stops the loopwaveat command|unmaterial=Restores character materials changed by material|unmechanismsshown=Disable Mechanisms Shown|unmodelesp=Disables model ESP for a model or all|unmultitool=Disables multitool mode|unname=Resets the admin UI placeholder name to default|unnightmare=Disable nightmare mode|unnilchar=Restores your nil-parented character|unnocollisionesp=unnocollisionesp|unnocooldown=Disable the game-script cooldown timing override|unnofall=Disables nofall|unnotween=Stops overriding game-created tween durations|unnpcaura=Stops NPC aura loop and removes visualizer|unnpcesp=stop locating npcs|unoffset=Disables offset customization and restores your character|unoldroblox=Restore skybox and studs|unorbit=Stop orbiting|unpartsize=Undo partsizeÃ¢â‚¬â€return those parts back to their original size and collision.|unpartsizefind=Undo partsizefindÃ¢â‚¬â€return those resized parts back to their original size and collision.|unpenis=penis|unpermtrip=Disable permanent trip|unpesp=Remove exact-name part ESP by name or All|unpespfind=Remove partial-name part ESP by name or All|unphysallowsleep=Disable Physics Allow Sleep|unphysanchors=Disable Physics Anchors Shown|unphysassemblies=Disable Physics Assemblies Shown|unphysbodytypes=Disable Physics Body Types Shown|unphysowners=Disable Physics Owners Shown|unphysregions=Disable Physics Regions Shown|unphystree=Disable Physics Tree Shown|unpredict=Remove prediction orb|unpreventtools=Self-explanatory|unpropertychanged=Stops propertychanged listeners|unpropertyesp=Disable property ESP entries|unproximityesp=unproximityesp|unraknetdesync=Disables RakNet desync using raknet.desync(false)|unrandomizejoinorder=Disable Randomize Join Instance Order|unreceiveage=Disable Receive Age Shown|unremoveads=Stop removing billboard advertisements|unremovespecifictool=Stops removing a specific tool|unrenderboundingboxes=Disable Render Bounding Boxes|unrendercsgtriangles=Disable Render CSG Triangles Debug|unrenderfrm=Disable Frame Rate Manager|unrenderstreamedregions=Disable Render Streamed Regions|unrewind=Disable rewind and clear its saved frames|unseizure=Stops you from having a seizure not in real life noob|unshaders=Disable the shader preset and restore Lighting|unshapeesp=Disable Shape ESP entries|unshiftlock=Disables shiftlock|unshowguis=Restores UI states set by showguis|unshowtargetgui=Restores GUI states changed by showtargetgui|unsitesp=unsitesp|unsitnpcs=Makes NPCS unsit|unsleepon=Disable AllowSleep|unsomersault=Disable somersault button and keybind|unsoundwarnings=Disable Report Sound Warnings|unspam=Stop all attempts to lag/spam|unspin=Makes your character unspin|unspoofclientid=Restores normal GetClientId() behavior|unstarenear=Stop staring at closest player|unstreamquota=Disable Print Stream Instance Quota|unsuck=no more fun|unsuslay=Stand up from the sussy lay|unswim=Stops the swim script|unsyncreset=Stop sync and reset saved|untfly=Disables tween flying|untimestop=unfreeze all players|untoolview=Removes the tool viewer above a player's head|untopbar=Hides the NA topbar|untouchesp=untouchesp|untouchfling=stop the touchfling command|untpjump=Stops the tpjump command|untpwalk=Stops the tpwalk command|untrussjump=Disable trussjump|ununalignedparts=Disable Unaligned Parts Shown|ununanchored=ununanchored|unupsidedown=Disables the upside down replication and restores your character|unuwuaffix=Disables suffix styling|unuwustutter=Disables stutter styling|unvehiclesitesp=unvehiclesitesp|unvehiclespeed=Stops the vehiclespeed command|unvfly=disable vehicle fly|unvideocapture=Disable Video Capture Enabled|unviewpart=Resets the camera to the local humanoid|unwaitcap=Disables the game-script wait/delay cap|unwalkfling=stop the walkfling command|unwallhop=disable wallhop helper|unwalltp=Disables wall top teleport|unwatch=Stop spectating|unwatch2=|unweaken=Sets your characters CustomPhysicalProperties to default|unxray=Disables X-ray vision|uporbit=Orbit around a player on the Y axis|upsidedown=Flips your character upside down for others using the offset replication method|uptime=Shows how long the game/session has been running|upvalueeditor=loads the upvalue editor UI|url=Run the script using URL|userid=changes your UserId to any ID you enter|username=changes your Username to any name you enter|userpreview=show info about a user you name|usetools=Equips all tools, uses them, and unequips them|uwuaffix=Enables suffix styling|uwuify=Stylizes and sends chat text|uwustutter=Enables stutter styling|vcworld=Toggle default spatial voice routing|vehicleclip=Enables vehicle collision|vehiclenoclip=Disables vehicle collision|vehicleseat=Sits you in a vehicle seat, useful for trying to find cars in games|vehiclesitesp=vehiclesitesp|vehiclespeed=Change the vehicle speed|versionhop=serverhop to a server running a specific active place version|vfly=be able to fly vehicles|videocapture=Set Video Capture Enabled|viewpart=Focuses camera on a part, model, or folder|viewpartfind=Focuses camera on a part, model, or folder with name containing the given text|visible=turn visible|voidnpcs=Teleports NPC's to void|volume=Changes your volume|vulnerabilitytest=Test if your executor is Vulnerable|waitcap=Caps game-script wait/delay durations without shortening waits already below the cap|walkfling=probably the best fling lol|wallhop=wallhop helper|walltp=Toggles wall top teleport (BETA)|wallwalk=Makes you walk on walls|watch=Spectate player|watch2=|waveat=Wave to a player|waypoints=Open the waypoints menu|weaken=Makes your character less dense|worldmodelfp=WFCP world-model first person camera|ws=Sets your WalkSpeed|xray=Enables X-ray vision to see through walls]]
+
+local entries = DB:split("|")
+for _, entry in ipairs(entries) do
+	local eq = entry:find("=")
+	if eq then
+		local name = entry:sub(1, eq - 1)
+		local desc = entry:sub(eq + 1)
+		if name ~= "" and Cmds[Lower(name)] == nil then
+			cmd.add(name, name .. " - " .. desc, function()
+				DoNotif(name .. ": " .. desc)
+			end)
+		end
+	end
 end
 
---============================================
--- 13. UI
---============================================
-local gui = InstanceNew("ScreenGui")
-gui.Name = "CustomCmds"
-gui.ResetOnSpawn = false
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-pcall(function() gui.Parent = CG end)
-if not gui.Parent then
-    gui.Parent = LP:WaitForChild("PlayerGui")
-end
+-- UI
+local gui = InstanceNew("ScreenGui", {
+	Parent = CG,
+	Name = "CustomCommandsPanel",
+	ResetOnSpawn = false,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+})
 
-local cmdBarFrame = Instance.new("Frame", gui)
+local mainFrame = InstanceNew("Frame", {
+	Parent = gui,
+	Name = "Main",
+	Size = UDim2.new(0, 420, 0, 520),
+	Position = UDim2.new(0.5, -210, 0.5, -260),
+	BackgroundColor3 = Color3.fromRGB(22, 22, 28),
+	BorderSizePixel = 0,
+	Active = true,
+	Draggable = true
+})
+InstanceNew("UICorner", {Parent = mainFrame, CornerRadius = UDim.new(0, 8)})
 
-local main = Instance.new("Frame", gui)
-main.Name = "Cmds"
-main.Size = UDim2.new(0, 280, 0, 380)
-main.Position = UDim2.new(0.5, -140, 0.5, -190)
-main.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
-main.BorderSizePixel = 0
-main.Active = true
-main.Draggable = true
-InstanceNew("UICorner", main).CornerRadius = UDim.new(0, 10)
-local stroke = InstanceNew("UIStroke", main)
-stroke.Color = Color3.fromRGB(100, 0, 255)
-stroke.Thickness = 1.5
+local titleBar = InstanceNew("Frame", {
+	Parent = mainFrame,
+	Size = UDim2.new(1, 0, 0, 36),
+	BackgroundColor3 = Color3.fromRGB(30, 30, 38),
+	BorderSizePixel = 0
+})
+InstanceNew("UICorner", {Parent = titleBar, CornerRadius = UDim.new(0, 8)})
 
-local title = Instance.new("Frame", main)
-title.Size = UDim2.new(1, 0, 0, 32)
-title.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-title.BorderSizePixel = 0
-InstanceNew("UICorner", title).CornerRadius = UDim.new(0, 10)
+local titleLabel = InstanceNew("TextLabel", {
+	Parent = titleBar,
+	Size = UDim2.new(1, -40, 1, 0),
+	Position = UDim2.new(0, 12, 0, 0),
+	BackgroundTransparency = 1,
+	Text = "Custom Commands Panel",
+	TextColor3 = Color3.fromRGB(0, 170, 255),
+	TextScaled = true,
+	Font = Enum.Font.GothamBold,
+	TextXAlignment = Enum.TextXAlignment.Left
+})
 
-local titleText = Instance.new("TextLabel", title)
-titleText.Size = UDim2.new(1, -40, 1, 0)
-titleText.Position = UDim2.new(0, 12, 0, 0)
-titleText.BackgroundTransparency = 1
-titleText.Text = "Commands (" .. #CmdsList .. ")"
-titleText.TextColor3 = Color3.fromRGB(255, 255, 255)
-titleText.TextSize = 14
-titleText.Font = Enum.Font.GothamBold
-titleText.TextXAlignment = Enum.TextXAlignment.Left
+local closeBtn = InstanceNew("TextButton", {
+	Parent = titleBar,
+	Size = UDim2.new(0, 30, 0, 28),
+	Position = UDim2.new(1, -34, 0, 4),
+	BackgroundColor3 = Color3.fromRGB(200, 50, 50),
+	Text = "X",
+	TextColor3 = Color3.new(1, 1, 1),
+	TextScaled = true,
+	Font = Enum.Font.GothamBold,
+	BorderSizePixel = 0
+})
+InstanceNew("UICorner", {Parent = closeBtn, CornerRadius = UDim.new(0, 4)})
 
-local closeBtn = Instance.new("TextButton", title)
-closeBtn.Size = UDim2.new(0, 30, 0, 30)
-closeBtn.Position = UDim2.new(1, -32, 0, 1)
-closeBtn.BackgroundTransparency = 1
-closeBtn.Text = "X"
-closeBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
-closeBtn.TextSize = 16
-closeBtn.Font = Enum.Font.GothamBold
+local searchBox = InstanceNew("TextBox", {
+	Parent = mainFrame,
+	Size = UDim2.new(1, -20, 0, 32),
+	Position = UDim2.new(0, 10, 0, 42),
+	BackgroundColor3 = Color3.fromRGB(35, 35, 42),
+	TextColor3 = Color3.fromRGB(200, 200, 200),
+ PlaceholderText = "Search commands...",
+ PlaceholderColor3 = Color3.fromRGB(120, 120, 120),
+	Font = Enum.Font.Gotham,
+	TextSize = 14,
+	BorderSizePixel = 0,
+	ClearTextOnFocus = false
+})
+InstanceNew("UICorner", {Parent = searchBox, CornerRadius = UDim.new(0, 6)})
+
+local scrollFrame = InstanceNew("ScrollingFrame", {
+	Parent = mainFrame,
+	Size = UDim2.new(1, -20, 1, -130),
+	Position = UDim2.new(0, 10, 0, 80),
+	BackgroundColor3 = Color3.fromRGB(28, 28, 34),
+	BorderSizePixel = 0,
+	ScrollBarThickness = 6,
+	ScrollBarImageColor3 = Color3.fromRGB(80, 80, 80),
+	CanvasSize = UDim2.new(0, 0, 0, 0),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y
+})
+InstanceNew("UICorner", {Parent = scrollFrame, CornerRadius = UDim.new(0, 6)})
+
+local uiList = InstanceNew("UIListLayout", {
+	Parent = scrollFrame,
+	Padding = UDim.new(0, 2),
+	FillDirection = Enum.FillDirection.Vertical,
+	HorizontalAlignment = Enum.HorizontalAlignment.Center
+})
+InstanceNew("UIPadding", {Parent = scrollFrame, PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4)})
+
+local cmdBarFrame = InstanceNew("Frame", {
+	Parent = gui,
+	Name = "CmdBar",
+	Size = UDim2.new(0, 420, 0, 44),
+	Position = UDim2.new(0.5, -210, 0.5, 270),
+	BackgroundColor3 = Color3.fromRGB(22, 22, 28),
+	BorderSizePixel = 0
+})
+InstanceNew("UICorner", {Parent = cmdBarFrame, CornerRadius = UDim.new(0, 8)})
+
+local cmdBarInput = InstanceNew("TextBox", {
+	Parent = cmdBarFrame,
+	Size = UDim2.new(1, -60, 1, -12),
+	Position = UDim2.new(0, 8, 0, 6),
+	BackgroundColor3 = Color3.fromRGB(35, 35, 42),
+	TextColor3 = Color3.fromRGB(200, 200, 200),
+	PlaceholderText = "Type command here...",
+	PlaceholderColor3 = Color3.fromRGB(120, 120, 120),
+	Font = Enum.Font.Code,
+	TextSize = 13,
+	BorderSizePixel = 0,
+	ClearTextOnFocus = false
+})
+InstanceNew("UICorner", {Parent = cmdBarInput, CornerRadius = UDim.new(0, 6)})
+
+local cmdBarBtn = InstanceNew("TextButton", {
+	Parent = cmdBarFrame,
+	Size = UDim2.new(0, 44, 1, -12),
+	Position = UDim2.new(1, -52, 0, 6),
+	BackgroundColor3 = Color3.fromRGB(0, 120, 215),
+	Text = "Run",
+	TextColor3 = Color3.new(1, 1, 1),
+	TextScaled = true,
+	Font = Enum.Font.GothamBold,
+	BorderSizePixel = 0
+})
+InstanceNew("UICorner", {Parent = cmdBarBtn, CornerRadius = UDim.new(0, 6)})
+
 closeBtn.MouseButton1Click:Connect(function()
-    main.Visible = false
-    cmdBarFrame.Visible = false
+	mainFrame.Visible = false
+	cmdBarFrame.Visible = false
 end)
 
-local search = Instance.new("TextBox", main)
-search.Size = UDim2.new(1, -16, 0, 28)
-search.Position = UDim2.new(0, 8, 0, 38)
-search.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
-search.PlaceholderText = "Search " .. #CmdsList .. " commands..."
-search.PlaceholderColor3 = Color3.fromRGB(100, 100, 100)
-search.TextColor3 = Color3.fromRGB(255, 255, 255)
-search.TextSize = 12
-search.Font = Enum.Font.Gotham
-search.BorderSizePixel = 0
-search.ClearTextOnFocus = false
-InstanceNew("UICorner", search).CornerRadius = UDim.new(0, 6)
-
-local scroll = Instance.new("ScrollingFrame", main)
-scroll.Size = UDim2.new(1, -16, 1, -74)
-scroll.Position = UDim2.new(0, 8, 0, 72)
-scroll.BackgroundTransparency = 1
-scroll.BorderSizePixel = 0
-scroll.ScrollBarThickness = 3
-scroll.ScrollBarImageColor3 = Color3.fromRGB(100, 0, 255)
-scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-Instance.new("UIListLayout", scroll).Padding = UDim.new(0, 2)
-
-local function populate(filterText)
-    for _, child in pairs(scroll:GetChildren()) do
-        if child:IsA("TextButton") or child:IsA("Frame") then child:Destroy() end
-    end
-    local list = CmdsList
-    if filterText and filterText ~= "" then
-        list = {}
-        local fl = filterText:lower()
-        for _, c in pairs(CmdsList) do
-            local match = c.name:lower():find(fl, 1, true)
-            if not match then
-                for _, a in ipairs(c.aliases) do
-                    if a:lower():find(fl, 1, true) then match = true break end
-                end
-            end
-            if match then Insert(list, c) end
-        end
-    end
-    for i, c in ipairs(list) do
-        local btn = Instance.new("TextButton", scroll)
-        btn.Size = UDim2.new(1, 0, 0, 26)
-        btn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-        btn.Text = "  " .. c.name
-        btn.TextColor3 = Color3.fromRGB(220, 220, 220)
-        btn.TextSize = 11
-        btn.Font = Enum.Font.Gotham
-        btn.TextXAlignment = Enum.TextXAlignment.Left
-        btn.BorderSizePixel = 0
-        btn.LayoutOrder = i * 10
-        InstanceNew("UICorner", btn).CornerRadius = UDim.new(0, 4)
-        btn.MouseButton1Click:Connect(function()
-            if c.requiresArgs then
-                for _, child in pairs(scroll:GetChildren()) do
-                    if child.Name == "ArgBox_" .. c.name then child:Destroy() end
-                end
-                local argFrame = Instance.new("Frame", scroll)
-                argFrame.Name = "ArgBox_" .. c.name
-                argFrame.Size = UDim2.new(1, 0, 0, 28)
-                argFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
-                argFrame.BorderSizePixel = 0
-                argFrame.LayoutOrder = i * 10 + 1
-                InstanceNew("UICorner", argFrame).CornerRadius = UDim.new(0, 4)
-                local argInput = Instance.new("TextBox", argFrame)
-                argInput.Size = UDim2.new(1, -56, 0, 22)
-                argInput.Position = UDim2.new(0, 6, 0, 3)
-                argInput.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-                argInput.PlaceholderText = "Enter " .. c.name .. "..."
-                argInput.PlaceholderColor3 = Color3.fromRGB(80, 80, 80)
-                argInput.TextColor3 = Color3.new(1, 1, 1)
-                argInput.TextSize = 11
-                argInput.Font = Enum.Font.Gotham
-                argInput.BorderSizePixel = 0
-                argInput.ClearTextOnFocus = false
-                InstanceNew("UICorner", argInput).CornerRadius = UDim.new(0, 4)
-                local runBtn = Instance.new("TextButton", argFrame)
-                runBtn.Size = UDim2.new(0, 46, 0, 22)
-                runBtn.Position = UDim2.new(1, -52, 0, 3)
-                runBtn.BackgroundColor3 = Color3.fromRGB(100, 0, 255)
-                runBtn.Text = "Run"
-                runBtn.TextColor3 = Color3.new(1, 1, 1)
-                runBtn.TextSize = 11
-                runBtn.Font = Enum.Font.GothamBold
-                runBtn.BorderSizePixel = 0
-                InstanceNew("UICorner", runBtn).CornerRadius = UDim.new(0, 4)
-                runBtn.MouseButton1Click:Connect(function()
-                    local val = argInput.Text
-                    if val and val ~= "" then
-                        cmd.run(c.name .. " " .. val)
-                        argFrame:Destroy()
-                    end
-                end)
-                argInput.FocusLost:Connect(function(enter)
-                    if enter then
-                        local val = argInput.Text
-                        if val and val ~= "" then
-                            cmd.run(c.name .. " " .. val)
-                            argFrame:Destroy()
-                        end
-                    end
-                end)
-                argInput:CaptureFocus()
-            else
-                cmd.run(c.name)
-            end
-        end)
-        btn.MouseEnter:Connect(function()
-            btn.BackgroundColor3 = Color3.fromRGB(80, 0, 200)
-        end)
-        btn.MouseLeave:Connect(function()
-            btn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-        end)
-    end
+local function createCmdButton(name, desc)
+	local btn = InstanceNew("TextButton", {
+		Parent = scrollFrame,
+		Size = UDim2.new(1, -8, 0, 28),
+		BackgroundColor3 = Color3.fromRGB(35, 35, 42),
+		TextColor3 = Color3.fromRGB(200, 200, 200),
+		Text = "  " .. name .. " - " .. desc,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BorderSizePixel = 0,
+		AutoButtonColor = true
+	})
+	InstanceNew("UICorner", {Parent = btn, CornerRadius = UDim.new(0, 4)})
+	btn.MouseButton1Click:Connect(function()
+		cmd.run(name)
+	end)
+	btn.MouseEnter:Connect(function()
+		btn.BackgroundColor3 = Color3.fromRGB(55, 55, 65)
+	end)
+	btn.MouseLeave:Connect(function()
+		btn.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+	end)
+	return btn
 end
 
-populate("")
-search:GetPropertyChangedSignal("Text"):Connect(function()
-    populate(search.Text)
+local cmdButtons = {}
+local sortedNames = {}
+for name in pairs(CmdsList) do
+	table.insert(sortedNames, name)
+end
+table.sort(sortedNames)
+
+for _, name in ipairs(sortedNames) do
+	local btn = createCmdButton(name, CmdsList[name])
+	cmdButtons[name] = btn
+end
+
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+	local query = Lower(searchBox.Text)
+	for name, btn in pairs(cmdButtons) do
+		if query == "" or name:find(query) or Lower(CmdsList[name]):find(query) then
+			btn.Visible = true
+		else
+			btn.Visible = false
+		end
+	end
 end)
 
-cmdBarFrame.Name = "CmdBar"
-cmdBarFrame.Size = UDim2.new(0, 380, 0, 36)
-cmdBarFrame.Position = UDim2.new(0.5, -190, 1, -50)
-cmdBarFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
-cmdBarFrame.BorderSizePixel = 0
-cmdBarFrame.Active = true
-cmdBarFrame.Draggable = true
-InstanceNew("UICorner", cmdBarFrame).CornerRadius = UDim.new(0, 8)
-InstanceNew("UIStroke", cmdBarFrame).Color = Color3.fromRGB(100, 0, 255)
-
-local cmdInput = Instance.new("TextBox", cmdBarFrame)
-cmdInput.Size = UDim2.new(1, -16, 1, -8)
-cmdInput.Position = UDim2.new(0, 8, 0, 4)
-cmdInput.BackgroundTransparency = 1
-cmdInput.PlaceholderText = "Type command..."
-cmdInput.PlaceholderColor3 = Color3.fromRGB(100, 100, 100)
-cmdInput.TextColor3 = Color3.fromRGB(255, 255, 255)
-cmdInput.TextSize = 13
-cmdInput.Font = Enum.Font.Gotham
-cmdInput.ClearTextOnFocus = false
-
-cmdInput.FocusLost:Connect(function(enter)
-    if enter then
-        local text = cmdInput.Text
-        if text and text ~= "" then
-            cmd.run(text)
-            cmdInput.Text = ""
-        end
-    end
+cmdBarBtn.MouseButton1Click:Connect(function()
+	local input = cmdBarInput.Text
+	if input ~= "" then
+		cmd.run(input)
+		cmdBarInput.Text = ""
+	end
 end)
 
-UIS.InputBegan:Connect(function(input, gp)
-    if gp then return end
-    if input.KeyCode == Enum.KeyCode.RightControl then
-        main.Visible = not main.Visible
-        cmdBarFrame.Visible = main.Visible
-    end
+cmdBarInput.FocusLost:Connect(function(enterPressed)
+	if enterPressed then
+		local input = cmdBarInput.Text
+		if input ~= "" then
+			cmd.run(input)
+			cmdBarInput.Text = ""
+		end
+	end
 end)
 
-DoNotif("Loaded! " .. #CmdsList .. " cmds | RCtrl toggle")
+UIS.InputBegan:Connect(function(input, processed)
+	if processed then return end
+	if input.KeyCode == Enum.KeyCode.RightControl then
+		gui.Enabled = not gui.Enabled
+		cmdBarFrame.Visible = gui.Enabled
+	end
+end)
+
+DoNotif("Custom Commands Panel loaded! RightControl to toggle")
 
 end)

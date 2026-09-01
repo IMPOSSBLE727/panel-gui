@@ -1570,6 +1570,7 @@ cmd.addArg("boobs", "Boobs <size 1-8>", function(val)
 		weld.Part0 = torso
 		weld.Part1 = boob
 		weld.Parent = boob
+		boob.Anchored = false
 		table.insert(parts, boob)
 		local nipple = makeModPart(Enum.PartType.Ball, nippleSize, pinkColor, "Nipple", char)
 		nipple.CFrame = boob.CFrame * CFrame.new(0, 0, -(boobSize.Z * 0.5 + 0.035))
@@ -1577,6 +1578,7 @@ cmd.addArg("boobs", "Boobs <size 1-8>", function(val)
 		nw.Part0 = boob
 		nw.Part1 = nipple
 		nw.Parent = nipple
+		nipple.Anchored = false
 		table.insert(parts, nipple)
 		local areola = Instance.new("SurfaceGui")
 		areola.Name = "Areola"
@@ -1646,6 +1648,7 @@ cmd.addArg("ass", "Ass <size 1-8>", function(val)
 		weld.Part0 = torso
 		weld.Part1 = cheek
 		weld.Parent = cheek
+		cheek.Anchored = false
 	end
 	DoNotif("Ass " .. size)
 end, true)
@@ -1682,12 +1685,14 @@ cmd.addArg("penis", "Penis <length 0.5-6>", function(val)
 	lw1.Part0 = torso
 	lw1.Part1 = leftBall
 	lw1.Parent = leftBall
+	leftBall.Anchored = false
 	local rightBall = makeModPart(Enum.PartType.Ball, Vector3.new(ballRadius * 2, ballRadius * 2.08, ballRadius * 1.98), skin, "Balls", char)
 	rightBall.CFrame = torso.CFrame * CFrame.new(scrotumSpread, offsetY, -0.74 - shaftRadius * 0.46)
 	local lw2 = Instance.new("WeldConstraint")
 	lw2.Part0 = torso
 	lw2.Part1 = rightBall
 	lw2.Parent = rightBall
+	rightBall.Anchored = false
 	local shaft = makeModPart(Enum.PartType.Cylinder, Vector3.new(shaftLength, shaftRadius * 2, shaftRadius * 2), skin, "penis", char)
 	local shaftCF = torso.CFrame * CFrame.new(0, offsetY + shaftBaseOffset, shaftBaseZ) * CFrame.Angles(0, math.rad(270), 0) * CFrame.new(-shaftForwardBias, 0, 0)
 	shaft.CFrame = shaftCF
@@ -1695,12 +1700,14 @@ cmd.addArg("penis", "Penis <length 0.5-6>", function(val)
 	sw.Part0 = torso
 	sw.Part1 = shaft
 	sw.Parent = shaft
+	shaft.Anchored = false
 	local tip = makeModPart(Enum.PartType.Ball, Vector3.new(tipRadius * 2.15, tipRadius * 2.05, tipRadius * 2.05), pinkColor, "penis", char)
 	tip.CFrame = shaft.CFrame * CFrame.new(-shaftLength * 0.5, 0, 0)
 	local tw = Instance.new("WeldConstraint")
 	tw.Part0 = shaft
 	tw.Part1 = tip
 	tw.Parent = tip
+	tip.Anchored = false
 	DoNotif("Penis " .. value)
 end, true)
 cmd.add("unpenis", "Penis off", function()

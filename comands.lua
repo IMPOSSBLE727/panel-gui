@@ -3481,6 +3481,7 @@ local function createUI()
 	title.BorderSizePixel = 0
 	title.Active = true
 	title.Parent = mainFrame
+	makeCorner(UDim.new(0, CORNER)).Parent = title
 
 	local titleText = Instance.new("TextLabel")
 	titleText.Size = UDim2.new(1, -75, 1, 0)

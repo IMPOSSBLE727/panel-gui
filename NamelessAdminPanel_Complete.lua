@@ -984,7 +984,9 @@ local function addESP(player, color)
 	if not head then return end
 	if espList[player] then pcall(function() espList[player]:Destroy() end) end
 	local bb = InstanceNew("BillboardGui", {Adornee = head, Size = UDim2.new(0, 200, 0, 50), StudsOffset = Vector3.new(0, 2, 0), AlwaysOnTop = true, Parent = head})
-	local label = InstanceNew("TextLabel", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, TextColor3 = color or Color3.fromRGB(255, 0, 0), TextStrokeTransparency = 0, Text = player.Name .. " [" .. math.floor((head.Position - getRoot().Position).Magnitude) .. "m]", Font = Enum.Font.GothamBold, TextScaled = true, Parent = bb})
+	local root = getRoot()
+	local distStr = root and math.floor((head.Position - root.Position).Magnitude) .. "m" or "?m"
+	local label = InstanceNew("TextLabel", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, TextColor3 = color or Color3.fromRGB(255, 0, 0), TextStrokeTransparency = 0, Text = player.Name .. " [" .. distStr .. "]", Font = Enum.Font.GothamBold, TextScaled = true, Parent = bb})
 	espList[player] = bb
 end
 local function removeESP(player)
@@ -1045,14 +1047,17 @@ cmd.add("esplocator", "Track ESP with distance/direction", function()
 	if loops.esplocator then return DoNotif("Already enabled") end
 	local screenGui = InstanceNew("ScreenGui", {Parent = CG})
 	loops.esplocator = screenGui
-	RunService.Heartbeat:Connect(function()
+	loops.esplocatorConn = RunService.Heartbeat:Connect(function()
+		if not screenGui or not screenGui.Parent then return end
 		screenGui:ClearAllChildren()
+		local root = getRoot()
+		if not root then return end
 		for _, p in pairs(Players:GetPlayers()) do
 			if p ~= Plr and p.Character and p.Character:FindFirstChild("Head") then
 				local head = p.Character:FindFirstChild("Head")
 				local pos, onScreen = Camera:WorldToScreenPoint(head.Position)
 				if onScreen then
-					local label = InstanceNew("TextLabel", {Position = UDim2.new(0, pos.X, 0, pos.Y), Size = UDim2.new(0, 150, 0, 20), BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(255, 255, 0), TextStrokeTransparency = 0, Text = p.Name .. " " .. math.floor((head.Position - getRoot().Position).Magnitude) .. "m", Font = Enum.Font.GothamBold, TextSize = 14, Parent = screenGui})
+					local label = InstanceNew("TextLabel", {Position = UDim2.new(0, pos.X, 0, pos.Y), Size = UDim2.new(0, 150, 0, 20), BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(255, 255, 0), TextStrokeTransparency = 0, Text = p.Name .. " " .. math.floor((head.Position - root.Position).Magnitude) .. "m", Font = Enum.Font.GothamBold, TextSize = 14, Parent = screenGui})
 				end
 			end
 		end
@@ -1060,6 +1065,7 @@ cmd.add("esplocator", "Track ESP with distance/direction", function()
 	DoNotif("ESP locator enabled")
 end)
 cmd.add("unesplocator", "Disables ESP locator", function()
+	if loops.esplocatorConn then loops.esplocatorConn:Disconnect() loops.esplocatorConn = nil end
 	if loops.esplocator then pcall(function() loops.esplocator:Destroy() end) loops.esplocator = nil end
 	DoNotif("ESP locator disabled")
 end)
@@ -2072,8 +2078,14 @@ cmd.addArg("watch", "Spectate player [playername]", function(name)
 	local target = getPlr(name)
 	if not target then return DoNotif("Player not found") end
 	local char = target.Character
-	if char then Camera.CameraSubject = getHum(char) end
-	loops.watch = target.CharacterAdded:Connect(function(c) Camera.CameraSubject = getHum(c) end)
+	if char then
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum then Camera.CameraSubject = hum end
+	end
+	loops.watch = target.CharacterAdded:Connect(function(c)
+		local hum = c:FindFirstChildOfClass("Humanoid")
+		if hum then Camera.CameraSubject = hum end
+	end)
 	DoNotif("Watching: " .. target.Name)
 end)
 cmd.add("unwatch", "Stop spectating", function()
@@ -2134,7 +2146,10 @@ cmd.addArg("watch2", "Spectate player alt [playername]", function(name)
 	local target = getPlr(name)
 	if not target then return DoNotif("Player not found") end
 	local char = target.Character
-	if char then Camera.CameraSubject = getHum(char) end
+	if char then
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum then Camera.CameraSubject = hum end
+	end
 	DoNotif("Watching (alt): " .. target.Name)
 end)
 cmd.add("unwatch2", "Stop spectating alt", function()
@@ -2237,7 +2252,7 @@ cmd.add("unloopnofog", "No more sight", function()
 	ClearLoop("loopnf")
 end)
 cmd.add("removeterrain", "Clears terrain", function()
-	Workspace:ClearForPhysics()
+	Workspace.Terrain:Clear()
 end)
 cmd.add("oldroblox", "Old skybox and studs", function()
 	local sky = InstanceNew("Sky", {Parent = Lighting})
@@ -2850,10 +2865,9 @@ cmd.add("autoclicker", "Provides an autoclicker GUI", function()
 		while true do
 			Wait(0.1)
 			pcall(function()
-				local mouse = Plr:GetMouse()
-				mouse.Button1Down = true
+				if mouse1press then mouse1press() end
 				Wait(0.05)
-				mouse.Button1Up = true
+				if mouse1release then mouse1release() end
 			end)
 		end
 	end)
@@ -3044,7 +3058,7 @@ cmd.add("memory", "Shows your current memory usage", function()
 end)
 cmd.addArg("chat", "Chats for you [message]", function(msg)
 	pcall(function()
-		LocalPlayer:Chat(msg)
+		Plr:Chat(msg)
 	end)
 end)
 cmd.add("console", "Opens developer console", function()
@@ -3323,7 +3337,7 @@ cmd.add("nocooldown", "No cooldown on tools", function()
 		if char then
 			for _, tool in pairs(char:GetChildren()) do
 				if tool:IsA("Tool") then
-					pcall(function() tool:GetAttribute("Cooldown", 0) end)
+					pcall(function() tool:SetAttribute("Cooldown", 0) end)
 				end
 			end
 		end
@@ -3340,7 +3354,7 @@ cmd.add("spam", "Spams chat [message]", function(msg)
 	loops.spam = Spawn(function()
 		while true do
 			Wait(0.5)
-			pcall(function() LocalPlayer:Chat(msg or "lol") end)
+			pcall(function() Plr:Chat(msg or "lol") end)
 		end
 	end)
 end)
@@ -3395,98 +3409,169 @@ cmd.add("exit", "Close down Roblox", function()
 	pcall(function() game:Shutdown() end)
 end)
 
--- ===================== UI CODE =====================
+-- ===================== UI CODE (GHOSTS STYLE) =====================
 local function createUI()
 	local existing = CG:FindFirstChild("CustomCommandsUI") or Plr.PlayerGui:FindFirstChild("CustomCommandsUI")
 	if existing then existing:Destroy() end
 
-	local sg = InstanceNew("ScreenGui", {Name = "CustomCommandsUI", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling})
+	local BG = Color3.fromRGB(200, 220, 255)
+	local BG_T = 0.65
+	local W = Color3.new(1, 1, 1)
+	local CORNER = 18
+	local BTN_CORNER = 8
+
+	local function makeCorner(r)
+		local c = Instance.new("UICorner")
+		c.CornerRadius = r or UDim.new(0, BTN_CORNER)
+		return c
+	end
+
+	local function makeStroke(p, tr)
+		local s = Instance.new("UIStroke")
+		s.Color = W
+		s.Thickness = 1.2
+		s.Transparency = tr or 0.3
+		s.Parent = p
+		local g = Instance.new("UIGradient")
+		g.Rotation = -22
+		g.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(0.466, 0),
+			NumberSequenceKeypoint.new(0.947, 0.906),
+			NumberSequenceKeypoint.new(1, 1),
+		})
+		g.Parent = s
+		return s
+	end
+
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "CustomCommandsUI"
+	sg.ResetOnSpawn = false
+	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	pcall(function() sg.Parent = CG end)
 	if not sg.Parent then sg.Parent = Plr.PlayerGui end
 
-	local mainFrame = InstanceNew("Frame", {
-		Position = UDim2.new(0.35, 0, 0.25, 0),
-		Size = UDim2.new(0.3, 0, 0.5, 0),
-		BackgroundColor3 = Color3.fromRGB(25, 25, 30),
-		BorderSizePixel = 0,
-		Parent = sg
-	})
-	InstanceNew("UICorner", {CornerRadius = UDim.new(0, 8), Parent = mainFrame})
+	local mainFrame = Instance.new("Frame")
+	mainFrame.Position = UDim2.new(0.3, 0, 0.2, 0)
+	mainFrame.Size = UDim2.new(0, 380, 0, 500)
+	mainFrame.BackgroundColor3 = BG
+	mainFrame.BackgroundTransparency = BG_T
+	mainFrame.BorderSizePixel = 0
+	mainFrame.Active = true
+	mainFrame.Parent = sg
+	makeCorner(UDim.new(0, CORNER)).Parent = mainFrame
+	makeStroke(mainFrame)
 
-	local title = InstanceNew("TextLabel", {
-		Size = UDim2.new(1, 0, 0, 40),
-		BackgroundColor3 = Color3.fromRGB(35, 35, 45),
-		Text = "Custom Commands Panel",
-		TextColor3 = Color3.fromRGB(255, 255, 255),
-		Font = Enum.Font.GothamBold,
-		TextSize = 16,
-		Parent = mainFrame
-	})
-	InstanceNew("UICorner", {CornerRadius = UDim.new(0, 8), Parent = title})
+	local glass = Instance.new("ImageLabel")
+	glass.Size = UDim2.new(1, 0, 1, 0)
+	glass.BackgroundTransparency = 1
+	glass.Image = "rbxassetid://10849683935"
+	glass.ImageColor3 = BG
+	glass.ImageTransparency = 0.3
+	glass.ZIndex = 0
+	glass.Parent = mainFrame
+	makeCorner(UDim.new(0, CORNER)).Parent = glass
 
-	local closeBtn = InstanceNew("TextButton", {
-		Position = UDim2.new(1, -30, 0, 5),
-		Size = UDim2.new(0, 25, 0, 25),
-		BackgroundColor3 = Color3.fromRGB(200, 50, 50),
-		Text = "X",
-		TextColor3 = Color3.fromRGB(255, 255, 255),
-		Font = Enum.Font.GothamBold,
-		TextSize = 14,
-		Parent = title
-	})
-	InstanceNew("UICorner", {CornerRadius = UDim.new(0, 4), Parent = closeBtn})
+	-- TITLE BAR
+	local title = Instance.new("Frame")
+	title.Size = UDim2.new(1, 0, 0, 32)
+	title.BackgroundColor3 = BG
+	title.BackgroundTransparency = BG_T
+	title.BorderSizePixel = 0
+	title.Active = true
+	title.Parent = mainFrame
+
+	local titleText = Instance.new("TextLabel")
+	titleText.Size = UDim2.new(1, -75, 1, 0)
+	titleText.Position = UDim2.new(0, 14, 0, 0)
+	titleText.BackgroundTransparency = 1
+	titleText.Text = "Ghosts \226\128\142 Commands"
+	titleText.TextColor3 = W
+	titleText.Font = Enum.Font.GothamBold
+	titleText.TextSize = 14
+	titleText.TextXAlignment = Enum.TextXAlignment.Left
+	titleText.Parent = title
+
+	local closeBtn = Instance.new("TextButton")
+	closeBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+	closeBtn.Size = UDim2.new(0, 24, 0, 24)
+	closeBtn.Position = UDim2.new(1, -20, 0.5, 0)
+	closeBtn.BackgroundColor3 = W
+	closeBtn.BackgroundTransparency = 1
+	closeBtn.Text = ""
+	closeBtn.AutoButtonColor = false
+	closeBtn.Parent = title
+	makeCorner(UDim.new(1, 0)).Parent = closeBtn
+	makeStroke(closeBtn, 0.5)
+
+	local closeIcon = Instance.new("TextLabel")
+	closeIcon.Size = UDim2.new(1, 0, 1, 0)
+	closeIcon.BackgroundTransparency = 1
+	closeIcon.Text = "X"
+	closeIcon.TextColor3 = W
+	closeIcon.Font = Enum.Font.GothamBold
+	closeIcon.TextSize = 11
+	closeIcon.Parent = closeBtn
+
 	closeBtn.MouseButton1Click:Connect(function() sg.Enabled = false end)
 
-	local searchBox = InstanceNew("TextBox", {
-		Position = UDim2.new(0, 5, 0, 45),
-		Size = UDim2.new(1, -10, 0, 25),
-		BackgroundColor3 = Color3.fromRGB(40, 40, 50),
-		TextColor3 = Color3.fromRGB(255, 255, 255),
-		PlaceholderText = "Search commands...",
-		PlaceholderColor3 = Color3.fromRGB(150, 150, 150),
-		Font = Enum.Font.Gotham,
-		TextSize = 12,
-		ClearTextOnFocus = false,
-		Parent = mainFrame
-	})
-	InstanceNew("UICorner", {CornerRadius = UDim.new(0, 4), Parent = searchBox})
+	-- SEARCH BOX
+	local searchBox = Instance.new("TextBox")
+	searchBox.Position = UDim2.new(0, 10, 0, 40)
+	searchBox.Size = UDim2.new(1, -20, 0, 28)
+	searchBox.BackgroundColor3 = Color3.fromRGB(160, 180, 210)
+	searchBox.BackgroundTransparency = 0.6
+	searchBox.TextColor3 = W
+	searchBox.PlaceholderText = "Search commands..."
+	searchBox.PlaceholderColor3 = Color3.fromRGB(180, 200, 220)
+	searchBox.Font = Enum.Font.Gotham
+	searchBox.TextSize = 12
+	searchBox.ClearTextOnFocus = false
+	searchBox.BorderSizePixel = 0
+	searchBox.Parent = mainFrame
+	makeCorner(UDim.new(0, 8)).Parent = searchBox
 
-	local scrollFrame = InstanceNew("ScrollingFrame", {
-		Position = UDim2.new(0, 5, 0, 75),
-		Size = UDim2.new(1, -10, 1, -110),
-		BackgroundTransparency = 1,
-		ScrollBarThickness = 6,
-		ScrollBarImageColor3 = Color3.fromRGB(100, 100, 100),
-		CanvasSize = UDim2.new(0, 0, 0, 0),
-		Parent = mainFrame
-	})
-	InstanceNew("UIListLayout", {Padding = UDim.new(0, 2), Parent = scrollFrame})
+	-- SCROLL FRAME
+	local scrollFrame = Instance.new("ScrollingFrame")
+	scrollFrame.Position = UDim2.new(0, 10, 0, 76)
+	scrollFrame.Size = UDim2.new(1, -20, 1, -150)
+	scrollFrame.BackgroundTransparency = 1
+	scrollFrame.ScrollBarThickness = 4
+	scrollFrame.ScrollBarImageColor3 = Color3.fromRGB(180, 220, 255)
+	scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+	scrollFrame.BorderSizePixel = 0
+	scrollFrame.Parent = mainFrame
+	Instance.new("UIListLayout", scrollFrame).Padding = UDim.new(0, 3)
 
-	local inputBox = InstanceNew("TextBox", {
-		Position = UDim2.new(0, 5, 1, -30),
-		Size = UDim2.new(1, -10, 0, 25),
-		BackgroundColor3 = Color3.fromRGB(40, 40, 50),
-		TextColor3 = Color3.fromRGB(255, 255, 255),
-		PlaceholderText = "Type command...",
-		PlaceholderColor3 = Color3.fromRGB(150, 150, 150),
-		Font = Enum.Font.Gotham,
-		TextSize = 12,
-		ClearTextOnFocus = false,
-		Parent = mainFrame
-	})
-	InstanceNew("UICorner", {CornerRadius = UDim.new(0, 4), Parent = inputBox})
+	-- INPUT BOX
+	local inputBox = Instance.new("TextBox")
+	inputBox.Position = UDim2.new(0, 10, 1, -62)
+	inputBox.Size = UDim2.new(1, -80, 0, 28)
+	inputBox.BackgroundColor3 = Color3.fromRGB(160, 180, 210)
+	inputBox.BackgroundTransparency = 0.6
+	inputBox.TextColor3 = W
+	inputBox.PlaceholderText = "Type command..."
+	inputBox.PlaceholderColor3 = Color3.fromRGB(180, 200, 220)
+	inputBox.Font = Enum.Font.Gotham
+	inputBox.TextSize = 12
+	inputBox.ClearTextOnFocus = false
+	inputBox.BorderSizePixel = 0
+	inputBox.Parent = mainFrame
+	makeCorner(UDim.new(0, 8)).Parent = inputBox
 
-	local execBtn = InstanceNew("TextButton", {
-		Position = UDim2.new(1, -60, 1, -30),
-		Size = UDim2.new(0, 55, 0, 25),
-		BackgroundColor3 = Color3.fromRGB(50, 150, 50),
-		Text = "Exec",
-		TextColor3 = Color3.fromRGB(255, 255, 255),
-		Font = Enum.Font.GothamBold,
-		TextSize = 12,
-		Parent = mainFrame
-	})
-	InstanceNew("UICorner", {CornerRadius = UDim.new(0, 4), Parent = execBtn})
+	-- EXEC BUTTON
+	local execBtn = Instance.new("TextButton")
+	execBtn.Size = UDim2.new(0, 55, 0, 28)
+	execBtn.Position = UDim2.new(1, -65, 1, -62)
+	execBtn.BackgroundColor3 = Color3.fromRGB(100, 200, 150)
+	execBtn.BackgroundTransparency = 0.5
+	execBtn.Text = "Exec"
+	execBtn.TextColor3 = W
+	execBtn.Font = Enum.Font.GothamBold
+	execBtn.TextSize = 12
+	execBtn.BorderSizePixel = 0
+	execBtn.Parent = mainFrame
+	makeCorner(UDim.new(0, 8)).Parent = execBtn
 
 	local function buildList(filter)
 		for _, child in pairs(scrollFrame:GetChildren()) do
@@ -3495,27 +3580,28 @@ local function createUI()
 		local count = 0
 		for name, desc in pairs(CmdsList) do
 			if not filter or Lower(name):find(Lower(filter)) or Lower(desc):find(Lower(filter)) then
-				local btn = InstanceNew("TextButton", {
-					Size = UDim2.new(1, -5, 0, 22),
-					BackgroundColor3 = Color3.fromRGB(35, 35, 45),
-					Text = "  " .. name .. " - " .. desc,
-					TextColor3 = Color3.fromRGB(200, 200, 200),
-					TextXAlignment = Enum.TextXAlignment.Left,
-					Font = Enum.Font.Gotham,
-					TextSize = 11,
-					Parent = scrollFrame
-				})
-				InstanceNew("UICorner", {CornerRadius = UDim.new(0, 3), Parent = btn})
+				local btn = Instance.new("TextButton")
+				btn.Size = UDim2.new(1, -5, 0, 24)
+				btn.BackgroundColor3 = Color3.fromRGB(160, 180, 210)
+				btn.BackgroundTransparency = 0.7
+				btn.Text = "  " .. name .. " - " .. desc
+				btn.TextColor3 = W
+				btn.TextXAlignment = Enum.TextXAlignment.Left
+				btn.Font = Enum.Font.Gotham
+				btn.TextSize = 11
+				btn.BorderSizePixel = 0
+				btn.Parent = scrollFrame
+				makeCorner(UDim.new(0, 6)).Parent = btn
 				btn.MouseButton1Click:Connect(function()
 					inputBox.Text = name
 					pcall(function() cmd.run(name) end)
 				end)
-				btn.MouseEnter:Connect(function() btn.BackgroundColor3 = Color3.fromRGB(60, 60, 80) end)
-				btn.MouseLeave:Connect(function() btn.BackgroundColor3 = Color3.fromRGB(35, 35, 45) end)
+				btn.MouseEnter:Connect(function() btn.BackgroundTransparency = 0.5 end)
+				btn.MouseLeave:Connect(function() btn.BackgroundTransparency = 0.7 end)
 				count = count + 1
 			end
 		end
-		scrollFrame.CanvasSize = UDim2.new(0, 0, 0, count * 24)
+		scrollFrame.CanvasSize = UDim2.new(0, 0, 0, count * 27)
 	end
 
 	buildList()
@@ -3531,22 +3617,23 @@ local function createUI()
 		if enterPressed and inputBox.Text ~= "" then cmd.run(inputBox.Text) end
 	end)
 
+	-- DRAG
 	local dragging, dragStart, startPos
 	title.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
 			dragStart = input.Position
 			startPos = mainFrame.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then dragging = false end
+			end)
 		end
 	end)
 	UIS.InputChanged:Connect(function(input)
-		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 			local delta = input.Position - dragStart
 			mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 		end
-	end)
-	UIS.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
 	end)
 
 	return sg
@@ -3562,5 +3649,5 @@ UIS.InputBegan:Connect(function(input, processed)
 	end
 end)
 
-DoNotif("Custom Commands Panel loaded! Press RightShift to toggle UI.")
+DoNotif("Ghosts Commands loaded! Press RightShift to toggle UI.")
 end)

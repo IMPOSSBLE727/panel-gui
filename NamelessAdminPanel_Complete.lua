@@ -774,18 +774,6 @@ cmd.add("unwalkfling", "Stop the walkfling", function()
 	ClearLoop("walkfling")
 	DoNotif("Walkfling disabled")
 end)
-cmd.add("noclip", "Disable your player's collision", function()
-	if loops.noclip then return DoNotif("Already enabled") end
-	loops.noclip = RunService.PreSimulation:Connect(function()
-		local char = Plr.Character
-		if char then
-			for _, part in pairs(char:GetDescendants()) do
-				if part:IsA("BasePart") then part.CanCollide = false end
-			end
-		end
-	end)
-	DoNotif("Noclip enabled")
-end)
 cmd.add("airwalk", "Press space to go up", function()
 	if loops.airwalk then return DoNotif("Already enabled") end
 	loops.airwalk = UIS.JumpRequest:Connect(function()
@@ -1506,85 +1494,218 @@ cmd.add("naked", "No clothing gang", function()
 	DoNotif("Naked")
 end)
 
-local function makeBodyPart(parent, name, size, offset, meshType)
+local pinkColor = Color3.fromRGB(255, 100, 150)
+local ringColor = Color3.fromRGB(225, 80, 120)
+local bodyModConn = nil
+
+local function getSkinColor()
+	local char = Plr.Character
+	if not char then return Color3.new(1, 0.8, 0.6) end
+	local part = char:FindFirstChild("LeftUpperArm") or char:FindFirstChild("Left Arm") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+	return (part and part.Color) or Color3.new(1, 0.8, 0.6)
+end
+
+local function makeModPart(shape, size, color, name, parent)
 	local part = InstanceNew("Part")
-	part.Name = name
-	part.Size = size or Vector3.new(1, 1, 1)
-	part.CFrame = parent.CFrame * CFrame.new(offset or Vector3.new(0, 0, 0))
-	part.Anchored = false
-	part.CanCollide = false
+	part.Shape = shape
+	part.Size = size
+	part.Color = color
 	part.Material = Enum.Material.SmoothPlastic
-	part.Color = Color3.fromRGB(245, 205, 178)
-	part.Parent = Plr.Character
-	local weld = InstanceNew("WeldConstraint")
-	weld.Part0 = parent
-	weld.Part1 = part
-	weld.Parent = part
-	local mesh = InstanceNew("SpecialMesh")
-	mesh.MeshType = meshType or Enum.MeshType.Sphere
-	mesh.Scale = Vector3.new(1, 1, 1)
-	mesh.Parent = part
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.Massless = true
+	part.Name = name
+	part.Parent = parent
 	return part
 end
 
-cmd.add("boobs", "Boobs", function()
+local function cleanBodyMods(tags)
 	local char = Plr.Character
-	if not char then return DoNotif("No character") end
-	if char:FindFirstChild("BoobL") then return DoNotif("Already has boobs") end
-	local torso = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
-	if not torso then return DoNotif("No torso found") end
-	makeBodyPart(torso, "BoobL", Vector3.new(0.5, 0.5, 0.5), Vector3.new(-0.35, -0.15, -0.6))
-	makeBodyPart(torso, "BoobR", Vector3.new(0.5, 0.5, 0.5), Vector3.new(0.35, -0.15, -0.6))
-	DoNotif("Boobs added")
-end)
-cmd.add("unboobs", "Boobs off", function()
-	local char = Plr.Character
-	if char then
-		for _, v in pairs(char:GetChildren()) do
-			if v.Name == "BoobL" or v.Name == "BoobR" then v:Destroy() end
+	if not char then return end
+	for _, v in pairs(char:GetDescendants()) do
+		if v:IsA("BasePart") then
+			for tag in pairs(tags) do
+				if v.Name == tag then pcall(function() v:Destroy() end) end
+			end
+		end
+		if v:IsA("SurfaceGui") or v:IsA("Frame") then
+			for tag in pairs(tags) do
+				if v.Name == tag or (v.Parent and v.Parent.Name == tag) then pcall(function() v:Destroy() end) end
+			end
 		end
 	end
+end
+
+local function bodyModLoop(kind, fn)
+	if bodyModConn then bodyModConn:Disconnect() bodyModConn = nil end
+	bodyModConn = RunService.RenderStepped:Connect(fn)
+end
+
+local function stopBodyModLoop()
+	if bodyModConn then bodyModConn:Disconnect() bodyModConn = nil end
+end
+
+cmd.addArg("boobs", "Boobs <size 1-8>", function(val)
+	local char = Plr.Character
+	if not char then return DoNotif("No character") end
+	local torso = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+	if not torso then return DoNotif("No torso") end
+	cleanBodyMods({Boob = true, Nipple = true})
+	local size = math.clamp(tonumber(val) or 1, 1, 8)
+	local skin = getSkinColor()
+	local sizeScale = math.clamp(size / 4, 0.3, 2)
+	local baseSize = Vector3.new(1.72, 1.54, 1.42)
+	local boobSize = Vector3.new(baseSize.X * size * (1.08 + sizeScale * 0.13), baseSize.Y * size * (1.05 + sizeScale * 0.11), baseSize.Z * size * (1.04 + sizeScale * 0.15))
+	local nippleSize = Vector3.new(0.19 * size * (1.05 + sizeScale * 0.10), 0.19 * size * (1.05 + sizeScale * 0.10), 0.19 * size * (0.98 + sizeScale * 0.09))
+	local ox = math.clamp(torso.Size.X * 0.24 + boobSize.X * 0.145, 0.46, math.max(0.72, torso.Size.X * 0.56))
+	local oy = torso.Size.Y * 0.14 + boobSize.Y * 0.055
+	local oz = -(torso.Size.Z * 0.5 + math.max(0.14, (boobSize.Z * 0.5) * 0.66) - 0.025)
+	local parts = {}
+	for _, side in ipairs({-1, 1}) do
+		local boob = makeModPart(Enum.PartType.Ball, boobSize, skin, "Boob", char)
+		boob.CFrame = torso.CFrame * CFrame.new(side * ox, oy, oz)
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = torso
+		weld.Part1 = boob
+		weld.Parent = boob
+		table.insert(parts, boob)
+		local nipple = makeModPart(Enum.PartType.Ball, nippleSize, pinkColor, "Nipple", char)
+		nipple.CFrame = boob.CFrame * CFrame.new(0, 0, -(boobSize.Z * 0.5 + 0.035))
+		local nw = Instance.new("WeldConstraint")
+		nw.Part0 = boob
+		nw.Part1 = nipple
+		nw.Parent = nipple
+		table.insert(parts, nipple)
+		local areola = Instance.new("SurfaceGui")
+		areola.Name = "Areola"
+		areola.Face = Enum.NormalId.Front
+		areola.AlwaysOnTop = false
+		areola.LightInfluence = 1
+		areola.Parent = boob
+		local disk = Instance.new("Frame")
+		disk.Name = "Disk"
+		disk.AnchorPoint = Vector2.new(0.5, 0.5)
+		disk.Position = UDim2.fromScale(0.5, 0.5)
+		disk.Size = UDim2.fromScale(0.35, 0.35)
+		disk.BackgroundColor3 = ringColor
+		disk.BorderSizePixel = 0
+		disk.Parent = areola
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0.5, 0)
+		corner.Parent = disk
+	end
+	bodyModLoop("boobs", function()
+		local c = Plr.Character
+		if not c or not c.Parent then return end
+		for _, p in pairs(c:GetDescendants()) do
+			if p:IsA("BasePart") and (p.Name == "Boob" or p.Name == "Nipple") then
+				if p.Name == "Boob" or p.Name == "Nipple" then
+					p.Color = p.Name == "Nipple" and pinkColor or getSkinColor()
+				end
+			end
+		end
+	end)
+	DoNotif("Boobs " .. size)
+end, true)
+cmd.add("unboobs", "Boobs off", function()
+	stopBodyModLoop()
+	cleanBodyMods({Boob = true, Nipple = true})
 	DoNotif("Boobs removed")
 end)
 
-cmd.add("penis", "Penis", function()
+cmd.addArg("ass", "Ass <size 1-8>", function(val)
 	local char = Plr.Character
 	if not char then return DoNotif("No character") end
-	if char:FindFirstChild("Penis") then return DoNotif("Already has penis") end
-	local torso = char:FindFirstChild("LowerTorso") or char:FindFirstChild("Torso")
-	if not torso then return DoNotif("No torso found") end
-	local base = makeBodyPart(torso, "Penis", Vector3.new(0.2, 0.6, 0.2), Vector3.new(0, -0.5, -0.5))
-	local tip = makeBodyPart(torso, "PenisTip", Vector3.new(0.25, 0.25, 0.25), Vector3.new(0, -0.8, -0.5))
-	DoNotif("Penis added")
-end)
-cmd.add("unpenis", "Penis off", function()
-	local char = Plr.Character
-	if char then
-		for _, v in pairs(char:GetChildren()) do
-			if v.Name == "Penis" or v.Name == "PenisTip" then v:Destroy() end
-		end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	local torso
+	if hum and hum.RigType == Enum.HumanoidRigType.R15 then
+		torso = char:FindFirstChild("LowerTorso")
 	end
-	DoNotif("Penis removed")
+	torso = torso or char:FindFirstChild("Torso")
+	if not torso then return DoNotif("No torso") end
+	cleanBodyMods({Cheek = true})
+	local size = math.clamp(tonumber(val) or 1, 1, 8)
+	local skin = getSkinColor()
+	local sizeScale = math.clamp(size / 4, 0.3, 2)
+	local baseSize = Vector3.new(1.58, 1.48, 1.36)
+	local cheekSize = Vector3.new(baseSize.X * size * (1.06 + sizeScale * 0.10), baseSize.Y * size * (1.04 + sizeScale * 0.07), baseSize.Z * size * (1.05 + sizeScale * 0.13))
+	local ox = math.clamp(torso.Size.X * 0.25 + cheekSize.X * 0.135, 0.46, math.max(0.70, torso.Size.X * 0.55))
+	local oy
+	if hum and hum.RigType == Enum.HumanoidRigType.R15 then
+		oy = torso.Size.Y * 0.30 + cheekSize.Y * 0.035
+	else
+		oy = -(0.66 + cheekSize.Y * 0.05)
+	end
+	local oz = torso.Size.Z * 0.42 + cheekSize.Y * 0.5 * 0.41
+	for _, side in ipairs({-1, 1}) do
+		local cheek = makeModPart(Enum.PartType.Ball, cheekSize, skin, "Cheek", char)
+		cheek.CFrame = torso.CFrame * CFrame.new(side * ox, oy, oz)
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = torso
+		weld.Part1 = cheek
+		weld.Parent = cheek
+	end
+	DoNotif("Ass " .. size)
+end, true)
+cmd.add("unass", "Ass off", function()
+	cleanBodyMods({Cheek = true})
+	DoNotif("Ass removed")
 end)
 
-cmd.add("ass", "Ass", function()
+cmd.addArg("penis", "Penis <length 0.5-6>", function(val)
 	local char = Plr.Character
 	if not char then return DoNotif("No character") end
-	if char:FindFirstChild("AssL") then return DoNotif("Already has ass") end
-	local torso = char:FindFirstChild("LowerTorso") or char:FindFirstChild("Torso")
-	if not torso then return DoNotif("No torso found") end
-	makeBodyPart(torso, "AssL", Vector3.new(0.5, 0.5, 0.5), Vector3.new(-0.3, -0.3, 0.5))
-	makeBodyPart(torso, "AssR", Vector3.new(0.5, 0.5, 0.5), Vector3.new(0.3, -0.3, 0.5))
-	DoNotif("Ass added")
-end)
-cmd.add("unass", "Ass off", function()
-	local char = Plr.Character
-	if char then
-		for _, v in pairs(char:GetChildren()) do
-			if v.Name == "AssL" or v.Name == "AssR" then v:Destroy() end
-		end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	local torso
+	if hum and hum.RigType == Enum.HumanoidRigType.R15 then
+		torso = char:FindFirstChild("LowerTorso")
 	end
-	DoNotif("Ass removed")
+	torso = torso or char:FindFirstChild("Torso")
+	if not torso then return DoNotif("No torso") end
+	cleanBodyMods({Balls = true, penis = true})
+	local value = math.clamp(tonumber(val) or 1, 0.5, 6)
+	local skin = getSkinColor()
+	local shaftLength = 1.42 + value * 0.85
+	local shaftRadius = math.clamp(0.34 + value * 0.042, 0.35, 0.58)
+	local ballRadius = math.clamp(0.49 + value * 0.042, 0.50, 0.78)
+	local tipRadius = math.clamp(shaftRadius * 1.24, 0.39, 0.65)
+	local offsetY = (hum and hum.RigType == Enum.HumanoidRigType.R15) and -0.98 or -1.40
+	local scrotumSpread = math.clamp(ballRadius * 0.44, 0.21, 0.36)
+	local shaftBaseOffset = (hum and hum.RigType == Enum.HumanoidRigType.R15) and 0.46 or 0.62
+	local shaftBaseZ = -(torso.Size.Z * 0.5 + shaftRadius * 0.11)
+	local shaftForwardBias = math.max(0, shaftLength * 0.5 - shaftRadius * 0.88)
+	local leftBall = makeModPart(Enum.PartType.Ball, Vector3.new(ballRadius * 2, ballRadius * 2.08, ballRadius * 1.98), skin, "Balls", char)
+	leftBall.CFrame = torso.CFrame * CFrame.new(-scrotumSpread, offsetY, -0.74 - shaftRadius * 0.46)
+	local lw1 = Instance.new("WeldConstraint")
+	lw1.Part0 = torso
+	lw1.Part1 = leftBall
+	lw1.Parent = leftBall
+	local rightBall = makeModPart(Enum.PartType.Ball, Vector3.new(ballRadius * 2, ballRadius * 2.08, ballRadius * 1.98), skin, "Balls", char)
+	rightBall.CFrame = torso.CFrame * CFrame.new(scrotumSpread, offsetY, -0.74 - shaftRadius * 0.46)
+	local lw2 = Instance.new("WeldConstraint")
+	lw2.Part0 = torso
+	lw2.Part1 = rightBall
+	lw2.Parent = rightBall
+	local shaft = makeModPart(Enum.PartType.Cylinder, Vector3.new(shaftLength, shaftRadius * 2, shaftRadius * 2), skin, "penis", char)
+	local shaftCF = torso.CFrame * CFrame.new(0, offsetY + shaftBaseOffset, shaftBaseZ) * CFrame.Angles(0, math.rad(270), 0) * CFrame.new(-shaftForwardBias, 0, 0)
+	shaft.CFrame = shaftCF
+	local sw = Instance.new("WeldConstraint")
+	sw.Part0 = torso
+	sw.Part1 = shaft
+	sw.Parent = shaft
+	local tip = makeModPart(Enum.PartType.Ball, Vector3.new(tipRadius * 2.15, tipRadius * 2.05, tipRadius * 2.05), pinkColor, "penis", char)
+	tip.CFrame = shaft.CFrame * CFrame.new(-shaftLength * 0.5, 0, 0)
+	local tw = Instance.new("WeldConstraint")
+	tw.Part0 = shaft
+	tw.Part1 = tip
+	tw.Parent = tip
+	DoNotif("Penis " .. value)
+end, true)
+cmd.add("unpenis", "Penis off", function()
+	cleanBodyMods({Balls = true, penis = true})
+	DoNotif("Penis removed")
 end)
 
 cmd.add("ff", "Gives you a ForceField", function()
@@ -2379,6 +2500,76 @@ cmd.addArg("deleteclass", "Removes parts of a classname [classname]", function(n
 	end
 	DoNotif("Deleted class: " .. name)
 end)
+local partsizeData = {exact = {}, partial = {}, orig = {}}
+local function cachePart(p)
+	if not (p and p.Parent) then return end
+	if not partsizeData.orig[p] then
+		partsizeData.orig[p] = {Size = p.Size, Transparency = p.Transparency, CanCollide = p.CanCollide, Material = p.Material, Color = p.Color}
+	end
+end
+local function applyPartsize(p, sizeVec)
+	if not (p and p.Parent and p:IsA("BasePart")) then return end
+	cachePart(p)
+	pcall(function()
+		p.Size = sizeVec
+		p.Transparency = 0.5
+		p.CanCollide = false
+		p.Material = Enum.Material.Neon
+		p.Color = Color3.new(0, 0, 0)
+	end)
+end
+local function restorePart(p)
+	local pr = partsizeData.orig[p]
+	if pr and p and p.Parent then
+		pcall(function()
+			p.Size = pr.Size
+			p.Transparency = pr.Transparency
+			p.CanCollide = pr.CanCollide
+			p.Material = pr.Material
+			p.Color = pr.Color
+		end)
+	end
+	partsizeData.orig[p] = nil
+end
+cmd.addArg("partsize", "Grow part exact name [name size]", function(arg)
+	local name, s = arg:match("^(.-)%s+(.+)$")
+	if not name or not s then return DoNotif("Usage: partsize name size") end
+	local n = tonumber(s)
+	if not n then return DoNotif("Invalid size") end
+	n = math.clamp(n, 0.1, 10000)
+	partsizeData.exact[Lower(name)] = Vector3.new(n, n, n)
+	local count = 0
+	for _, desc in pairs(Workspace:GetDescendants()) do
+		if desc:IsA("BasePart") and Lower(desc.Name) == Lower(name) then
+			applyPartsize(desc, Vector3.new(n, n, n))
+			count = count + 1
+		end
+	end
+	DoNotif("Partsize " .. name .. " = " .. n .. " (" .. count .. " parts)")
+end, true)
+cmd.addArg("partsizefind", "Grow part partial name [term size]", function(arg)
+	local name, s = arg:match("^(.-)%s+(.+)$")
+	if not name or not s then return DoNotif("Usage: partsizefind term size") end
+	local n = tonumber(s)
+	if not n then return DoNotif("Invalid size") end
+	n = math.clamp(n, 0.1, 10000)
+	partsizeData.partial[Lower(name)] = Vector3.new(n, n, n)
+	local count = 0
+	for _, desc in pairs(Workspace:GetDescendants()) do
+		if desc:IsA("BasePart") and Lower(desc.Name):find(Lower(name), 1, true) then
+			applyPartsize(desc, Vector3.new(n, n, n))
+			count = count + 1
+		end
+	end
+	DoNotif("Partsizefind " .. name .. " = " .. n .. " (" .. count .. " parts)")
+end, true)
+cmd.add("unpartsize", "Undo all partsize changes", function()
+	for p, _ in pairs(partsizeData.orig) do restorePart(p) end
+	partsizeData.exact = {}
+	partsizeData.partial = {}
+	partsizeData.orig = {}
+	DoNotif("Partsize undone")
+end)
 cmd.add("deleteinvisparts", "Deletes invisible parts", function()
 	local count = 0
 	for _, desc in pairs(Workspace:GetDescendants()) do
@@ -2849,11 +3040,6 @@ cmd.addArg("chat", "Chats for you [message]", function(msg)
 		LocalPlayer:Chat(msg)
 	end)
 end)
-cmd.add("players", "Lists all players in server", function()
-	local list = {}
-	for _, p in pairs(Players:GetPlayers()) do table.insert(list, p.Name .. " (" .. p.DisplayName .. ")") end
-	DoNotif(table.concat(list, ", "))
-end)
 cmd.add("console", "Opens developer console", function()
 	StarterGui:SetCore("DevConsoleVisible", true)
 end)
@@ -3117,15 +3303,11 @@ cmd.add("setspawn", "Sets your spawn point", function()
 		DoNotif("Spawn created")
 	end
 end)
-cmd.add("nohats", "Drop all of your hats", function()
-	local char = Plr.Character
-	if not char then return end
-	for _, v in pairs(char:GetChildren()) do
-		if v:IsA("Accessory") then v.Parent = Workspace end
-	end
-end)
-cmd.add("aimbot", "Aimbot GUI", function()
-	DoNotif("Aimbot requires external module")
+cmd.add("aimbot", "Aimbot GUI (Vyperia)", function()
+	pcall(function()
+		loadstring(game:HttpGet("https://raw.githubusercontent.com/ltseverydayyou/uuuuuuu/refs/heads/main/NewAimbot.lua"))()
+	end)
+	DoNotif("Aimbot loaded!")
 end)
 cmd.add("nocooldown", "No cooldown on tools", function()
 	if loops.nocooldown then return DoNotif("Already enabled") end
@@ -3375,4 +3557,3 @@ end)
 
 DoNotif("Custom Commands Panel loaded! Press RightShift to toggle UI.")
 end)
-

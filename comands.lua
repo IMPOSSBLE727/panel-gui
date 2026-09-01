@@ -18,6 +18,68 @@ local StarterPack = game:GetService("StarterPack")
 local Plr = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
+local function getHiddenUI()
+	local ok, hui = pcall(function()
+		if type(gethui) == "function" then return gethui() end
+		if type(gethiddenui) == "function" then return gethiddenui() end
+		if type(gethiddengui) == "function" then return gethiddengui() end
+		if type(get_hidden_ui) == "function" then return get_hidden_ui() end
+		if type(get_hidden_gui) == "function" then return get_hidden_gui() end
+		return nil
+	end)
+	if ok and hui and typeof(hui) == "Instance" then return hui end
+	return nil
+end
+
+local function safeCloneRef(v)
+	if type(cloneref) == "function" and typeof(v) == "Instance" then
+		local ok, ref = pcall(cloneref, v)
+		if ok and ref then return ref end
+	end
+	return v
+end
+
+local function randomString(len)
+	local s = ""
+	for i = 1, len or 16 do
+		s = s .. string.char(math.random(97, 122))
+	end
+	return s
+end
+
+local function protectGui(gui)
+	if typeof(gui) ~= "Instance" then return end
+	local target = getHiddenUI()
+	if not target then
+		pcall(function() target = CG end)
+		if not target then target = Plr:WaitForChild("PlayerGui") end
+	end
+	gui.Name = randomString(20)
+	gui.ResetOnSpawn = false
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+	gui.DisplayOrder = 0x7FFFFFFF
+	gui.IgnoreGuiInset = true
+	gui.Parent = target
+	gui.AncestryChanged:Connect(function()
+		if gui.Parent ~= target then
+			pcall(function() gui.Parent = target end)
+		end
+	end)
+	task.spawn(function()
+		while gui and gui.Parent do
+			task.wait(0.75)
+			pcall(function()
+				gui.Name = gui.Name
+				gui.ResetOnSpawn = false
+				gui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+				gui.DisplayOrder = 0x7FFFFFFF
+				gui.IgnoreGuiInset = true
+				if gui.Parent ~= target then gui.Parent = target end
+			end)
+		end
+	end)
+end
+
 pcall(function()
 	if identifyexecutor then
 		local execName, execVer = identifyexecutor()
@@ -1083,7 +1145,12 @@ cmd.addArg("espteam", "ESP players in a specific team [teamname]", function(name
 end)
 cmd.add("esplocator", "Track ESP with distance/direction", function()
 	if loops.esplocator then return DoNotif("Already enabled") end
-	local screenGui = InstanceNew("ScreenGui", {Parent = CG})
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = randomString(20)
+	screenGui.ResetOnSpawn = false
+	pcall(function() protectGui(screenGui) end)
+	if not screenGui.Parent then pcall(function() screenGui.Parent = CG end) end
+	if not screenGui.Parent then screenGui.Parent = Plr.PlayerGui end
 	loops.esplocator = screenGui
 	loops.esplocatorConn = RunService.Heartbeat:Connect(function()
 		if not screenGui or not screenGui.Parent then return end
@@ -3179,9 +3246,14 @@ cmd.add("commandcount", "Counts how many commands NA has", function()
 	DoNotif("Commands: " .. count)
 end)
 cmd.add("notepad", "Integrated notepad", function()
-	local sg = InstanceNew("ScreenGui", {Parent = CG})
-	local frame = InstanceNew("Frame", {Position = UDim2.new(0.3, 0, 0.3, 0), Size = UDim2.new(0.4, 0, 0.4, 0), BackgroundColor3 = Color3.fromRGB(30, 30, 30), BorderSizePixel = 0, Parent = sg})
-	local tb = InstanceNew("TextBox", {Size = UDim2.new(1, -10, 1, -10), Position = UDim2.new(0, 5, 0, 5), BackgroundColor3 = Color3.fromRGB(40, 40, 40), TextColor3 = Color3.fromRGB(255, 255, 255), Text = "", TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, MultiLine = true, ClearTextOnFocus = false, Font = Enum.Font.RobotoMono, TextSize = 14, Parent = frame})
+	local sg = Instance.new("ScreenGui")
+	sg.Name = randomString(20)
+	sg.ResetOnSpawn = false
+	pcall(function() protectGui(sg) end)
+	if not sg.Parent then pcall(function() sg.Parent = CG end) end
+	if not sg.Parent then sg.Parent = Plr.PlayerGui end
+	local frame = Instance.new("Frame", {Position = UDim2.new(0.3, 0, 0.3, 0), Size = UDim2.new(0.4, 0, 0.4, 0), BackgroundColor3 = Color3.fromRGB(30, 30, 30), BorderSizePixel = 0, Parent = sg})
+	local tb = Instance.new("TextBox", {Size = UDim2.new(1, -10, 1, -10), Position = UDim2.new(0, 5, 0, 5), BackgroundColor3 = Color3.fromRGB(40, 40, 40), TextColor3 = Color3.fromRGB(255, 255, 255), Text = "", TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, MultiLine = true, ClearTextOnFocus = false, Font = Enum.Font.RobotoMono, TextSize = 14, Parent = frame})
 end)
 cmd.add("clear", "Clears output", function()
 	pcall(function()
@@ -3444,8 +3516,16 @@ cmd.add("unload", "Unload Nameless Admin", function()
 	loops = {}
 	espList = {}
 	chamsList = {}
-	pcall(function() CG:ClearAllChildren() end)
-	pcall(function() Plr.PlayerGui:ClearAllChildren() end)
+	pcall(function()
+		for _, g in pairs(CG:GetDescendants()) do
+			if g:IsA("ScreenGui") and g.Name == "CustomCommandsUI" then g:Destroy() end
+		end
+	end)
+	pcall(function()
+		for _, g in pairs(Plr.PlayerGui:GetDescendants()) do
+			if g:IsA("ScreenGui") and g.Name == "CustomCommandsUI" then g:Destroy() end
+		end
+	end)
 	DoNotif("Unloaded")
 end)
 cmd.add("exit", "Close down Roblox", function()
@@ -3491,7 +3571,10 @@ local function createUI()
 	sg.Name = "CustomCommandsUI"
 	sg.ResetOnSpawn = false
 	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	pcall(function() sg.Parent = CG end)
+	pcall(function() protectGui(sg) end)
+	if not sg.Parent then
+		pcall(function() sg.Parent = CG end)
+	end
 	if not sg.Parent then sg.Parent = Plr.PlayerGui end
 
 	local mainFrame = Instance.new("Frame")

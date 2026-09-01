@@ -3516,6 +3516,64 @@ local function createUI()
 
 	closeBtn.MouseButton1Click:Connect(function() sg.Enabled = false end)
 
+	-- SEARCH BOX
+	local searchBox = Instance.new("TextBox")
+	searchBox.Position = UDim2.new(0, 10, 0, 40)
+	searchBox.Size = UDim2.new(1, -20, 0, 28)
+	searchBox.BackgroundColor3 = Color3.fromRGB(160, 180, 210)
+	searchBox.BackgroundTransparency = 0.6
+	searchBox.TextColor3 = Color3.new(0, 0, 0)
+	searchBox.PlaceholderText = "Search commands..."
+	searchBox.PlaceholderColor3 = Color3.fromRGB(100, 120, 140)
+	searchBox.Font = Enum.Font.Gotham
+	searchBox.TextSize = 12
+	searchBox.ClearTextOnFocus = false
+	searchBox.BorderSizePixel = 0
+	searchBox.Parent = mainFrame
+	makeCorner(UDim.new(0, 8)).Parent = searchBox
+
+	-- SCROLL FRAME
+	local scrollFrame = Instance.new("ScrollingFrame")
+	scrollFrame.Position = UDim2.new(0, 10, 0, 76)
+	scrollFrame.Size = UDim2.new(1, -20, 1, -150)
+	scrollFrame.BackgroundTransparency = 1
+	scrollFrame.ScrollBarThickness = 4
+	scrollFrame.ScrollBarImageColor3 = Color3.fromRGB(180, 220, 255)
+	scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+	scrollFrame.BorderSizePixel = 0
+	scrollFrame.Parent = mainFrame
+	Instance.new("UIListLayout", scrollFrame).Padding = UDim.new(0, 3)
+
+	-- INPUT BOX
+	local inputBox = Instance.new("TextBox")
+	inputBox.Position = UDim2.new(0, 10, 1, -62)
+	inputBox.Size = UDim2.new(1, -80, 0, 28)
+	inputBox.BackgroundColor3 = Color3.fromRGB(160, 180, 210)
+	inputBox.BackgroundTransparency = 0.6
+	inputBox.TextColor3 = Color3.new(0, 0, 0)
+	inputBox.PlaceholderText = "Type command..."
+	inputBox.PlaceholderColor3 = Color3.fromRGB(100, 120, 140)
+	inputBox.Font = Enum.Font.Gotham
+	inputBox.TextSize = 12
+	inputBox.ClearTextOnFocus = false
+	inputBox.BorderSizePixel = 0
+	inputBox.Parent = mainFrame
+	makeCorner(UDim.new(0, 8)).Parent = inputBox
+
+	-- EXEC BUTTON
+	local execBtn = Instance.new("TextButton")
+	execBtn.Size = UDim2.new(0, 55, 0, 28)
+	execBtn.Position = UDim2.new(1, -65, 1, -62)
+	execBtn.BackgroundColor3 = Color3.fromRGB(100, 200, 150)
+	execBtn.BackgroundTransparency = 0.5
+	execBtn.Text = "Exec"
+	execBtn.TextColor3 = Color3.new(0, 0, 0)
+	execBtn.Font = Enum.Font.GothamBold
+	execBtn.TextSize = 12
+	execBtn.BorderSizePixel = 0
+	execBtn.Parent = mainFrame
+	makeCorner(UDim.new(0, 8)).Parent = execBtn
+
 	local minBtn = Instance.new("TextButton")
 	minBtn.AnchorPoint = Vector2.new(0.5, 0.5)
 	minBtn.Size = UDim2.new(0, 24, 0, 24)
@@ -3560,64 +3618,6 @@ local function createUI()
 			minIcon.Text = "-"
 		end
 	end)
-
-	-- SEARCH BOX
-	local searchBox = Instance.new("TextBox")
-	searchBox.Position = UDim2.new(0, 10, 0, 40)
-	searchBox.Size = UDim2.new(1, -20, 0, 28)
-	searchBox.BackgroundColor3 = Color3.fromRGB(160, 180, 210)
-	searchBox.BackgroundTransparency = 0.6
-	searchBox.TextColor3 = Color3.new(0, 0, 0)
-	searchBox.PlaceholderText = "Search commands..."
-	searchBox.PlaceholderColor3 = Color3.fromRGB(180, 200, 220)
-	searchBox.Font = Enum.Font.Gotham
-	searchBox.TextSize = 12
-	searchBox.ClearTextOnFocus = false
-	searchBox.BorderSizePixel = 0
-	searchBox.Parent = mainFrame
-	makeCorner(UDim.new(0, 8)).Parent = searchBox
-
-	-- SCROLL FRAME
-	local scrollFrame = Instance.new("ScrollingFrame")
-	scrollFrame.Position = UDim2.new(0, 10, 0, 76)
-	scrollFrame.Size = UDim2.new(1, -20, 1, -150)
-	scrollFrame.BackgroundTransparency = 1
-	scrollFrame.ScrollBarThickness = 4
-	scrollFrame.ScrollBarImageColor3 = Color3.fromRGB(180, 220, 255)
-	scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
-	scrollFrame.BorderSizePixel = 0
-	scrollFrame.Parent = mainFrame
-	Instance.new("UIListLayout", scrollFrame).Padding = UDim.new(0, 3)
-
-	-- INPUT BOX
-	local inputBox = Instance.new("TextBox")
-	inputBox.Position = UDim2.new(0, 10, 1, -62)
-	inputBox.Size = UDim2.new(1, -80, 0, 28)
-	inputBox.BackgroundColor3 = Color3.fromRGB(160, 180, 210)
-	inputBox.BackgroundTransparency = 0.6
-	inputBox.TextColor3 = Color3.new(0, 0, 0)
-	inputBox.PlaceholderText = "Type command..."
-	inputBox.PlaceholderColor3 = Color3.fromRGB(180, 200, 220)
-	inputBox.Font = Enum.Font.Gotham
-	inputBox.TextSize = 12
-	inputBox.ClearTextOnFocus = false
-	inputBox.BorderSizePixel = 0
-	inputBox.Parent = mainFrame
-	makeCorner(UDim.new(0, 8)).Parent = inputBox
-
-	-- EXEC BUTTON
-	local execBtn = Instance.new("TextButton")
-	execBtn.Size = UDim2.new(0, 55, 0, 28)
-	execBtn.Position = UDim2.new(1, -65, 1, -62)
-	execBtn.BackgroundColor3 = Color3.fromRGB(100, 200, 150)
-	execBtn.BackgroundTransparency = 0.5
-	execBtn.Text = "Exec"
-	execBtn.TextColor3 = Color3.new(0, 0, 0)
-	execBtn.Font = Enum.Font.GothamBold
-	execBtn.TextSize = 12
-	execBtn.BorderSizePixel = 0
-	execBtn.Parent = mainFrame
-	makeCorner(UDim.new(0, 8)).Parent = execBtn
 
 	local function buildList(filter)
 		for _, child in pairs(scrollFrame:GetChildren()) do

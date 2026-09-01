@@ -3458,6 +3458,7 @@ local function createUI()
 	mainFrame.BackgroundTransparency = BG_T
 	mainFrame.BorderSizePixel = 0
 	mainFrame.Active = true
+	mainFrame.ClipsDescendants = true
 	mainFrame.Parent = sg
 	makeCorner(UDim.new(0, CORNER)).Parent = mainFrame
 	makeStroke(mainFrame)
@@ -3486,7 +3487,7 @@ local function createUI()
 	titleText.Position = UDim2.new(0, 14, 0, 0)
 	titleText.BackgroundTransparency = 1
 	titleText.Text = "Ghosts \226\128\142 Commands"
-	titleText.TextColor3 = W
+	titleText.TextColor3 = Color3.new(0, 0, 0)
 	titleText.Font = Enum.Font.GothamBold
 	titleText.TextSize = 14
 	titleText.TextXAlignment = Enum.TextXAlignment.Left
@@ -3508,12 +3509,57 @@ local function createUI()
 	closeIcon.Size = UDim2.new(1, 0, 1, 0)
 	closeIcon.BackgroundTransparency = 1
 	closeIcon.Text = "X"
-	closeIcon.TextColor3 = W
+	closeIcon.TextColor3 = Color3.new(0, 0, 0)
 	closeIcon.Font = Enum.Font.GothamBold
 	closeIcon.TextSize = 11
 	closeIcon.Parent = closeBtn
 
 	closeBtn.MouseButton1Click:Connect(function() sg.Enabled = false end)
+
+	local minBtn = Instance.new("TextButton")
+	minBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+	minBtn.Size = UDim2.new(0, 24, 0, 24)
+	minBtn.Position = UDim2.new(1, -50, 0.5, 0)
+	minBtn.BackgroundColor3 = W
+	minBtn.BackgroundTransparency = 1
+	minBtn.Text = ""
+	minBtn.AutoButtonColor = false
+	minBtn.Parent = title
+	makeCorner(UDim.new(1, 0)).Parent = minBtn
+	makeStroke(minBtn, 0.5)
+
+	local minIcon = Instance.new("TextLabel")
+	minIcon.Size = UDim2.new(1, 0, 1, 0)
+	minIcon.BackgroundTransparency = 1
+	minIcon.Text = "-"
+	minIcon.TextColor3 = Color3.new(0, 0, 0)
+	minIcon.Font = Enum.Font.GothamBold
+	minIcon.TextSize = 16
+	minIcon.Parent = minBtn
+
+	local minimized = false
+	minBtn.MouseButton1Click:Connect(function()
+		minimized = not minimized
+		if minimized then
+			TweenService:Create(mainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				Size = UDim2.new(0, 380, 0, 32)
+			}):Play()
+			scrollFrame.Visible = false
+			searchBox.Visible = false
+			inputBox.Visible = false
+			execBtn.Visible = false
+			minIcon.Text = "+"
+		else
+			TweenService:Create(mainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				Size = UDim2.new(0, 380, 0, 500)
+			}):Play()
+			scrollFrame.Visible = true
+			searchBox.Visible = true
+			inputBox.Visible = true
+			execBtn.Visible = true
+			minIcon.Text = "-"
+		end
+	end)
 
 	-- SEARCH BOX
 	local searchBox = Instance.new("TextBox")
@@ -3521,7 +3567,7 @@ local function createUI()
 	searchBox.Size = UDim2.new(1, -20, 0, 28)
 	searchBox.BackgroundColor3 = Color3.fromRGB(160, 180, 210)
 	searchBox.BackgroundTransparency = 0.6
-	searchBox.TextColor3 = W
+	searchBox.TextColor3 = Color3.new(0, 0, 0)
 	searchBox.PlaceholderText = "Search commands..."
 	searchBox.PlaceholderColor3 = Color3.fromRGB(180, 200, 220)
 	searchBox.Font = Enum.Font.Gotham
@@ -3549,7 +3595,7 @@ local function createUI()
 	inputBox.Size = UDim2.new(1, -80, 0, 28)
 	inputBox.BackgroundColor3 = Color3.fromRGB(160, 180, 210)
 	inputBox.BackgroundTransparency = 0.6
-	inputBox.TextColor3 = W
+	inputBox.TextColor3 = Color3.new(0, 0, 0)
 	inputBox.PlaceholderText = "Type command..."
 	inputBox.PlaceholderColor3 = Color3.fromRGB(180, 200, 220)
 	inputBox.Font = Enum.Font.Gotham
@@ -3566,7 +3612,7 @@ local function createUI()
 	execBtn.BackgroundColor3 = Color3.fromRGB(100, 200, 150)
 	execBtn.BackgroundTransparency = 0.5
 	execBtn.Text = "Exec"
-	execBtn.TextColor3 = W
+	execBtn.TextColor3 = Color3.new(0, 0, 0)
 	execBtn.Font = Enum.Font.GothamBold
 	execBtn.TextSize = 12
 	execBtn.BorderSizePixel = 0
@@ -3585,7 +3631,7 @@ local function createUI()
 				btn.BackgroundColor3 = Color3.fromRGB(160, 180, 210)
 				btn.BackgroundTransparency = 0.7
 				btn.Text = "  " .. name .. " - " .. desc
-				btn.TextColor3 = W
+				btn.TextColor3 = Color3.new(0, 0, 0)
 				btn.TextXAlignment = Enum.TextXAlignment.Left
 				btn.Font = Enum.Font.Gotham
 				btn.TextSize = 11

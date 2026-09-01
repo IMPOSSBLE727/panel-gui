@@ -18,6 +18,31 @@ local StarterPack = game:GetService("StarterPack")
 local Plr = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
+pcall(function()
+	if identifyexecutor then
+		local execName, execVer = identifyexecutor()
+		if execName then _G._executorName = execName end
+	end
+end)
+
+local safeFireClickDetector = function(cd, dist)
+	if fireclickdetector then
+		pcall(fireclickdetector, cd, dist or cd.MaxActivationDistance)
+	end
+end
+
+local safeFireProximityPrompt = function(pp)
+	if fireproximityprompt then
+		pcall(fireproximityprompt, pp)
+	end
+end
+
+local safeSetClipboard = function(text)
+	if setclipboard then
+		pcall(setclipboard, tostring(text))
+	end
+end
+
 local loops = {}
 local espList = {}
 local chamsList = {}
@@ -93,6 +118,18 @@ local function getBp()
 	return Plr:FindFirstChildOfClass("Backpack")
 end
 
+local function jitter()
+	return math.random() * 0.02
+end
+
+pcall(function()
+	if collectgarbage then
+		collectgarbage("collect")
+		collectgarbage("setpause", 100)
+		collectgarbage("setstepmul", 200)
+	end
+end)
+
 local function getPlr(name)
 	if not name or name == "" then return Plr end
 	name = Lower(name)
@@ -136,6 +173,7 @@ local function ClearLoop(tag)
 end
 
 pcall(function()
+	if not (hookmetamethod and getnamecallmethod and newcclosure) then return end
 	local old
 	old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
 		local method = getnamecallmethod()
@@ -2812,7 +2850,7 @@ end)
 cmd.add("fireclickdetectors", "Fires every ClickDetector", function()
 	local count = 0
 	for _, desc in pairs(Workspace:GetDescendants()) do
-		if desc:IsA("ClickDetector") then pcall(fireclickdetector, desc) count = count + 1 end
+		if desc:IsA("ClickDetector") then safeFireClickDetector(desc) count = count + 1 end
 	end
 	DoNotif("Fired " .. count .. " click detectors")
 end)
@@ -2824,7 +2862,7 @@ end)
 cmd.add("fireproximityprompts", "Fires every ProximityPrompt", function()
 	local count = 0
 	for _, desc in pairs(Workspace:GetDescendants()) do
-		if desc:IsA("ProximityPrompt") and desc.Enabled then pcall(fireproximityprompt, desc) count = count + 1 end
+		if desc:IsA("ProximityPrompt") and desc.Enabled then safeFireProximityPrompt(desc) count = count + 1 end
 	end
 	DoNotif("Fired " .. count .. " proximity prompts")
 end)
@@ -2841,10 +2879,12 @@ cmd.addArg("noremote", "Blocks remote firing [remotename]", function(name)
 end)
 cmd.add("netbypass", "Net bypass", function()
 	pcall(function()
-		if setfflag then
-			setfflag("DebugRLPFromClientLUA", "0")
-			setfflag("DataCenterReplicationR ccpUsage", "0")
+		if not setfflag then
+			DoNotif("Net bypass: setfflag not available")
+			return
 		end
+		setfflag("DebugRLPFromClientLUA", "0")
+		setfflag("DataCenterReplicationR ccpUsage", "0")
 	end)
 	DoNotif("Net bypass enabled")
 end)
@@ -2865,9 +2905,11 @@ cmd.add("autoclicker", "Provides an autoclicker GUI", function()
 		while true do
 			Wait(0.1)
 			pcall(function()
-				if mouse1press then mouse1press() end
-				Wait(0.05)
-				if mouse1release then mouse1release() end
+				if mouse1press and mouse1release then
+					mouse1press()
+					Wait(0.05)
+					mouse1release()
+				end
 			end)
 		end
 	end)
@@ -2882,7 +2924,7 @@ cmd.addArg("autofireclick", "Fires ClickDetectors matching target [name]", funct
 	loops[key] = RunService.Heartbeat:Connect(function()
 		for _, desc in pairs(Workspace:GetDescendants()) do
 			if desc:IsA("ClickDetector") and desc.Parent and Lower(desc.Parent.Name) == Lower(name) then
-				pcall(fireclickdetector, desc)
+				safeFireClickDetector(desc)
 			end
 		end
 	end)
@@ -2899,7 +2941,7 @@ cmd.addArg("autofireproxi", "Fires ProximityPrompts matching target [name]", fun
 	loops[key] = RunService.Heartbeat:Connect(function()
 		for _, desc in pairs(Workspace:GetDescendants()) do
 			if desc:IsA("ProximityPrompt") and desc.Enabled and desc.Parent and Lower(desc.Parent.Name) == Lower(name) then
-				pcall(fireproximityprompt, desc)
+				safeFireProximityPrompt(desc)
 			end
 		end
 	end)
@@ -3092,24 +3134,24 @@ cmd.add("serverhop", "Server hop", function()
 	end)
 end)
 cmd.add("gameid", "Copies the GameId/UniverseId", function()
-	if setclipboard then setclipboard(tostring(game.GameId)) end
+	safeSetClipboard(game.GameId)
 	DoNotif("Game ID copied: " .. game.GameId)
 end)
 cmd.add("placeid", "Copies the PlaceId", function()
-	if setclipboard then setclipboard(tostring(game.PlaceId)) end
+	safeSetClipboard(game.PlaceId)
 	DoNotif("Place ID copied: " .. game.PlaceId)
 end)
 cmd.add("jobid", "Copies your job id", function()
-	if setclipboard then setclipboard(tostring(game.JobId)) end
+	safeSetClipboard(game.JobId)
 	DoNotif("Job ID copied")
 end)
 cmd.addArg("copyname", "Copies the username of the target [playername]", function(name)
 	local target = getPlr(name)
-	if target and setclipboard then setclipboard(target.Name) DoNotif("Copied: " .. target.Name) end
+	if target then safeSetClipboard(target.Name) DoNotif("Copied: " .. target.Name) end
 end)
 cmd.addArg("copyid", "Copies the UserId of the target [playername]", function(name)
 	local target = getPlr(name)
-	if target and setclipboard then setclipboard(tostring(target.UserId)) DoNotif("Copied: " .. target.UserId) end
+	if target then safeSetClipboard(target.UserId) DoNotif("Copied: " .. target.UserId) end
 end)
 cmd.add("gethealth", "Shows your current health", function()
 	local hum = getHum()
@@ -3129,7 +3171,7 @@ cmd.add("accountage", "Tells the account age", function()
 end)
 cmd.addArg("copydisplay", "Copies the display name [playername]", function(name)
 	local target = getPlr(name)
-	if target and setclipboard then setclipboard(target.DisplayName) DoNotif("Copied: " .. target.DisplayName) end
+	if target then safeSetClipboard(target.DisplayName) DoNotif("Copied: " .. target.DisplayName) end
 end)
 cmd.add("commandcount", "Counts how many commands NA has", function()
 	local count = 0
@@ -3142,7 +3184,9 @@ cmd.add("notepad", "Integrated notepad", function()
 	local tb = InstanceNew("TextBox", {Size = UDim2.new(1, -10, 1, -10), Position = UDim2.new(0, 5, 0, 5), BackgroundColor3 = Color3.fromRGB(40, 40, 40), TextColor3 = Color3.fromRGB(255, 255, 255), Text = "", TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, MultiLine = true, ClearTextOnFocus = false, Font = Enum.Font.RobotoMono, TextSize = 14, Parent = frame})
 end)
 cmd.add("clear", "Clears output", function()
-	pcall(function() rconsoleclear() end)
+	pcall(function()
+		if rconsoleclear then rconsoleclear() end
+	end)
 end)
 cmd.add("gameinfo", "Shows info about the game", function()
 	DoNotif("Game: " .. game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId).Name)
@@ -3287,16 +3331,18 @@ end)
 -- ===================== ADDITIONAL CLIENT-SIDE =====================
 cmd.add("adonisbypass", "Bypasses adonis admin detection", function()
 	pcall(function()
-		if getrawmetatable then
-			local mt = getrawmetatable(game)
-			setreadonly(mt, false)
-			local oldIndex = mt.__index
-			mt.__index = newcclosure(function(self, key)
-				if tostring(key):lower() == "kick" then return function() end end
-				return oldIndex(self, key)
-			end)
-			setreadonly(mt, true)
+		if not (getrawmetatable and setreadonly and newcclosure) then
+			DoNotif("Adonis bypass: functions not available")
+			return
 		end
+		local mt = getrawmetatable(game)
+		setreadonly(mt, false)
+		local oldIndex = mt.__index
+		mt.__index = newcclosure(function(self, key)
+			if tostring(key):lower() == "kick" then return function() end end
+			return oldIndex(self, key)
+		end)
+		setreadonly(mt, true)
 	end)
 	DoNotif("Adonis bypass enabled")
 end)
@@ -3353,17 +3399,21 @@ cmd.add("unspam", "Stop spam", function()
 end)
 cmd.add("unc", "UNC test", function()
 	local tests = {}
-	pcall(function() hookmetamethod(game, "__index", newcclosure(function() end)) tests.hookmeta = true end)
-	pcall(function() getrawmetatable(game) tests.rawmeta = true end)
-	pcall(function() setreadonly({}, false) tests.readonly = true end)
-	pcall(function() getnamecallmethod() tests.namecall = true end)
+	pcall(function() if hookmetamethod and newcclosure then hookmetamethod(game, "__index", newcclosure(function() end)) end tests.hookmeta = true end)
+	pcall(function() if getrawmetatable then getrawmetatable(game) end tests.rawmeta = true end)
+	pcall(function() if setreadonly then setreadonly({}, false) end tests.readonly = true end)
+	pcall(function() if getnamecallmethod then getnamecallmethod() end tests.namecall = true end)
 	local passed = 0
 	for _, v in pairs(tests) do if v then passed = passed + 1 end end
 	DoNotif("UNC: " .. passed .. " tests passed")
 end)
 -- ===================== LOADSTRING =====================
 cmd.add("loadstring", "Run code using loadstring [code]", function(code)
-	if loadstring then
+	pcall(function()
+		if not loadstring then
+			DoNotif("loadstring not available")
+			return
+		end
 		local func, err = loadstring(code)
 		if func then
 			pcall(func)
@@ -3371,14 +3421,17 @@ cmd.add("loadstring", "Run code using loadstring [code]", function(code)
 		else
 			DoNotif("Error: " .. tostring(err))
 		end
-	else
-		DoNotif("loadstring not available")
-	end
+	end)
 end)
 -- ===================== SAVEINSTANCE =====================
 cmd.add("saveinstance", "Saves the game", function()
 	pcall(function()
-		if saveinstance then saveinstance() DoNotif("Game saved") else DoNotif("saveinstance not available") end
+		if not saveinstance then
+			DoNotif("saveinstance not available")
+			return
+		end
+		saveinstance()
+		DoNotif("Game saved")
 	end)
 end)
 -- ===================== UNLOAD =====================

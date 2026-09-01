@@ -3131,10 +3131,6 @@ cmd.addArg("copydisplay", "Copies the display name [playername]", function(name)
 	local target = getPlr(name)
 	if target and setclipboard then setclipboard(target.DisplayName) DoNotif("Copied: " .. target.DisplayName) end
 end)
-cmd.add("discord", "Copy an invite link", function()
-	if setclipboard then setclipboard("https://discord.gg/namelessadmin") end
-	DoNotif("Discord link copied")
-end)
 cmd.add("commandcount", "Counts how many commands NA has", function()
 	local count = 0
 	for _ in pairs(Cmds) do count = count + 1 end
@@ -3323,12 +3319,6 @@ cmd.add("setspawn", "Sets your spawn point", function()
 		local sp = InstanceNew("SpawnLocation", {CFrame = CFrame.new(pos), Anchored = true, Size = Vector3.new(5, 1, 5), Parent = Workspace})
 		DoNotif("Spawn created")
 	end
-end)
-cmd.add("aimbot", "Aimbot GUI (Vyperia)", function()
-	pcall(function()
-		loadstring(game:HttpGet("https://raw.githubusercontent.com/ltseverydayyou/uuuuuuu/refs/heads/main/NewAimbot.lua"))()
-	end)
-	DoNotif("Aimbot loaded!")
 end)
 cmd.add("nocooldown", "No cooldown on tools", function()
 	if loops.nocooldown then return DoNotif("Already enabled") end

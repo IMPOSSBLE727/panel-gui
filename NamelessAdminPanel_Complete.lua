@@ -1749,7 +1749,7 @@ end)
 cmd.add("btools", "Gives Building Tools", function()
 	local bp = getBp()
 	if not bp then return end
-	local tools = {"F3Xä¸€æ–¹ã®æ–°ãƒ‡ã‚¹ã‚¯ãƒˆãƒƒãƒ—", "Move", "Resize", "Rotate", "Surface", "Paint", "Material", "Anchor", "Weld", "Delete", "Game"}
+		local tools = {"Move", "Resize", "Rotate", "Surface", "Paint", "Material", "Anchor", "Weld", "Delete", "Game"}
 	for _, name in pairs({"Move", "Resize", "Rotate", "Surface", "Paint", "Material", "Anchor", "Weld", "Delete"}) do
 		local t = InstanceNew("Tool", {CanBeDropped = false, Name = name, RequiresHandle = false})
 		t.Parent = bp
